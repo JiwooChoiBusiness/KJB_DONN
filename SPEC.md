@@ -169,7 +169,12 @@ schemas.py: `ComparePrepareRequest{intent: str, params: dict}`, `ChatRequest{mes
 | GET | /api/decisions?limit=20 | `list[DecisionRecord]`(result 제외 요약) | |
 | GET | /api/decisions/{id} | `DecisionRecord` | |
 | POST | /api/decisions/{id}/replay | `ReplayResponse` | |
-| POST | /api/chat | `ChatReply` | P4 전까지 `guardrails.parse_message` 기반 |
+| POST | /api/chat | `ChatReply`(+`chat_id`) | body `{message, chat_id?}`. Gemini 추출 → 규칙 파서 폴백. 사용자 발화(PII 마스킹본)와 응답을 현재 프로필의 대화 로그에 저장 |
+| GET | /api/chats | `[{id, profile_id, title, created_at, updated_at, message_count}]` | 현재 프로필(페르소나)의 대화 목록, 최근순. 프로필 없으면 guest |
+| POST | /api/chats | 대화 1건 | body `{title?}` 새 대화 |
+| GET | /api/chats/{id}/messages | `[{id, role(user/reply), text, llm_used, action, chips, created_at}]` | 다른 프로필의 대화면 404 |
+| DELETE | /api/chats/{id} | `{ok}` | |
+| GET | /api/meta | `{credit_bands, categories, repay_methods, sort_keys, lender_groups}` | 화면 선택지 |
 | GET | /api/synthetic/{persona_id}/transactions.csv | text/csv | 합성 거래내역 |
 
 main.py: `FastAPI(title="DONN PoC")`, `GET /` → `web/index.html`, `/static` → `web/`. 시작 시 `init_db()`.
@@ -179,7 +184,9 @@ main.py: `FastAPI(title="DONN PoC")`, `GET /` → `web/index.html`, `/static` �
 - 단일 페이지, 빌드 없음. `index.html`, `app.js`, `styles.css`. 폰트 `system-ui, "Malgun Gothic", sans-serif`. 외부 CDN 의존 없음.
 - 레이아웃: 상단 바(좌: 로고 "DONN"과 작은 부제, 우: 원형 아바타 "나"), 좌측 사이드바 250px(배경 #FAFAFA, 우측 1px #E5E7EB, 접기 버튼), 본문 흰색 중앙 정렬 최대 폭 960px.
 - 색: 포인트 #4F46E5, 포인트 연한 배경 #EEF2FF, 텍스트 #111827, 보조 텍스트 #6B7280, 경계 #E5E7EB, 긍정 #059669, 부정 #DC2626, 중립 #6B7280. 카드 radius 16px, 그림자 `0 1px 3px rgba(0,0,0,.06)`. 전송 버튼은 원형 포인트색.
-- 사이드바: `[+ 새 대화]`; "리소스" 그룹: 내 부채, 공시 비교, 소비 패턴, 페르소나 테스트, 결정 기록; "고정" 그룹: 이번 달 행동(top_action 제목, 없으면 "부채를 입력하면 나타나요"); "최근" 그룹: 결정 기록 최근 5개; 하단: 환경설정(모델 설정 읽기 전용 표시).
+- 사이드바(2026-09-06 PMO 수정): 맨 위 "계정 선택 (PoC)" 그룹에 현재 페르소나(아바타 이니셜 + 이름 + "이 계정으로 보는 중")와 "계정 바꾸기" 링크(페르소나 화면). 그 아래 `[+ 새 대화]`; "리소스" 그룹: 내 부채, 공시 비교, 소비 패턴, 결정 기록; "고정" 그룹: 이번 달 행동; "최근" 그룹: 현재 페르소나의 대화 목록(`/api/chats`, 클릭 시 대화 로그 로드); 하단: 환경설정. 상단 바 우측 아바타는 현재 페르소나 이름의 첫 글자.
+- 홈 하단의 원형 아이콘 4개 줄은 제거(PMO 결정). 모든 하위 화면과 비교 2단계에는 "뒤로" 버튼.
+- 로고: DONN 전용 마크(인라인 SVG)와 워드마크. 글꼴: Pretendard(시스템 폴백). 부제는 PMO 확정 문구 사용.
 - 홈(C안): 중앙 큰 제목 "DONN"과 한 줄 부제 "빚의 다음 한 걸음을 숫자로". 아래 인사이트 카드 1~3장(가로 카드, 톤별 좌측 색 바, 제목, 본문, 근거 수치 배지, 질문 버튼(칩), "이 분석은 왜 나왔나요?" 토글). 그 아래 입력 박스(둥근 카드, 좌측 + 버튼, "모드: M0 공시 비교" 배지, 우측 원형 전송 버튼, placeholder "어떤 부채 고민을 도와드릴까요?"). 그 아래 칩 3~5개. 그 아래 원형 아이콘 4개(내 부채, 공시 비교, 소비 패턴, 페르소나). 화면 하단 고정 면책 1줄과 AI 고지 1줄(작은 글씨, 항상 보임).
 - 내 부채: 프로필 요약과 편집(월소득, 고정지출, 변동지출, 비상금, 신용 구간, 플래그 체크박스), 대출 목록 표, 추가/수정 폼(필수 5개: 종류, 잔액, 금리, 남은 개월, 상환방식. 나머지는 접힘), 대출 선택 시 상환표(첫 12행과 합계)와 시나리오 3종 요약 표(총이자, 부채 완료 월, 최소 누적 순현금).
 - 공시 비교: 1단계 조건 확인 카드(추정 필드에 "추정" 배지, 수정 가능, 버튼 "이 조건으로 비교" → user_confirmed=true) → 2단계 결과 블록(정렬 기준 문장, 항목 카드: 순위, 익명 라벨, 금리와 종류 배지("전월 평균" 등), 월 납입, 총이자, 현재 대비 차이, 링크 "금융상품한눈에에서 확인", 유의 문구; 가정 목록; decision_id와 result_hash 작은 글씨; 버튼 "조건 바꿔서 다시 보기"). 실명 표시 금지.

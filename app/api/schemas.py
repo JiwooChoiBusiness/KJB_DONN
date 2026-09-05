@@ -13,6 +13,11 @@ class ComparePrepareRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    chat_id: Optional[str] = None
+
+
+class ChatCreateRequest(BaseModel):
+    title: Optional[str] = None
 
 
 class ReplayResponse(BaseModel):

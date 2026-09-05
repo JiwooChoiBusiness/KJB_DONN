@@ -90,16 +90,24 @@ def _is_generic_phrase(name: str) -> bool:
     return len(rest) <= 1  # 범주 단어를 빼면 남는 게 없으면 브랜드가 없는 일반 명칭
 
 
+_PUBLIC_TOKENS = ("공단", "공사", "진흥원", "위원회", "재단", "시청", "군청", "구청", "도청", "금융감독원", "금융위원회",
+                  "중앙회", "정부", "지자체", "특별자치", "광역시", "특별시")
+_SECTOR_WORDS = {"저축은행", "은행", "카드", "캐피탈", "보험", "증권", "취급 은행", "취급은행", "은행권", "저축은행권"}
+
+
 def _company_name_variants(company_name: Optional[str]) -> list[str]:
     raw = (company_name or "").strip()
     if len(raw) < 2:
+        return []
+    # 공공기관·지자체·업권 일반명은 금지어가 아니다(제도 안내 문장에 정상적으로 등장한다).
+    if raw in _SECTOR_WORDS or any(tok in raw for tok in _PUBLIC_TOKENS):
         return []
     out = [raw]
     cleaned = raw
     for suf in _COMPANY_SUFFIXES:
         cleaned = cleaned.replace(suf, "")
     cleaned = cleaned.strip(" ()")
-    if len(cleaned) >= 3 and cleaned not in _COMMON_WORD_STOPLIST and cleaned != raw:
+    if len(cleaned) >= 3 and cleaned not in _COMMON_WORD_STOPLIST and cleaned not in _SECTOR_WORDS and cleaned != raw:
         out.append(cleaned)
     return out
 

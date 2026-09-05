@@ -166,7 +166,7 @@ def prepare_context(profile: Optional[UserProfile], intent_params: dict[str, Any
         exclude_companies=list(exclude_companies),
         max_rate=max_rate,
         target_loan_id=target_loan_id,
-        estimated_fields=estimated,
+        estimated_fields=list(dict.fromkeys([*(params.get("estimated_fields") or []), *estimated])),  # 호출자가 넘긴 추정 목록 보존(채팅 경로)
         user_confirmed=False,
     )
 

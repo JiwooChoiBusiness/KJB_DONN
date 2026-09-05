@@ -64,6 +64,25 @@ CREATE TABLE IF NOT EXISTS session (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS chats (
+    id          TEXT PRIMARY KEY,
+    profile_id  TEXT NOT NULL,
+    title       TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chats_profile ON chats(profile_id, updated_at);
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     TEXT NOT NULL,
+    role        TEXT NOT NULL,
+    text        TEXT NOT NULL,
+    llm_used    INTEGER NOT NULL DEFAULT 0,
+    action_json TEXT,
+    chips_json  TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id, id);
 """
 
 

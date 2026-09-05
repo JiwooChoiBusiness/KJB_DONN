@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Response
 
-from app.api.schemas import (
+from app.api.schemas import (ChatCreateRequest, 
     ChatRequest,
     ComparePrepareRequest,
     MetaResponse,
@@ -22,6 +22,8 @@ from app.data.finlife import CRDT_GRADE_LABELS
 from app.llm import guardrails
 from app.llm.gemini import GeminiProvider
 from app.llm.provider import LLMUnavailable
+from app.services import chatlog
+from app import kb as kb_search
 from app.models import (
     ENGINE_VERSION,
     ActionCard,
@@ -384,11 +386,22 @@ def _build_chat_reply(message: str) -> tuple[str, list[Chip], Optional[dict[str,
             else:
                 reply_text = "지금은 특별히 안내할 행동이 없어요. 계속 잘 관리하고 계세요."
 
-    else:  # faq 또는 인식하지 못한 의도
-        reply_text = (
-            "부채 상환표, 공시 비교, 시나리오, 행동 제안, 소비 패턴 중 무엇이든 물어보세요. "
-            "예: '신용대출 공시 비교해줘', '금리 4% 이하만', '상환표 보여줘'"
-        )
+    else:  # faq 또는 인식하지 못한 의도: 제도 안내 KB(kb/*.md) 키워드 검색으로 답한다
+        hit = kb_search.answer(masked)
+        if hit is not None:
+            reply_text = f"{hit['title']} 안내입니다. {hit['snippet']}"
+            if hit.get("needs_verification"):
+                reply_text += " 일부 수치는 확인이 필요한 항목입니다."
+            reply_text += f" {hit['disclaimer']}"
+            chips.append(Chip(id=f"chip-kb-{hit['slug']}", text=f"{hit['title']} 자세히 보기", tier=1,
+                              intent="faq", params={"slug": hit["slug"]}))
+            action = {"type": "open_kb", "payload": {"slug": hit["slug"], "title": hit["title"],
+                                                    "sources": hit.get("sources") or []}}
+        else:
+            reply_text = (
+                "부채 상환표, 공시 비교, 시나리오, 행동 제안, 제도 안내 중 무엇이든 물어보세요. "
+                "예: '신용대출 공시 비교해줘', '금리 4% 이하만', '금리인하요구권 요건이 뭐야'"
+            )
         chips.extend([
             Chip(id="chip-chat-faq-compare", text="공시 비교하기", tier=1, intent="compare", params={}),
             Chip(id="chip-chat-faq-debts", text="내 부채 보기", tier=1, intent="schedule", params={}),
@@ -396,13 +409,76 @@ def _build_chat_reply(message: str) -> tuple[str, list[Chip], Optional[dict[str,
         ])
 
     banned = insights_service.get_banned_terms()
-    if guardrails.check_text(reply_text, banned):
+    kb_reply = bool(action and action.get("type") == "open_kb")  # KB 문서는 작성 시 금지어 검사를 통과한 텍스트
+    if not kb_reply and guardrails.check_text(reply_text, banned):
         reply_text = "안내 문구를 표시할 수 없어 기본 안내로 대체했습니다. 메뉴에서 원하는 화면을 선택해주세요."
 
     return reply_text, chips, action, llm_used
 
 
+def _current_profile_id() -> str:
+    profile = session_service.get_profile()
+    return profile.id if profile is not None else chatlog.GUEST_PROFILE_ID
+
+
 @router.post("/chat", response_model=ChatReply)
 def post_chat(body: ChatRequest) -> ChatReply:
+    """대화 로그는 현재 프로필(페르소나)에 종속된다. chat_id가 없거나 다른 프로필 것이면 새 대화를 만든다."""
+    profile_id = _current_profile_id()
+    chat_id = body.chat_id
+    if chat_id:
+        chat = chatlog.get_chat(chat_id)
+        if chat is None or chat["profile_id"] != profile_id:
+            chat_id = None
+    if not chat_id:
+        chat_id = chatlog.create_chat(profile_id, title=body.message.strip()[:30])["id"]
+    chatlog.append_message(chat_id, "user", guardrails.mask_pii(body.message))
     reply_text, chips, action, llm_used = _build_chat_reply(body.message)
-    return ChatReply(reply_text=reply_text, chips=chips, action=action, llm_used=llm_used)
+    chatlog.append_message(chat_id, "reply", reply_text, llm_used=llm_used, action=action,
+                           chips=[c.model_dump(mode="json") for c in chips])
+    return ChatReply(reply_text=reply_text, chips=chips, action=action, llm_used=llm_used, chat_id=chat_id)
+
+
+@router.get("/chats")
+def list_chats() -> list[dict[str, Any]]:
+    """현재 프로필의 대화 목록(최근순)."""
+    return chatlog.list_chats(_current_profile_id())
+
+
+@router.post("/chats")
+def create_chat(body: ChatCreateRequest) -> dict[str, Any]:
+    return chatlog.create_chat(_current_profile_id(), title=body.title or "")
+
+
+@router.get("/chats/{chat_id}/messages")
+def chat_messages(chat_id: str) -> list[dict[str, Any]]:
+    chat = chatlog.get_chat(chat_id)
+    if chat is None or chat["profile_id"] != _current_profile_id():
+        raise HTTPException(status_code=404, detail="대화를 찾을 수 없습니다.")
+    return chatlog.get_messages(chat_id)
+
+
+@router.delete("/chats/{chat_id}")
+def delete_chat(chat_id: str) -> dict[str, Any]:
+    chat = chatlog.get_chat(chat_id)
+    if chat is None or chat["profile_id"] != _current_profile_id():
+        raise HTTPException(status_code=404, detail="대화를 찾을 수 없습니다.")
+    return {"ok": chatlog.delete_chat(chat_id)}
+
+
+@router.get("/kb/search")
+def kb_search_endpoint(q: str, k: int = 3) -> list[dict[str, Any]]:
+    """제도 안내 KB 키워드 검색(임베딩·LLM 없음)."""
+    hits = kb_search.search(q, k=max(1, min(int(k), 10)))
+    return [{"slug": h.slug, "title": h.title, "score": round(float(h.score), 4), "snippet": h.snippet,
+             "needs_verification": h.needs_verification, "sources": h.sources} for h in hits]
+
+
+@router.get("/kb/{slug}")
+def kb_doc(slug: str) -> dict[str, Any]:
+    for d in kb_search.load_docs():
+        if d.slug == slug:
+            return {"slug": d.slug, "title": d.title, "category": d.category, "keywords": d.keywords,
+                    "sources": d.sources, "verified_at": str(d.verified_at), "needs_verification": d.needs_verification,
+                    "sections": d.sections, "body": d.body}
+    raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")

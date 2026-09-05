@@ -284,7 +284,7 @@ const state = {
   sidebarCollapsed: lsGetBool('donn.sidebarCollapsed', false),
   mobileSidebarOpen: false,
   lastPersonaId: lsGetStr('donn.lastPersonaId', null),
-  chat: { messages: [] },
+  chat: { messages: [], pending: false },
   compare: { context: null, result: null, step: 1, queuedPrepareParams: null },
   debts: { selectedLoanId: null, editingLoanId: null, schedule: null, pendingFocusLoanId: null },
 };
@@ -425,6 +425,53 @@ function selectFieldWithBadge(name, label, labelsMap, value, estimated) {
   return { select, wrap };
 }
 
+/* 금액 입력: 화면에는 천 단위 구분자, 상태에는 정수 원 그대로 */
+function parseMoney(raw) {
+  const cleaned = String(raw === null || raw === undefined ? '' : raw).replace(/[^0-9-]/g, '');
+  if (cleaned === '' || cleaned === '-') return 0;
+  const n = parseInt(cleaned, 10);
+  return Number.isFinite(n) ? n : 0;
+}
+function formatMoneyInput(raw) {
+  const cleaned = String(raw === null || raw === undefined ? '' : raw).replace(/[^0-9-]/g, '');
+  if (cleaned === '' || cleaned === '-') return '';
+  const n = parseInt(cleaned, 10);
+  return Number.isFinite(n) ? n.toLocaleString('ko-KR') : '';
+}
+
+function moneyInput(id, name, value) {
+  const input = h('input', {
+    type: 'text', id, name, inputmode: 'numeric', autocomplete: 'off',
+    class: 'money-input',
+    value: value === null || value === undefined || value === '' ? '' : formatMoneyInput(value),
+  });
+  input.dataset.raw = String(parseMoney(value));
+  input.addEventListener('focus', () => { input.value = input.value.replace(/,/g, ''); });
+  input.addEventListener('input', () => { input.dataset.raw = String(parseMoney(input.value)); });
+  input.addEventListener('blur', () => {
+    input.value = formatMoneyInput(input.value);
+    input.dataset.raw = String(parseMoney(input.value));
+  });
+  return input;
+}
+
+function fieldMoney(name, label, value) {
+  const id = 'f_' + name;
+  const input = moneyInput(id, name, value);
+  const wrap = h('div', { class: 'form-field' },
+    h('label', { for: id }, label),
+    h('div', { class: 'input-with-unit' }, input, h('span', { class: 'input-unit' }, '원')));
+  return { input, wrap };
+}
+function fieldMoneyWithBadge(name, label, value, estimated) {
+  const id = 'f_' + name;
+  const input = moneyInput(id, name, value);
+  const wrap = h('div', { class: 'form-field' },
+    labelWithBadge(label, id, estimated),
+    h('div', { class: 'input-with-unit' }, input, h('span', { class: 'input-unit' }, '원')));
+  return { input, wrap };
+}
+
 function buildInsightCard(card) {
   const wrap = h('div', { class: 'insight-card tone-' + (card.tone || 'neutral') });
   wrap.appendChild(h('div', { class: 'insight-card-title' }, card.title || ''));
@@ -444,7 +491,7 @@ function buildInsightCard(card) {
         toggleBtn.setAttribute('aria-expanded', String(!expanded));
         explainBox.classList.toggle('is-hidden', expanded);
       },
-    }, icon('chevronDown', 13), ' 이 분석은 왜 나왔나요?');
+    }, '이 분석은 왜 나왔나요?');
     actionsRow.appendChild(toggleBtn);
   }
   if (actionsRow.childNodes.length) wrap.appendChild(actionsRow);
@@ -456,7 +503,7 @@ function buildActionCard(action) {
   const wrap = h('div', { class: 'action-card' + (action.safe_mode ? ' safe-mode' : '') });
   const head = h('div', { class: 'action-card-head' });
   head.appendChild(h('div', { class: 'action-card-title' }, action.title || ''));
-  const badges = h('div', { style: 'display:flex;gap:6px;flex-wrap:wrap;' });
+  const badges = h('div', { class: 'action-card-badges' });
   if (action.safe_mode) badges.appendChild(badge('안전 모드', 'badge-safe'));
   if (action.priority !== undefined && action.priority !== null) badges.appendChild(badge(`우선순위 ${action.priority}`, ''));
   head.appendChild(badges);
@@ -536,16 +583,22 @@ function buildChatInputCard() {
   }, icon('plus', 18)));
   left.appendChild(h('span', { class: 'mode-badge' }, '모드: M0 공시 비교'));
 
-  const row = h('div', { class: 'chat-input-row' },
-    left,
-    h('button', { type: 'submit', class: 'send-btn', 'aria-label': '메시지 보내기' }, icon('send', 18)),
-  );
+  const sendBtn = h('button', {
+    type: 'submit', class: 'send-btn', id: 'chatSendBtn', 'aria-label': '메시지 보내기',
+  }, icon('send', 18));
+  if (state.chat.pending) {
+    sendBtn.disabled = true;
+    sendBtn.setAttribute('aria-busy', 'true');
+  }
+
+  const row = h('div', { class: 'chat-input-row' }, left, sendBtn);
   const form = h('form', { id: 'chatForm', class: 'chat-input-card', onSubmit: onChatSubmit }, input, row);
   return { node: form, input };
 }
 
 function onChatSubmit(e) {
   e.preventDefault();
+  if (state.chat.pending) return;
   const input = document.getElementById('chatInput');
   if (!input) return;
   const text = input.value;
@@ -590,6 +643,7 @@ async function renderDebts() {
   if (isStale()) return;
   clearNode(root);
   root.appendChild(h('h1', { class: 'view-header' }, '내 부채'));
+  root.appendChild(h('p', { class: 'view-lead' }, '프로필과 대출을 입력하면 상환표와 시나리오를 계산합니다.'));
 
   if (!res.ok && res.status !== 404) {
     root.appendChild(noticeBox('서버에 연결되지 않았습니다.', { error: true, onRetry: renderDebts }));
@@ -604,12 +658,6 @@ async function renderDebts() {
     root.appendChild(noticeBox('아직 저장된 프로필이 없습니다. 아래에서 정보를 입력하거나 페르소나를 선택해보세요.'));
   }
 
-  if (state.home && state.home.capacity) {
-    const capWrap = h('div', { style: 'margin:-4px 0 14px;' });
-    capWrap.appendChild(badge('여력 ' + (CAPACITY_BAND_LABELS[state.home.capacity.band] || state.home.capacity.band), 'badge-accent'));
-    root.appendChild(capWrap);
-  }
-
   root.appendChild(buildProfileSummaryCard(profile, hasProfile));
   root.appendChild(buildLoansSection(profile, hasProfile));
 
@@ -620,21 +668,26 @@ async function renderDebts() {
 
 function buildProfileSummaryCard(profile, hasProfile) {
   const card = h('div', { class: 'panel-card' });
-  card.appendChild(h('h2', {}, '프로필'));
-
-  const summaryText = hasProfile
+  const head = h('div', { class: 'panel-card-head' });
+  const headLeft = h('div', {});
+  headLeft.appendChild(h('h2', {}, '프로필'));
+  headLeft.appendChild(h('p', { class: 'panel-card-sub' }, hasProfile
     ? `월소득 ${fmtWon(profile.monthly_income)} · 고정지출 ${fmtWon(profile.fixed_expenses)} · 변동지출 ${fmtWon(profile.variable_expenses)} · 비상금 ${fmtWon(profile.emergency_fund)}`
-    : '아래 정보를 입력하고 저장하면 프로필이 생성됩니다.';
-  card.appendChild(h('p', { class: 'empty-text', style: 'margin-bottom:14px;' }, summaryText));
+    : '아래 정보를 입력하고 저장하면 프로필이 생성됩니다.'));
+  head.appendChild(headLeft);
+  if (state.home && state.home.capacity) {
+    head.appendChild(badge('여력 ' + (CAPACITY_BAND_LABELS[state.home.capacity.band] || state.home.capacity.band), 'badge-accent'));
+  }
+  card.appendChild(head);
 
   const form = h('form', { 'aria-label': '프로필 편집' });
   const grid = h('div', { class: 'form-grid' });
 
   const nameField = fieldText('display_name', '이름(별칭)', profile.display_name || '나');
-  const incomeField = fieldNumber('monthly_income', '월소득(원)', profile.monthly_income || 0);
-  const fixedField = fieldNumber('fixed_expenses', '고정지출(원)', profile.fixed_expenses || 0);
-  const variableField = fieldNumber('variable_expenses', '변동지출(원)', profile.variable_expenses || 0);
-  const emergencyField = fieldNumber('emergency_fund', '비상금(원)', profile.emergency_fund || 0);
+  const incomeField = fieldMoney('monthly_income', '월소득', profile.monthly_income || 0);
+  const fixedField = fieldMoney('fixed_expenses', '고정지출', profile.fixed_expenses || 0);
+  const variableField = fieldMoney('variable_expenses', '변동지출', profile.variable_expenses || 0);
+  const emergencyField = fieldMoney('emergency_fund', '비상금', profile.emergency_fund || 0);
   const creditField = fieldText('credit_band', '신용 구간', profile.credit_band || '');
   [nameField, incomeField, fixedField, variableField, emergencyField, creditField].forEach((f) => grid.appendChild(f.wrap));
   form.appendChild(grid);
@@ -662,10 +715,10 @@ function buildProfileSummaryCard(profile, hasProfile) {
     e.preventDefault();
     const base = hasProfile ? { ...profile } : emptyProfileSkeleton();
     base.display_name = nameField.input.value.trim() || '나';
-    base.monthly_income = toInt(incomeField.input.value);
-    base.fixed_expenses = toInt(fixedField.input.value);
-    base.variable_expenses = toInt(variableField.input.value);
-    base.emergency_fund = toInt(emergencyField.input.value);
+    base.monthly_income = parseMoney(incomeField.input.value);
+    base.fixed_expenses = parseMoney(fixedField.input.value);
+    base.variable_expenses = parseMoney(variableField.input.value);
+    base.emergency_fund = parseMoney(emergencyField.input.value);
     base.credit_band = creditField.input.value.trim() || null;
     base.flags = Object.keys(flagChecks).filter((k) => flagChecks[k].checked);
     base.loans = (hasProfile ? profile.loans : []) || [];
@@ -710,10 +763,10 @@ function buildLoansSection(profile, hasProfile) {
 
   const loans = profile.loans || [];
   if (!loans.length) {
-    wrap.appendChild(h('p', { class: 'empty-text' }, '등록된 대출이 없습니다.'));
+    wrap.appendChild(noticeBox('등록된 대출이 없습니다. 아래에서 대출을 추가해보세요.'));
   } else {
     const tableWrap = h('div', { class: 'table-wrap' });
-    const table = h('table', { class: 'data-table' });
+    const table = h('table', { class: 'data-table stackable' });
     table.appendChild(h('thead', {}, h('tr', {},
       h('th', { class: 'text-left' }, '종류'), h('th', {}, '잔액'), h('th', {}, '금리'),
       h('th', {}, '남은 개월'), h('th', {}, '상환방식'), h('th', {}, '월 납입'), h('th', {}, ''),
@@ -744,21 +797,22 @@ function buildLoanRow(loan, profile) {
   const tr = h('tr', { class: 'selectable', 'data-loan-id': loan.id, tabindex: '0', role: 'button', 'aria-label': `${LOAN_TYPE_LABELS[loan.loan_type] || loan.loan_type} 상환표 보기` });
   if (state.debts.selectedLoanId === loan.id) tr.classList.add('selected');
 
-  tr.appendChild(h('td', { class: 'text-left' }, LOAN_TYPE_LABELS[loan.loan_type] || loan.loan_type));
-  tr.appendChild(h('td', {}, fmtWon(loan.balance)));
-  tr.appendChild(h('td', {}, fmtPct(loan.annual_rate)));
-  tr.appendChild(h('td', {}, fmtMonths(loan.remaining_months)));
-  tr.appendChild(h('td', {}, REPAY_METHOD_LABELS[loan.repay_method] || loan.repay_method));
-  tr.appendChild(h('td', { class: 'loan-payment-cell' },
+  tr.appendChild(h('td', { class: 'text-left', 'data-label': '종류' }, LOAN_TYPE_LABELS[loan.loan_type] || loan.loan_type));
+  tr.appendChild(h('td', { 'data-label': '잔액' }, fmtWon(loan.balance)));
+  tr.appendChild(h('td', { 'data-label': '금리' }, fmtPct(loan.annual_rate)));
+  tr.appendChild(h('td', { 'data-label': '남은 개월' }, fmtMonths(loan.remaining_months)));
+  tr.appendChild(h('td', { 'data-label': '상환방식' }, REPAY_METHOD_LABELS[loan.repay_method] || loan.repay_method));
+  tr.appendChild(h('td', { class: 'loan-payment-cell', 'data-label': '월 납입' },
     state.debts.selectedLoanId === loan.id && state.debts.schedule ? fmtWon(state.debts.schedule.first_payment) : '-'));
 
-  const editTd = h('td', {});
-  editTd.appendChild(h('button', {
+  const editTd = h('td', { class: 'row-actions-cell' });
+  const actions = h('div', { class: 'row-actions' });
+  actions.appendChild(h('button', {
     type: 'button', class: 'btn btn-secondary btn-sm', 'aria-label': `${loan.name || loan.id} 수정`,
     onClick: (e) => { e.stopPropagation(); startEditLoan(loan); },
   }, '수정'));
-  editTd.appendChild(h('button', {
-    type: 'button', class: 'btn btn-danger btn-sm', style: 'margin-left:6px;', 'aria-label': `${loan.name || loan.id} 삭제`,
+  actions.appendChild(h('button', {
+    type: 'button', class: 'btn btn-danger btn-sm', 'aria-label': `${loan.name || loan.id} 삭제`,
     onClick: async (e) => {
       e.stopPropagation();
       if (!confirm('이 대출을 삭제할까요?')) return;
@@ -767,6 +821,7 @@ function buildLoanRow(loan, profile) {
       renderDebts();
     },
   }, '삭제'));
+  editTd.appendChild(actions);
   tr.appendChild(editTd);
 
   const onSelect = () => selectLoan(loan.id, profile, document.getElementById('scheduleArea'));
@@ -791,7 +846,7 @@ async function selectLoan(loanId, profile, scheduleArea) {
     scheduleArea.appendChild(noticeBox('상환표를 불러오지 못했습니다.', { error: true }));
   } else {
     state.debts.schedule = schedRes.data;
-    scheduleArea.appendChild(h('h3', { style: 'margin-top:20px;' }, '상환표 (첫 12개월)'));
+    scheduleArea.appendChild(h('h3', { class: 'section-title' }, '상환표 (첫 12개월)'));
     scheduleArea.appendChild(buildScheduleTable(schedRes.data));
     document.querySelectorAll('#loansTbody tr').forEach((tr) => {
       if (tr.dataset.loanId === loanId) {
@@ -804,13 +859,14 @@ async function selectLoan(loanId, profile, scheduleArea) {
   if (!scenRes.ok) {
     scheduleArea.appendChild(noticeBox('시나리오를 불러오지 못했습니다.', { error: true }));
   } else {
-    scheduleArea.appendChild(h('h3', { style: 'margin-top:20px;' }, '시나리오 요약'));
+    scheduleArea.appendChild(h('h3', { class: 'section-title' }, '시나리오 요약'));
     scheduleArea.appendChild(buildScenarioTable(scenRes.data));
   }
 }
 
 function buildScheduleTable(schedule) {
-  const wrap = h('div', { class: 'table-wrap' });
+  const wrap = h('div', {});
+  const scroller = h('div', { class: 'table-wrap table-scroll' });
   const table = h('table', { class: 'data-table' });
   table.appendChild(h('thead', {}, h('tr', {},
     h('th', { class: 'text-left' }, '회차'), h('th', {}, '납입액'), h('th', {}, '원금'), h('th', {}, '이자'), h('th', {}, '잔액'),
@@ -827,7 +883,8 @@ function buildScheduleTable(schedule) {
     h('td', { class: 'text-left' }, '합계'), h('td', {}, fmtWon(schedule.total_payment)),
     h('td', {}, ''), h('td', {}, fmtWon(schedule.total_interest)), h('td', {}, ''),
   )));
-  wrap.appendChild(table);
+  scroller.appendChild(table);
+  wrap.appendChild(scroller);
   const assumptions = plainList(schedule.assumptions, 'plain-list');
   if (assumptions) wrap.appendChild(assumptions);
   return wrap;
@@ -873,7 +930,7 @@ function buildLoanForm(profile, hasProfile) {
   const grid = h('div', { class: 'form-grid' });
 
   const typeSel = selectField('loan_type', '종류', LOAN_TYPE_LABELS, editing ? editing.loan_type : 'credit');
-  const balanceField = fieldNumber('balance', '잔액(원)', editing ? editing.balance : 0);
+  const balanceField = fieldMoney('balance', '잔액', editing ? editing.balance : 0);
   const rateField = fieldNumber('annual_rate', '금리(연 %)', editing ? editing.annual_rate : 0, { step: 0.1 });
   const monthsField = fieldNumber('remaining_months', '남은 개월', editing ? editing.remaining_months : 12);
   const methodSel = selectField('repay_method', '상환방식', REPAY_METHOD_LABELS, editing ? editing.repay_method : 'equal_payment');
@@ -884,7 +941,7 @@ function buildLoanForm(profile, hasProfile) {
   details.appendChild(h('summary', {}, '추가 정보'));
   const detailGrid = h('div', { class: 'form-grid' });
   const nameField = fieldText('name', '표시 이름', editing ? editing.name : '');
-  const principalField = fieldNumber('principal', '최초 원금(원)', editing ? editing.principal : 0);
+  const principalField = fieldMoney('principal', '최초 원금', editing ? editing.principal : 0);
   const rateTypeSel = selectField('rate_type', '금리 유형', RATE_TYPE_LABELS, editing ? editing.rate_type : 'fixed');
   const graceField = fieldNumber('grace_months', '거치 개월', editing ? editing.grace_months : 0);
   const prepayRateField = fieldNumber('prepay_fee_rate', '중도상환수수료율(%)', editing ? editing.prepay_fee_rate : 0, { step: 0.1 });
@@ -903,12 +960,12 @@ function buildLoanForm(profile, hasProfile) {
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const balanceVal = toInt(balanceField.input.value);
+    const balanceVal = parseMoney(balanceField.input.value);
     const loanObj = {
       id: editing ? editing.id : nextLoanId(loans),
       name: nameField.input.value.trim() || (LOAN_TYPE_LABELS[typeSel.select.value] || '대출'),
       loan_type: typeSel.select.value,
-      principal: toInt(principalField.input.value) || balanceVal,
+      principal: parseMoney(principalField.input.value) || balanceVal,
       balance: balanceVal,
       annual_rate: toFloat(rateField.input.value),
       rate_type: rateTypeSel.select.value,
@@ -973,6 +1030,7 @@ async function renderCompare() {
   const { root, isStale } = mountView('compare');
   focusMainAfterRender();
   root.appendChild(h('h1', { class: 'view-header' }, '공시 비교'));
+  root.appendChild(h('p', { class: 'view-lead' }, '금융감독원 공시 자료를 같은 조건으로 계산해 나란히 보여줍니다. 상품 실명은 표시하지 않습니다.'));
 
   const body = h('div', { id: 'compareBody' });
   root.appendChild(body);
@@ -996,23 +1054,58 @@ async function renderCompare() {
     body.appendChild(noticeBox('조건을 자동으로 준비하지 못했습니다. 아래에서 직접 입력해 비교할 수 있어요.', { error: true }));
     state.compare.context = defaultCompareContext();
   } else {
-    state.compare.context = res.data;
+    const ctx = res.data;
+    // 칩·대화에서 넘어온 조건이 이미 추정 목록을 갖고 있으면 유지한다
+    // (모든 값을 넘기면 서버 응답의 estimated_fields가 비어 배지가 사라진다).
+    if ((!ctx.estimated_fields || !ctx.estimated_fields.length)
+        && Array.isArray(params.estimated_fields) && params.estimated_fields.length) {
+      ctx.estimated_fields = params.estimated_fields.slice();
+    }
+    state.compare.context = ctx;
   }
   body.appendChild(buildCompareStep1(state.compare.context));
 }
 
+function compareStepIndicator(step) {
+  return h('div', { class: 'compare-step-indicator' },
+    h('span', { class: 'step' + (step === 1 ? ' current' : '') }, '1단계 조건 확인'),
+    h('span', { class: 'step-sep' }, '›'),
+    h('span', { class: 'step' + (step === 2 ? ' current' : '') }, '2단계 결과'));
+}
+
+function compareSummarySentence(ctx) {
+  const parts = [
+    CATEGORY_LABELS[ctx.category] || ctx.category,
+    fmtWon(ctx.amount),
+    fmtMonths(ctx.term_months),
+    REPAY_METHOD_LABELS[ctx.repay_method] || ctx.repay_method,
+  ];
+  return parts.filter(Boolean).join(' · ');
+}
+
 function buildCompareStep1(ctx) {
   const wrap = h('div', {});
-  wrap.appendChild(h('div', { class: 'compare-step-indicator' },
-    h('span', { class: 'current' }, '1단계 조건 확인'), h('span', {}, '> 2단계 결과')));
+  wrap.appendChild(compareStepIndicator(1));
 
   const estimated = new Set(ctx.estimated_fields || []);
-  const card = h('div', { class: 'panel-card' });
+  const card = h('div', { class: 'panel-card confirm-card' });
+  const head = h('div', { class: 'panel-card-head' });
+  const headLeft = h('div', {});
+  headLeft.appendChild(h('h2', {}, '이 조건으로 비교할까요?'));
+  headLeft.appendChild(h('p', { class: 'panel-card-sub' }, '아래 조건으로 금융감독원 공시 자료를 비교합니다. 값을 바꾸면 결과도 달라집니다.'));
+  head.appendChild(headLeft);
+  card.appendChild(head);
+
+  const summary = h('div', { class: 'confirm-summary' });
+  summary.appendChild(h('span', {}, compareSummarySentence(ctx)));
+  if (estimated.size) summary.appendChild(badge(`추정 ${estimated.size}개`, 'badge-estimated'));
+  card.appendChild(summary);
+
   const form = h('form', { 'aria-label': '비교 조건' });
   const grid = h('div', { class: 'form-grid' });
 
   const categorySel = selectFieldWithBadge('category', '카테고리', CATEGORY_LABELS, ctx.category, estimated.has('category'));
-  const amountField = fieldNumberWithBadge('amount', '금액(원)', ctx.amount, estimated.has('amount'));
+  const amountField = fieldMoneyWithBadge('amount', '금액', ctx.amount, estimated.has('amount'));
   const termField = fieldNumberWithBadge('term_months', '기간(개월)', ctx.term_months, estimated.has('term_months'));
   const methodSel = selectFieldWithBadge('repay_method', '상환방식', REPAY_METHOD_LABELS, ctx.repay_method, estimated.has('repay_method'));
   const rateTypeSel = selectFieldWithBadge('rate_type', '금리 유형', { '': '무관', fixed: '고정', variable: '변동' }, ctx.rate_type || '', estimated.has('rate_type'));
@@ -1050,8 +1143,12 @@ function buildCompareStep1(ctx) {
   form.appendChild(lenderFieldset);
 
   const msgSlot = h('div', {});
-  const submitBtn = h('button', { type: 'submit', class: 'btn btn-primary' }, '이 조건으로 비교');
-  form.appendChild(h('div', { class: 'form-actions' }, submitBtn));
+  const submitBtn = h('button', { type: 'submit', class: 'btn btn-primary btn-lg' }, '이 조건으로 비교');
+  const actionsRow = h('div', { class: 'form-actions' }, submitBtn);
+  if (estimated.size) {
+    actionsRow.appendChild(h('span', { class: 'form-actions-hint' }, '"추정" 표시는 프로필에서 자동으로 채운 값입니다.'));
+  }
+  form.appendChild(actionsRow);
   form.appendChild(msgSlot);
 
   form.addEventListener('submit', async (e) => {
@@ -1059,7 +1156,7 @@ function buildCompareStep1(ctx) {
     const newCtx = {
       ...ctx,
       category: categorySel.select.value,
-      amount: toInt(amountField.input.value),
+      amount: parseMoney(amountField.input.value),
       term_months: toInt(termField.input.value),
       repay_method: methodSel.select.value,
       rate_type: rateTypeSel.select.value || null,
@@ -1109,18 +1206,24 @@ function metricBlock(label, value) {
 
 function buildCompareItemCard(item) {
   const card = h('div', { class: 'compare-item-card' });
+
   const head = h('div', { class: 'compare-item-head' });
-  head.appendChild(h('span', { class: 'compare-item-rank' }, String(item.rank)));
+  head.appendChild(h('span', { class: 'compare-item-rank', 'aria-label': `${item.rank}순위` }, String(item.rank)));
   head.appendChild(h('span', { class: 'compare-item-label' }, item.anon_label));
-  head.appendChild(h('span', { class: 'compare-item-rate' }, `${item.rate}%`));
-  head.appendChild(badge(rateKindLabel(item), 'badge-accent'));
+  head.appendChild(h('span', { class: 'compare-item-rate-wrap' },
+    h('span', { class: 'compare-item-rate' }, `${item.rate}%`),
+    badge(rateKindLabel(item), 'badge-accent')));
   card.appendChild(head);
 
   const metrics = h('div', { class: 'compare-item-metrics' });
   metrics.appendChild(metricBlock('월 납입', fmtWon(item.monthly_payment)));
   metrics.appendChild(metricBlock('총이자', fmtWon(item.total_interest)));
-  if (item.vs_current_total_interest !== null && item.vs_current_total_interest !== undefined) {
-    const v = item.vs_current_total_interest;
+  const v = item.vs_current_total_interest;
+  if (v === null || v === undefined) {
+    const block = metricBlock('현재 대비', '-');
+    block.querySelector('.metric-value').classList.add('value-neutral');
+    metrics.appendChild(block);
+  } else {
     const cls = v < 0 ? 'value-positive' : v > 0 ? 'value-negative' : 'value-neutral';
     const block = metricBlock('현재 대비', fmtWonSigned(v));
     block.querySelector('.metric-value').classList.add(cls);
@@ -1128,11 +1231,15 @@ function buildCompareItemCard(item) {
   }
   card.appendChild(metrics);
 
+  const foot = h('div', { class: 'compare-item-foot' });
   if (item.disclosure_url && /^https?:\/\//i.test(item.disclosure_url)) {
-    card.appendChild(h('a', {
+    foot.appendChild(h('a', {
       href: item.disclosure_url, target: '_blank', rel: 'noopener noreferrer', class: 'disclosure-link',
+      'aria-label': `${item.anon_label} 공시 열람`,
     }, '금융상품한눈에에서 확인'));
   }
+  if (foot.childNodes.length) card.appendChild(foot);
+
   const notes = plainList(item.notes, 'plain-list');
   if (notes) card.appendChild(notes);
   return card;
@@ -1140,19 +1247,24 @@ function buildCompareItemCard(item) {
 
 function buildCompareStep2(result) {
   const wrap = h('div', {});
-  wrap.appendChild(h('div', { class: 'compare-step-indicator' },
-    h('span', {}, '1단계 조건 확인 >'), h('span', { class: 'current' }, '2단계 결과')));
+  wrap.appendChild(compareStepIndicator(2));
 
   wrap.appendChild(h('p', { class: 'sort-explain' }, result.sort_explain || ''));
-  wrap.appendChild(h('p', { class: 'empty-text' },
+  wrap.appendChild(h('p', { class: 'compare-count' },
     `전체 ${result.candidates_total ?? '-'}개 상품 중 상위 ${(result.items || []).length}개`));
 
-  (result.items || []).forEach((item) => wrap.appendChild(buildCompareItemCard(item)));
+  const items = result.items || [];
+  if (!items.length) {
+    wrap.appendChild(noticeBox('조건에 맞는 공시 상품이 없습니다. 조건을 넓혀서 다시 시도해보세요.'));
+  }
+  items.forEach((item) => wrap.appendChild(buildCompareItemCard(item)));
 
   const assumptions = plainList(result.assumptions, 'plain-list');
   if (assumptions) {
-    wrap.appendChild(h('h3', { style: 'margin-top:16px;' }, '가정'));
-    wrap.appendChild(assumptions);
+    const details = h('details', { class: 'collapsible quiet' });
+    details.appendChild(h('summary', {}, '가정 보기'));
+    details.appendChild(assumptions);
+    wrap.appendChild(details);
   }
 
   wrap.appendChild(h('p', { class: 'result-meta-line' },
@@ -1174,24 +1286,30 @@ async function renderSpending() {
   const { root } = mountView('spending');
   focusMainAfterRender();
   root.appendChild(h('h1', { class: 'view-header' }, '소비 패턴'));
+  root.appendChild(h('p', { class: 'view-lead' }, '카드·계좌 합성 거래내역으로 데이터 형태를 미리 확인할 수 있어요.'));
 
   const card = h('div', { class: 'panel-card' });
-  card.appendChild(h('h2', {}, '준비 중'));
-  card.appendChild(h('p', {},
-    '소비 패턴 분석(P5 단계)은 아직 준비 중입니다. 카드·계좌 합성 거래내역을 내려받아 데이터 형태를 미리 확인할 수 있어요.'));
+  const head = h('div', { class: 'panel-card-head' });
+  head.appendChild(h('h2', {}, '준비 중'));
+  head.appendChild(badge('P5 단계', ''));
+  card.appendChild(head);
+  card.appendChild(h('p', { class: 'panel-card-sub' },
+    '소비 패턴 분석은 아직 준비 중입니다. 아래에서 합성 거래내역을 내려받아 데이터 형태를 확인해보세요.'));
 
   const personaId = state.lastPersonaId || (state.profile ? state.profile.id : null);
+  const actions = h('div', { class: 'form-actions' });
   if (personaId) {
-    card.appendChild(h('a', {
+    actions.appendChild(h('a', {
       href: Api.syntheticCsvUrl(personaId), download: `${personaId}_transactions.csv`,
-      class: 'btn btn-primary', style: 'display:inline-flex;align-items:center;gap:6px;margin-top:12px;',
-      'aria-label': '합성 거래내역 CSV 다운로드',
+      class: 'btn btn-primary', 'aria-label': '합성 거래내역 CSV 다운로드',
     }, icon('download', 16), ' 합성 거래내역 내려받기'));
+    card.appendChild(actions);
   } else {
     card.appendChild(noticeBox('페르소나를 먼저 선택하면 합성 거래내역을 내려받을 수 있어요.'));
-    card.appendChild(h('button', {
-      type: 'button', class: 'btn btn-secondary', style: 'margin-top:8px;', onClick: () => navigateTo('personas'),
+    actions.appendChild(h('button', {
+      type: 'button', class: 'btn btn-secondary', onClick: () => navigateTo('personas'),
     }, '페르소나 선택하러 가기'));
+    card.appendChild(actions);
   }
   root.appendChild(card);
 }
@@ -1223,12 +1341,12 @@ async function renderPersonas() {
   const { root, isStale } = mountView('personas');
   focusMainAfterRender();
   root.appendChild(h('h1', { class: 'view-header' }, '페르소나 테스트'));
-  root.appendChild(h('p', { class: 'empty-text' }, '데모 페르소나를 선택하면 해당 프로필로 화면을 체험할 수 있어요.'));
+  root.appendChild(h('p', { class: 'view-lead' }, '데모 페르소나를 선택하면 해당 프로필로 화면을 체험할 수 있어요.'));
 
   const msgSlot = h('div', {});
   root.appendChild(msgSlot);
 
-  const resetRow = h('div', { style: 'margin:10px 0 18px;' });
+  const resetRow = h('div', { class: 'form-actions', style: 'margin:0 0 16px;' });
   resetRow.appendChild(h('button', {
     type: 'button', class: 'btn btn-secondary', 'aria-label': '프로필 초기화',
     onClick: async () => {
@@ -1330,6 +1448,7 @@ async function renderDecisions() {
   const { root, isStale } = mountView('decisions');
   focusMainAfterRender();
   root.appendChild(h('h1', { class: 'view-header' }, '결정 기록'));
+  root.appendChild(h('p', { class: 'view-lead' }, '같은 조건으로 다시 계산했을 때 결과가 일치하는지 확인할 수 있어요.'));
 
   const listWrap = h('div', {});
   listWrap.appendChild(h('p', { class: 'loading-text' }, '불러오는 중...'));
@@ -1352,7 +1471,13 @@ async function renderDecisions() {
 
 /* ---------- 13. 채팅 ---------- */
 
-function renderChatTranscript() {
+function buildPendingRow() {
+  const dots = h('span', { class: 'chat-pending-dots', 'aria-hidden': 'true' }, h('i', {}), h('i', {}), h('i', {}));
+  const box = h('div', { class: 'chat-pending', role: 'status', 'aria-live': 'polite' }, dots, h('span', {}, '생각하는 중'));
+  return h('div', { class: 'chat-bubble-row from-reply' }, box);
+}
+
+function renderChatTranscript(scrollToEnd) {
   const wrap = document.getElementById('chatTranscriptWrap');
   if (!wrap) return;
   clearNode(wrap);
@@ -1361,7 +1486,8 @@ function renderChatTranscript() {
       wrap.appendChild(h('div', { class: 'chat-bubble-row from-user' }, h('div', { class: 'chat-bubble user' }, msg.text)));
     } else if (msg.role === 'reply') {
       const row = h('div', { class: 'chat-bubble-row from-reply' });
-      if (!msg.llm_used) row.appendChild(h('div', { class: 'chat-reply-meta' }, badge('규칙 기반 응답', 'badge-rule')));
+      row.appendChild(h('div', { class: 'chat-reply-meta' },
+        msg.llm_used ? badge('AI 응답', 'badge-accent') : badge('규칙 기반 응답', 'badge-rule')));
       row.appendChild(h('div', { class: 'chat-bubble reply' }, msg.text));
       if (msg.chips && msg.chips.length) row.appendChild(renderChipRow(msg.chips));
       wrap.appendChild(row);
@@ -1369,31 +1495,50 @@ function renderChatTranscript() {
       wrap.appendChild(h('div', { class: 'chat-bubble-row from-reply' }, h('div', { class: 'chat-bubble error' }, msg.text)));
     }
   });
+  if (state.chat.pending) wrap.appendChild(buildPendingRow());
+
+  if (scrollToEnd && wrap.lastChild && wrap.lastChild.scrollIntoView) {
+    try { wrap.lastChild.scrollIntoView({ block: 'nearest' }); } catch (_) { /* noop */ }
+  }
+}
+
+function setChatPending(pending) {
+  state.chat.pending = pending;
+  const btn = document.getElementById('chatSendBtn');
+  if (btn) {
+    btn.disabled = pending;
+    btn.setAttribute('aria-busy', String(pending));
+  }
+  const input = document.getElementById('chatInput');
+  if (input) input.setAttribute('aria-busy', String(pending));
+  renderChatTranscript(true);
 }
 
 async function sendChatMessage(rawText) {
   const text = (rawText || '').trim();
-  if (!text) return;
+  if (!text || state.chat.pending) return;
   state.chat.messages.push({ role: 'user', text });
-  renderChatTranscript();
+  setChatPending(true);
 
   const res = await Api.chat(text);
+
   if (!res.ok) {
-    state.chat.messages.push({ role: 'error', text: '서버에 연결되지 않았습니다.' });
-    renderChatTranscript();
+    state.chat.messages.push({ role: 'error', text: '응답을 받지 못했습니다. 잠시 후 다시 시도해주세요.' });
+    setChatPending(false);
     return;
   }
   const reply = res.data || {};
   state.chat.messages.push({
     role: 'reply', text: reply.reply_text || '', llm_used: !!reply.llm_used, chips: reply.chips || [],
   });
-  renderChatTranscript();
+  setChatPending(false);
   refreshRecentDecisions();
   if (reply.action) handleChatAction(reply.action);
 }
 
 function startNewChat() {
   state.chat.messages = [];
+  state.chat.pending = false;
   navigateTo('home');
   renderChatTranscript();
   setTimeout(() => { const el = document.getElementById('chatInput'); if (el) el.focus(); }, 0);
@@ -1452,8 +1597,16 @@ function updateSidebarActiveState() {
 function setFooterTexts(home) {
   const disclaimerEl = document.getElementById('disclaimerText');
   const noticeEl = document.getElementById('aiNoticeText');
-  if (disclaimerEl) disclaimerEl.textContent = (home && home.disclaimer) || FALLBACK_DISCLAIMER;
-  if (noticeEl) noticeEl.textContent = (home && home.ai_notice) || FALLBACK_AI_NOTICE;
+  const disclaimer = (home && home.disclaimer) || FALLBACK_DISCLAIMER;
+  const notice = (home && home.ai_notice) || FALLBACK_AI_NOTICE;
+  if (disclaimerEl) {
+    disclaimerEl.textContent = disclaimer;
+    disclaimerEl.setAttribute('title', disclaimer);
+  }
+  if (noticeEl) {
+    noticeEl.textContent = notice;
+    noticeEl.setAttribute('title', notice);
+  }
 }
 
 function renderPinnedAction() {
@@ -1580,6 +1733,13 @@ async function loadSettingsBody() {
   rows.forEach(([k, v]) => {
     body.appendChild(h('div', { class: 'settings-row' }, h('span', { class: 'k' }, k), h('span', { class: 'v' }, String(v))));
   });
+
+  body.appendChild(h('div', { class: 'settings-note-title' }, '면책 고지'));
+  body.appendChild(h('p', { class: 'settings-note' },
+    (state.home && state.home.disclaimer) || FALLBACK_DISCLAIMER));
+  body.appendChild(h('div', { class: 'settings-note-title' }, 'AI 고지'));
+  body.appendChild(h('p', { class: 'settings-note' },
+    (state.home && state.home.ai_notice) || FALLBACK_AI_NOTICE));
 }
 
 /* ---------- 15. 초기화 & 이벤트 연결 ---------- */

@@ -356,3 +356,4 @@ class ChatReply(BaseModel):
     action: Optional[dict[str, Any]] = None  # {"type": "open_view" | "prepare_compare", "payload": {...}}
     llm_used: bool = False
     ai_notice: str = AI_NOTICE
+    chat_id: Optional[str] = None  # 프로필(페르소나)별 대화 로그 식별자

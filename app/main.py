@@ -29,6 +29,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="DONN PoC", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    """정적 파일과 첫 페이지는 캐시하지 않는다(데모 중 수정 즉시 반영)."""
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.startswith("/static"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
 app.include_router(api_router, prefix="/api")
 
 if WEB_DIR.exists():
