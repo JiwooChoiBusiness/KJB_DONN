@@ -21,7 +21,7 @@ const FALLBACK_AI_NOTICE =
 /* app/kb/search.py 의 DISCLAIMER 와 동일하게 유지한다. */
 const KB_DISCLAIMER = '제도 설명은 참고용이며 최신 내용은 관련 기관 안내를 확인하세요.';
 
-const ROUTES = ['home', 'debts', 'compare', 'spending', 'personas', 'decisions'];
+const ROUTES = ['home', 'debts', 'compare', 'spending', 'lifecycle', 'personas', 'decisions'];
 
 const LOAN_TYPE_LABELS = {
   credit: '신용대출', mortgage: '주택담보대출', jeonse: '전세자금대출',
@@ -68,6 +68,36 @@ const FLAG_LABELS = {
 };
 const DECISION_KIND_LABELS = { compare: '공시 비교', action: '행동 결정', scenario: '시나리오' };
 
+/* 생애주기 층(P7, SPEC 2.7) 화면 라벨.
+   Goal.kind, UserProfile.risk_tolerance/income_type 의 서버 값과 1:1로 맞춘다. */
+const GOAL_KIND_LABELS = {
+  wedding: '결혼', childbirth: '출산·육아', housing: '주거', education: '교육',
+  retirement: '은퇴', emergency: '비상자금', other: '기타',
+};
+const RISK_TOLERANCE_LABELS = { '': '선택 안 함', low: '낮음', mid: '중간', high: '높음' };
+const INCOME_TYPE_LABELS = { '': '선택 안 함', regular: '정기', variable: '변동', none: '무소득' };
+
+/* 재무비율 5종. thresholdKey 는 FinancialRatios.thresholds 의 키이며
+   비율 이름과 다르다(부채비율·투자자산비율은 단계 기준값이 없다). */
+const RATIO_META = [
+  { key: 'liquidity_months', label: '유동성 비율', unit: 'months', thresholdKey: 'min_liquidity_months', dir: 'min' },
+  { key: 'saving_rate', label: '저축률', unit: 'ratio', thresholdKey: 'min_saving_rate', dir: 'min' },
+  { key: 'debt_ratio', label: '부채비율', unit: 'ratio', thresholdKey: null, dir: null },
+  { key: 'debt_service_ratio', label: '원리금상환비율', unit: 'ratio', thresholdKey: 'max_debt_service_ratio', dir: 'max' },
+  { key: 'investment_ratio', label: '투자자산비율', unit: 'ratio', thresholdKey: null, dir: null },
+];
+
+/* 순자산 곡선: 기준선만 진한 실선, 낙관·비관은 연한 파선으로 둔다. */
+const LC_SCENARIO_STYLE = {
+  '기준': { color: '#4F46E5', dash: null, width: 2.2 },
+  '낙관': { color: '#818CF8', dash: '7 4', width: 1.7 },
+  '비관': { color: '#A5B4FC', dash: '2 4', width: 1.7 },
+};
+/* 그리는 순서(기준선이 맨 위)와 읽는 순서(기준 먼저)를 따로 둔다. */
+const LC_SCENARIO_ORDER = ['낙관', '비관', '기준'];
+const LC_LEGEND_ORDER = ['기준', '낙관', '비관'];
+const LC_DEBT_COLOR = '#9CA3AF';
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const ICONS = {
   plus: [['line', { x1: 12, y1: 5, x2: 12, y2: 19 }], ['line', { x1: 5, y1: 12, x2: 19, y2: 12 }]],
@@ -88,6 +118,7 @@ const ICONS = {
   chevronLeft: [['polyline', { points: '15 6 9 12 15 18' }]],
   download: [['path', { d: 'M12 3v11' }], ['polyline', { points: '7 10 12 15 17 10' }], ['path', { d: 'M4 19h16' }]],
   upload: [['path', { d: 'M12 20V9' }], ['polyline', { points: '7 13 12 8 17 13' }], ['path', { d: 'M4 4h16' }]],
+  lifeline: [['polyline', { points: '4 4 4 20 20 20' }], ['polyline', { points: '7 16 11 11 14 14 19 7' }]],
 };
 
 /* ---------- 1. DOM 헬퍼 ---------- */
@@ -228,6 +259,31 @@ function fmtCount(n) {
   if (n === null || n === undefined || Number.isNaN(Number(n))) return '-';
   return `${Math.round(Number(n)).toLocaleString('ko-KR')}건`;
 }
+/* 축 눈금처럼 자리가 좁은 곳에서만 쓰는 축약 표기(1억 이상은 억, 1만 이상은 만). */
+function fmtWonShort(n) {
+  if (n === null || n === undefined || Number.isNaN(Number(n))) return '-';
+  const v = Math.round(Number(n));
+  const sign = v < 0 ? '-' : '';
+  const abs = Math.abs(v);
+  if (abs >= 100000000) return `${sign}${(abs / 100000000).toFixed(1)}억`;
+  if (abs >= 10000) return `${sign}${Math.round(abs / 10000).toLocaleString('ko-KR')}만`;
+  return `${sign}${abs.toLocaleString('ko-KR')}`;
+}
+/* 개월 수는 소수점 1자리. 유동성 비율 표기에 쓴다. */
+function fmtMonths1(n) {
+  if (n === null || n === undefined || Number.isNaN(Number(n))) return '-';
+  return `${Number(n).toFixed(1)}개월`;
+}
+/* 'YYYY-MM-DD' 목표일까지 남은 달 수. 지났으면 0 이하. */
+function monthsUntilDate(iso) {
+  if (!iso) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso));
+  if (!m) return null;
+  const now = new Date();
+  let diff = (Number(m[1]) - now.getFullYear()) * 12 + (Number(m[2]) - 1 - now.getMonth());
+  if (Number(m[3]) < now.getDate()) diff -= 1;
+  return diff;
+}
 function fmtDateTime(iso) {
   if (!iso) return '-';
   try { return new Date(iso).toLocaleString('ko-KR'); } catch (_) { return String(iso); }
@@ -320,6 +376,7 @@ const Api = {
     apiGet(`/loans/${encodeURIComponent(loanId)}/schedule${extra ? `?extra=${encodeURIComponent(extra)}` : ''}`),
   getScenarios: (horizon) => apiGet(`/scenarios${horizon ? `?horizon=${encodeURIComponent(horizon)}` : ''}`),
   getActions: () => apiGet('/actions'),
+  getLifecycle: () => apiGet('/lifecycle'),
   comparePrepare: (intent, params) => apiSend('POST', '/compare/prepare', { intent, params: params || {} }),
   compareRun: (ctx) => apiSend('POST', '/compare/run', ctx),
   productsStats: () => apiGet('/products/stats'),
@@ -360,6 +417,8 @@ const state = {
   /* 소비 패턴: data 는 서버 응답 {summary, features, cards},
      upload 는 브라우저에서 읽은 파일의 파싱 상태(서버로 보내지 않는다). */
   spending: { data: null, loaded: false, upload: null, lastSyntheticMonths: null, busy: false },
+  /* 생애 흐름: data 는 GET /api/lifecycle 응답, goal 편집 상태는 화면에서만 쓴다. */
+  lifecycle: { data: null, editingGoalId: null, goalFormOpen: false, hover: null },
   nav: { depth: 0 },
 };
 
@@ -415,6 +474,7 @@ function renderCurrentView() {
     case 'debts': renderDebts(); break;
     case 'compare': renderCompare(); break;
     case 'spending': renderSpending(); break;
+    case 'lifecycle': renderLifecycle(); break;
     case 'personas': renderPersonas(); break;
     case 'decisions': renderDecisions(); break;
     default: renderHome(); break;
@@ -730,6 +790,27 @@ function emptyProfileSkeleton() {
     id: 'me', display_name: '나', age: null, employment: null,
     monthly_income: 0, fixed_expenses: 0, variable_expenses: 0, emergency_fund: 0,
     credit_band: null, loans: [], flags: [], notes: null,
+    assets: null, goals: [], dependents: 0, risk_tolerance: null, income_type: null,
+    life_stage_override: null, retirement_age: null, target_retirement_monthly_expense: null,
+  };
+}
+
+/* 프로필의 자산 트리는 비어 있을 수 있어 화면에서 항상 같은 모양으로 만들어 쓴다. */
+function assetsOf(profile) {
+  const a = (profile && profile.assets) || {};
+  const p = a.pension || {};
+  return {
+    liquid: a.liquid || 0,
+    investment: a.investment || 0,
+    real_estate: a.real_estate || 0,
+    pension: {
+      national_pension_months_paid: p.national_pension_months_paid || 0,
+      db_dc_balance: p.db_dc_balance || 0,
+      irp_pension_savings_balance: p.irp_pension_savings_balance || 0,
+      isa_balance: p.isa_balance || 0,
+      expected_national_pension_monthly: p.expected_national_pension_monthly === null
+        || p.expected_national_pension_monthly === undefined ? null : p.expected_national_pension_monthly,
+    },
   };
 }
 
@@ -805,6 +886,9 @@ function buildProfileSummaryCard(profile, hasProfile) {
   flagsFieldset.appendChild(flagsGrid);
   form.appendChild(flagsFieldset);
 
+  const lifeFields = buildProfileLifeFields(profile);
+  form.appendChild(lifeFields.wrap);
+
   const msgSlot = h('div', {});
   const saveBtn = h('button', { type: 'submit', class: 'btn btn-primary' }, '프로필 저장');
   form.appendChild(h('div', { class: 'form-actions' }, saveBtn));
@@ -821,6 +905,7 @@ function buildProfileSummaryCard(profile, hasProfile) {
     base.credit_band = creditField.input.value.trim() || null;
     base.flags = Object.keys(flagChecks).filter((k) => flagChecks[k].checked);
     base.loans = (hasProfile ? profile.loans : []) || [];
+    lifeFields.applyTo(base);
     clearNode(msgSlot);
     saveBtn.disabled = true;
     const r = await saveProfile(base);
@@ -831,6 +916,82 @@ function buildProfileSummaryCard(profile, hasProfile) {
 
   card.appendChild(form);
   return card;
+}
+
+/* 자산·연금·생애 정보(P7): 프로필 폼 안의 접이식 구역. 저장은 같은 PUT /api/profile 로 나간다.
+   반환한 applyTo(base) 가 UserProfile 모양(assets.pension 중첩 포함)으로 값을 채운다. */
+function buildProfileLifeFields(profile) {
+  const a = assetsOf(profile);
+  const wrap = h('div', { class: 'life-fields' });
+
+  const link = h('button', {
+    type: 'button', class: 'link-btn life-fields-link',
+    'aria-label': '생애 흐름 화면 열기',
+    onClick: () => navigateTo('lifecycle'),
+  }, '생애 흐름 보기');
+  wrap.appendChild(link);
+
+  const details = h('details', { class: 'collapsible' });
+  details.appendChild(h('summary', {}, '자산·연금·생애 정보'));
+  details.appendChild(h('p', { class: 'form-hint' },
+    '입력한 자산과 연금은 재무비율과 노후 자금 시나리오 계산에만 쓰이며 외부로 보내지 않습니다.'));
+
+  const assetGrid = h('div', { class: 'form-grid' });
+  const liquidF = fieldMoney('assets_liquid', '유동자산', a.liquid);
+  const investF = fieldMoney('assets_investment', '투자자산', a.investment);
+  const realF = fieldMoney('assets_real_estate', '부동산', a.real_estate);
+  const npMonthsF = fieldNumber('np_months', '국민연금 가입 개월', a.pension.national_pension_months_paid, { min: 0 });
+  const npMonthlyF = fieldMoney('np_monthly', '예상 국민연금 월액', a.pension.expected_national_pension_monthly);
+  const dbdcF = fieldMoney('db_dc', '퇴직연금(DB·DC) 잔액', a.pension.db_dc_balance);
+  const irpF = fieldMoney('irp', 'IRP·연금저축 잔액', a.pension.irp_pension_savings_balance);
+  const isaF = fieldMoney('isa', 'ISA 잔액', a.pension.isa_balance);
+  const dependentsF = fieldNumber('dependents', '부양가족 수', profile.dependents || 0, { min: 0 });
+  const riskF = selectField('risk_tolerance', '위험감내도', RISK_TOLERANCE_LABELS, profile.risk_tolerance || '');
+  const incomeTypeF = selectField('income_type', '소득 유형', INCOME_TYPE_LABELS, profile.income_type || '');
+  const retireAgeF = fieldNumber('retirement_age', '은퇴 예정 나이', profile.retirement_age, { min: 0 });
+  const retireExpF = fieldMoney('target_retirement_expense', '은퇴 후 목표 월 생활비', profile.target_retirement_monthly_expense);
+
+  const fields = [liquidF, investF, realF, npMonthsF, npMonthlyF, dbdcF, irpF, isaF,
+    dependentsF, riskF, incomeTypeF, retireAgeF, retireExpF];
+  fields.forEach((f) => assetGrid.appendChild(f.wrap));
+  details.appendChild(assetGrid);
+  details.appendChild(h('p', { class: 'form-hint' },
+    '예상 국민연금 월액을 비워두면 가입 개월과 월소득으로 추정한 교육용 값을 씁니다.'));
+  wrap.appendChild(details);
+
+  /* 빈 칸은 0 이 아니라 "값 없음"으로 보내야 서버가 추정값을 쓴다. */
+  const moneyOrNull = (input) => {
+    const raw = String(input.value || '').trim();
+    return raw === '' ? null : parseMoney(raw);
+  };
+  const intOrNull = (input) => {
+    const raw = String(input.value || '').trim();
+    return raw === '' ? null : toInt(raw);
+  };
+
+  function applyTo(base) {
+    base.assets = {
+      liquid: parseMoney(liquidF.input.value),
+      investment: parseMoney(investF.input.value),
+      real_estate: parseMoney(realF.input.value),
+      pension: {
+        national_pension_months_paid: toInt(npMonthsF.input.value),
+        db_dc_balance: parseMoney(dbdcF.input.value),
+        irp_pension_savings_balance: parseMoney(irpF.input.value),
+        isa_balance: parseMoney(isaF.input.value),
+        expected_national_pension_monthly: moneyOrNull(npMonthlyF.input),
+      },
+    };
+    base.dependents = toInt(dependentsF.input.value);
+    base.risk_tolerance = riskF.select.value || null;
+    base.income_type = incomeTypeF.select.value || null;
+    base.retirement_age = intOrNull(retireAgeF.input);
+    base.target_retirement_monthly_expense = moneyOrNull(retireExpF.input);
+    base.goals = (profile && profile.goals) || [];
+    base.life_stage_override = (profile && profile.life_stage_override) || null;
+  }
+
+  return { wrap, applyTo };
 }
 
 async function saveProfile(profileObj) {
@@ -2305,6 +2466,617 @@ function renderSpendingResults() {
   slot.appendChild(msgSlot);
 }
 
+/* ---------- 10-2. 화면: 생애 흐름 (P7) ----------
+   GET /api/lifecycle 의 LifecycleView 를 그대로 그린다. 수치는 서버가 계산하고
+   화면은 포맷과 배치만 맡는다. 목표 편집만 PUT /api/profile 로 되돌려 보낸다. */
+
+const LIFECYCLE_LEAD = '참고 시나리오이며 특정 상품이나 자산 배분을 권하지 않습니다';
+
+function ratioValueText(meta, value) {
+  if (value === null || value === undefined) return '계산 불가';
+  return meta.unit === 'months' ? fmtMonths1(value) : fmtRatioPct1(value);
+}
+
+/* thresholds 는 비율 이름이 아니라 min_/max_ 접두 키를 쓴다(SPEC 2.7).
+   부채비율·투자자산비율처럼 단계 기준값이 없는 비율은 null 을 돌려준다. */
+function ratioThresholdValue(meta, thresholds) {
+  if (!meta.thresholdKey || !thresholds) return null;
+  const t = thresholds[meta.thresholdKey];
+  return t === null || t === undefined ? null : Number(t);
+}
+
+function ratioThresholdText(meta, t) {
+  if (t === null) return '단계 기준값 없음';
+  const num = meta.unit === 'months' ? `${t.toFixed(0)}개월` : fmtRatioPct1(t);
+  return `기준 ${num} ${meta.dir === 'max' ? '이하' : '이상'}`;
+}
+
+function buildRatioTiles(ratios) {
+  const wrap = h('div', {});
+  const flags = ratios.flags || {};
+  const grid = h('div', { class: 'ratio-tiles' });
+  RATIO_META.forEach((meta) => {
+    const threshold = ratioThresholdValue(meta, ratios.thresholds);
+    const raw = flags[meta.key] || 'na';
+    /* 기준값이 없으면 서버가 "ok"를 주더라도 "기준 충족"이라고 쓰지 않는다. */
+    const flag = raw === 'ok' && threshold === null ? 'ref' : raw;
+    const tile = h('div', { class: `ratio-tile is-${flag}` });
+    const head = h('div', { class: 'ratio-tile-head' });
+    head.appendChild(h('span', { class: 'ratio-label' }, meta.label));
+    head.appendChild(h('span', { class: 'ratio-flag' },
+      flag === 'ok' ? '기준 충족' : flag === 'warn' ? '점검 필요' : flag === 'ref' ? '참고 지표' : '자료 부족'));
+    tile.appendChild(head);
+    tile.appendChild(h('div', { class: 'ratio-value' }, ratioValueText(meta, ratios[meta.key])));
+    tile.appendChild(h('div', { class: 'ratio-threshold' }, ratioThresholdText(meta, threshold)));
+    const sentence = (ratios.interpretations || {})[meta.key];
+    if (sentence) tile.appendChild(h('p', { class: 'ratio-note' }, sentence));
+    grid.appendChild(tile);
+  });
+  wrap.appendChild(grid);
+  wrap.appendChild(h('p', { class: 'period-caption' },
+    `총자산 ${fmtWon(ratios.total_assets)} · 순자산 ${fmtWon(ratios.net_worth)}`));
+  return wrap;
+}
+
+function buildStageCard(stage) {
+  const card = h('div', { class: 'panel-card stage-card' });
+  const head = h('div', { class: 'panel-card-head' });
+  const headLeft = h('div', {});
+  headLeft.appendChild(h('h2', {}, '지금의 생애 단계'));
+  headLeft.appendChild(h('p', { class: 'panel-card-sub' }, '나이와 함께 소득 안정성, 부양가족, 부채 상황을 같이 봅니다.'));
+  head.appendChild(headLeft);
+  head.appendChild(badge(stage.label || '', 'badge-accent stage-badge'));
+  card.appendChild(head);
+
+  const reasons = plainList(stage.reasons, 'plain-list');
+  if (reasons) card.appendChild(reasons);
+
+  const cols = h('div', { class: 'stage-cols' });
+  const makeCol = (title, items, cls) => {
+    const col = h('div', { class: `stage-col ${cls}` });
+    col.appendChild(h('h3', { class: 'stage-col-title' }, title));
+    if (items && items.length) {
+      const ul = h('ul', { class: 'stage-list' });
+      items.forEach((s) => ul.appendChild(h('li', {}, s)));
+      col.appendChild(ul);
+    } else {
+      col.appendChild(h('p', { class: 'empty-text' }, '해당 항목이 없습니다.'));
+    }
+    return col;
+  };
+  cols.appendChild(makeCol('지금 우선순위', stage.priorities, 'is-priority'));
+  cols.appendChild(makeCol('피해야 할 행동', stage.avoid, 'is-avoid'));
+  card.appendChild(cols);
+
+  if (stage.accounts_note) card.appendChild(h('p', { class: 'stage-note' }, stage.accounts_note));
+  return card;
+}
+
+function retirementRow(label, value, valueClass) {
+  return h('div', { class: 'scn-row' },
+    h('span', { class: 'scn-row-label' }, label),
+    h('span', { class: `scn-row-value${valueClass ? ' ' + valueClass : ''}` }, value));
+}
+
+function buildRetirementCard(proj) {
+  const isBase = proj.scenario === '기준';
+  const card = h('div', { class: 'scenario-card' + (isBase ? ' is-base' : '') });
+
+  const head = h('div', { class: 'scenario-card-head' });
+  head.appendChild(h('span', { class: 'scenario-name' }, proj.scenario || ''));
+  if (isBase) head.appendChild(badge('기준선', 'badge-accent'));
+  card.appendChild(head);
+  card.appendChild(h('p', { class: 'scenario-sub' },
+    `실질수익률 ${fmtRatioPct1(proj.real_return)} · 물가 ${fmtRatioPct1(proj.inflation)} · 은퇴 ${proj.retirement_age}세(${proj.years_to_retirement}년 뒤)`));
+
+  const rows = h('div', { class: 'scn-rows' });
+  rows.appendChild(retirementRow('은퇴 시점 생활비', fmtWon(proj.retirement_living_cost)));
+  rows.appendChild(retirementRow('확정 소득(월)', fmtWon(proj.guaranteed_income_monthly)));
+  rows.appendChild(retirementRow('월 부족액', fmtWon(proj.monthly_gap)));
+  rows.appendChild(retirementRow('필요 자금', fmtWon(proj.required_fund_pv)));
+  rows.appendChild(retirementRow('예상 적립', fmtWon(proj.projected_fund_fv)));
+
+  const shortfall = Number(proj.shortfall || 0);
+  rows.appendChild(retirementRow(
+    shortfall > 0 ? '부족' : '여유',
+    fmtWon(Math.abs(shortfall)),
+    shortfall > 0 ? 'value-negative' : 'value-positive'));
+  rows.appendChild(retirementRow('필요 월 저축', fmtWon(proj.required_monthly_saving)));
+  card.appendChild(rows);
+
+  if (proj.assumptions && proj.assumptions.length) {
+    const details = h('details', { class: 'collapsible quiet' });
+    details.appendChild(h('summary', {}, '가정 보기'));
+    details.appendChild(plainList(proj.assumptions, 'plain-list'));
+    card.appendChild(details);
+  }
+  return card;
+}
+
+function buildRetirementSection(list) {
+  const wrap = h('div', { class: 'scenario-cards' });
+  (list || []).forEach((p) => wrap.appendChild(buildRetirementCard(p)));
+  return wrap;
+}
+
+/* 순자산 곡선: 외부 차트 라이브러리 없이 인라인 SVG 로만 그린다.
+   viewBox 를 쓰므로 폭이 좁아지면 그대로 축소된다. */
+const NW_W = 720;
+const NW_H = 300;
+const NW_PAD = { left: 62, right: 16, top: 16, bottom: 32 };
+
+function groupPathRows(rows) {
+  const byScenario = new Map();
+  (rows || []).forEach((r) => {
+    const key = r.scenario || '기준';
+    if (!byScenario.has(key)) byScenario.set(key, []);
+    byScenario.get(key).push(r);
+  });
+  byScenario.forEach((arr) => arr.sort((a, b) => Number(a.age) - Number(b.age)));
+  return byScenario;
+}
+
+function buildNetWorthChart(rows) {
+  const byScenario = groupPathRows(rows);
+  const base = byScenario.get('기준') || byScenario.values().next().value || [];
+  if (!base.length) return noticeBox('순자산 경로를 계산할 자료가 부족합니다.');
+
+  const ages = base.map((r) => Number(r.age));
+  const ageMin = ages[0];
+  const ageMax = ages[ages.length - 1];
+  const ageSpan = Math.max(1, ageMax - ageMin);
+
+  let yMax = 0;
+  let yMin = 0;
+  byScenario.forEach((arr) => arr.forEach((r) => {
+    yMax = Math.max(yMax, Number(r.net_worth) || 0);
+    yMin = Math.min(yMin, Number(r.net_worth) || 0);
+  }));
+  base.forEach((r) => { yMax = Math.max(yMax, Number(r.debt_balance) || 0); });
+  if (yMax === yMin) yMax = yMin + 1;
+
+  const px = (age) => NW_PAD.left + ((age - ageMin) / ageSpan) * (NW_W - NW_PAD.left - NW_PAD.right);
+  const py = (v) => NW_PAD.top + ((yMax - v) / (yMax - yMin)) * (NW_H - NW_PAD.top - NW_PAD.bottom);
+  const linePath = (arr, valueKey) => arr
+    .map((r, i) => `${i === 0 ? 'M' : 'L'}${px(Number(r.age)).toFixed(1)} ${py(Number(r[valueKey]) || 0).toFixed(1)}`)
+    .join(' ');
+
+  const svg = svgEl('svg', {
+    viewBox: `0 0 ${NW_W} ${NW_H}`, class: 'nw-chart', role: 'img',
+    'aria-label': `${ageMin}세부터 ${ageMax}세까지 시나리오별 순자산과 부채 잔액 추이. 자세한 수치는 아래 표에 있습니다.`,
+  });
+
+  /* 가로 눈금과 y축 라벨 */
+  const ticks = 4;
+  for (let i = 0; i <= ticks; i += 1) {
+    const v = yMin + ((yMax - yMin) * i) / ticks;
+    const y = py(v);
+    svg.appendChild(svgEl('line', {
+      x1: NW_PAD.left, x2: NW_W - NW_PAD.right, y1: y.toFixed(1), y2: y.toFixed(1),
+      stroke: '#E5E7EB', 'stroke-width': 1,
+    }));
+    svg.appendChild(svgEl('text', {
+      x: NW_PAD.left - 8, y: (y + 4).toFixed(1), 'text-anchor': 'end', class: 'nw-axis-text',
+    }, fmtWonShort(v)));
+  }
+  if (yMin < 0) {
+    svg.appendChild(svgEl('line', {
+      x1: NW_PAD.left, x2: NW_W - NW_PAD.right, y1: py(0).toFixed(1), y2: py(0).toFixed(1),
+      stroke: '#9CA3AF', 'stroke-width': 1, 'stroke-dasharray': '3 3',
+    }));
+  }
+
+  /* x축 라벨: 5년 간격과 마지막 나이 */
+  const xAges = [];
+  for (let a = ageMin; a <= ageMax; a += 5) xAges.push(a);
+  if (xAges[xAges.length - 1] !== ageMax) xAges.push(ageMax);
+  xAges.forEach((a) => {
+    svg.appendChild(svgEl('text', {
+      x: px(a).toFixed(1), y: NW_H - 10, 'text-anchor': 'middle', class: 'nw-axis-text',
+    }, `${a}세`));
+  });
+  svg.appendChild(svgEl('text', { x: 4, y: 12, class: 'nw-axis-title' }, '순자산(원)'));
+
+  /* 부채선을 먼저, 기준 시나리오를 마지막에 그려 위로 올린다. */
+  svg.appendChild(svgEl('path', {
+    d: linePath(base, 'debt_balance'), fill: 'none', stroke: LC_DEBT_COLOR,
+    'stroke-width': 1.5, 'stroke-dasharray': '5 3', 'stroke-linejoin': 'round',
+  }));
+  LC_SCENARIO_ORDER.forEach((name) => {
+    const arr = byScenario.get(name);
+    if (!arr || !arr.length) return;
+    const style = LC_SCENARIO_STYLE[name] || LC_SCENARIO_STYLE['기준'];
+    svg.appendChild(svgEl('path', {
+      d: linePath(arr, 'net_worth'), fill: 'none', stroke: style.color,
+      'stroke-width': style.width, 'stroke-dasharray': style.dash,
+      'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+    }));
+  });
+
+  /* 마우스를 올리면 세로 안내선과 아래 읽기 줄이 함께 움직인다. */
+  const guide = svgEl('line', {
+    y1: NW_PAD.top, y2: NW_H - NW_PAD.bottom, stroke: '#4F46E5',
+    'stroke-width': 1, 'stroke-dasharray': '2 2', class: 'nw-guide is-hidden',
+    x1: NW_PAD.left, x2: NW_PAD.left,
+  });
+  svg.appendChild(guide);
+
+  const readout = h('p', { class: 'nw-readout' }, '그래프 위에 마우스를 올리면 그 나이의 값을 보여줍니다.');
+  const hit = svgEl('rect', {
+    x: NW_PAD.left, y: NW_PAD.top,
+    width: NW_W - NW_PAD.left - NW_PAD.right, height: NW_H - NW_PAD.top - NW_PAD.bottom,
+    fill: 'transparent', class: 'nw-hit',
+  });
+  const showAt = (idx) => {
+    const row = base[idx];
+    if (!row) return;
+    const age = Number(row.age);
+    guide.setAttribute('x1', px(age).toFixed(1));
+    guide.setAttribute('x2', px(age).toFixed(1));
+    guide.classList.remove('is-hidden');
+    const parts = [`${age}세(${row.year}년)`];
+    LC_LEGEND_ORDER.forEach((name) => {
+      const arr = byScenario.get(name);
+      if (!arr) return;
+      const found = arr.find((r) => Number(r.age) === age);
+      if (found) parts.push(`${name} ${fmtWonShort(found.net_worth)}원`);
+    });
+    parts.push(`부채 ${fmtWonShort(row.debt_balance)}원`);
+    readout.textContent = parts.join(' · ');
+  };
+  hit.addEventListener('pointermove', (e) => {
+    const rect = svg.getBoundingClientRect();
+    if (!rect.width) return;
+    const svgX = ((e.clientX - rect.left) / rect.width) * NW_W;
+    const ratio = (svgX - NW_PAD.left) / (NW_W - NW_PAD.left - NW_PAD.right);
+    const age = ageMin + Math.max(0, Math.min(1, ratio)) * ageSpan;
+    let bestIdx = 0;
+    base.forEach((r, i) => {
+      if (Math.abs(Number(r.age) - age) < Math.abs(Number(base[bestIdx].age) - age)) bestIdx = i;
+    });
+    showAt(bestIdx);
+  });
+  hit.addEventListener('pointerleave', () => {
+    guide.classList.add('is-hidden');
+    readout.textContent = '그래프 위에 마우스를 올리면 그 나이의 값을 보여줍니다.';
+  });
+  svg.appendChild(hit);
+
+  const legend = h('div', { class: 'nw-legend' });
+  LC_LEGEND_ORDER.forEach((name) => {
+    if (!byScenario.get(name)) return;
+    const style = LC_SCENARIO_STYLE[name] || LC_SCENARIO_STYLE['기준'];
+    const sw = h('span', { class: 'nw-swatch' + (style.dash ? ' is-dashed' : '') });
+    sw.style.background = style.color;
+    sw.style.color = style.color;
+    legend.appendChild(h('span', { class: 'nw-legend-item' }, sw, `${name} 순자산`));
+  });
+  const debtSw = h('span', { class: 'nw-swatch is-dashed' });
+  debtSw.style.background = LC_DEBT_COLOR;
+  debtSw.style.color = LC_DEBT_COLOR;
+  legend.appendChild(h('span', { class: 'nw-legend-item' }, debtSw, '부채 잔액'));
+
+  return h('div', { class: 'nw-chart-wrap' }, svg, readout, legend);
+}
+
+function buildNetWorthTable(rows) {
+  const byScenario = groupPathRows(rows);
+  const base = byScenario.get('기준') || byScenario.values().next().value || [];
+  if (!base.length) return null;
+  const startAge = Number(base[0].age);
+  const picked = base.filter((r, i) => (Number(r.age) - startAge) % 5 === 0 || i === base.length - 1);
+
+  const table = h('table', { class: 'data-table stackable' });
+  table.appendChild(h('thead', {}, h('tr', {},
+    h('th', { class: 'text-left' }, '나이'), h('th', {}, '순자산 기준'), h('th', {}, '부채'))));
+  const tbody = h('tbody', {});
+  picked.forEach((r) => {
+    tbody.appendChild(h('tr', {},
+      h('td', { class: 'text-left', 'data-label': '나이' }, `${r.age}세 (${r.year}년)`),
+      h('td', { 'data-label': '순자산 기준' }, fmtWon(r.net_worth)),
+      h('td', { 'data-label': '부채' }, fmtWon(r.debt_balance))));
+  });
+  table.appendChild(tbody);
+  return h('div', { class: 'table-wrap' }, table);
+}
+
+/* 소득 공백 지도의 numbers 는 구간마다 키가 다르다.
+   "...률"로 끝나면 비율, 1만 이상 정수는 금액, 나머지는 그대로 센다. */
+function gapNumberText(key, value) {
+  if (typeof value !== 'number') return String(value === null || value === undefined ? '-' : value);
+  if (/[률율]$/.test(key) || !Number.isInteger(value)) return fmtRatioPct1(value);
+  if (Math.abs(value) >= 10000) return fmtWon(value);
+  return value.toLocaleString('ko-KR');
+}
+
+function buildIncomeGapMap(list) {
+  const wrap = h('div', { class: 'gap-list' });
+  (list || []).forEach((row) => {
+    const item = h('div', { class: 'gap-item' });
+    item.appendChild(h('div', { class: 'gap-period' }, row.period || ''));
+    const flows = h('div', { class: 'gap-flows' });
+    flows.appendChild(h('div', { class: 'gap-flow' },
+      h('span', { class: 'gap-flow-label' }, '유입'), h('span', {}, row.inflow || '-')));
+    flows.appendChild(h('div', { class: 'gap-flow' },
+      h('span', { class: 'gap-flow-label' }, '유출'), h('span', {}, row.outflow || '-')));
+    item.appendChild(flows);
+    if (row.key_question) item.appendChild(h('p', { class: 'gap-question' }, row.key_question));
+    const numbers = row.numbers || {};
+    const keys = Object.keys(numbers);
+    if (keys.length) {
+      const pills = h('div', { class: 'evidence-row' });
+      keys.forEach((k) => pills.appendChild(h('span', { class: 'evidence-pill' }, `${k} ${gapNumberText(k, numbers[k])}`)));
+      item.appendChild(pills);
+    }
+    wrap.appendChild(item);
+  });
+  return wrap;
+}
+
+/* ----- 목표 ----- */
+
+function nextGoalId(goals) {
+  let max = 0;
+  (goals || []).forEach((g) => {
+    const m = /^G(\d+)$/.exec(g.id || '');
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  });
+  let n = max + 1;
+  const ids = new Set((goals || []).map((g) => g.id));
+  while (ids.has('G' + n)) n += 1;
+  return 'G' + n;
+}
+
+async function saveGoals(nextGoals) {
+  const profile = state.profile;
+  if (!profile) return { ok: false, error: '저장된 프로필이 없습니다.' };
+  const r = await saveProfile({ ...profile, goals: nextGoals });
+  return r;
+}
+
+function buildGoalItem(goal, profile) {
+  const item = h('div', { class: 'goal-item' });
+  const head = h('div', { class: 'goal-head' });
+  const headLeft = h('div', { class: 'goal-head-left' });
+  headLeft.appendChild(h('span', { class: 'goal-label' }, goal.label || ''));
+  headLeft.appendChild(badge(GOAL_KIND_LABELS[goal.kind] || goal.kind || '기타', ''));
+  head.appendChild(headLeft);
+
+  const actions = h('div', { class: 'row-actions' });
+  actions.appendChild(h('button', {
+    type: 'button', class: 'btn btn-secondary btn-sm', 'aria-label': `${goal.label || '목표'} 수정`,
+    onClick: () => {
+      state.lifecycle.editingGoalId = goal.id;
+      state.lifecycle.goalFormOpen = true;
+      renderLifecycle();
+    },
+  }, '수정'));
+  actions.appendChild(h('button', {
+    type: 'button', class: 'btn btn-danger btn-sm', 'aria-label': `${goal.label || '목표'} 삭제`,
+    onClick: async () => {
+      if (!confirm('이 목표를 삭제할까요?')) return;
+      const nextGoals = ((profile && profile.goals) || []).filter((g) => g.id !== goal.id);
+      const r = await saveGoals(nextGoals);
+      if (r.ok) renderLifecycle();
+    },
+  }, '삭제'));
+  head.appendChild(actions);
+  item.appendChild(head);
+
+  const target = Number(goal.target_amount) || 0;
+  const saved = Number(goal.saved_amount) || 0;
+  const pct = goal.progress_pct === null || goal.progress_pct === undefined
+    ? (target > 0 ? Math.min(100, (saved / target) * 100) : 0)
+    : Number(goal.progress_pct);
+
+  item.appendChild(h('div', { class: 'cat-bar-top' },
+    h('span', { class: 'cat-name' }, `${fmtWon(saved)} / ${fmtWon(target)}`),
+    h('span', { class: 'cat-amount' }, fmtPct1(pct))));
+  item.appendChild(h('div', { class: 'cat-track' },
+    h('span', { class: 'cat-fill', style: `width:${Math.max(0, Math.min(100, pct)).toFixed(1)}%` })));
+
+  const remaining = Math.max(0, target - saved);
+  const months = monthsUntilDate(goal.target_date);
+  const bits = [`목표일 ${goal.target_date || '-'}`];
+  if (months === null) bits.push('남은 기간 확인 불가');
+  else if (months > 0) bits.push(`남은 기간 ${months}개월`);
+  else bits.push('목표일이 지났습니다');
+  if (remaining > 0 && months !== null && months > 0) {
+    bits.push(`남은 기간으로 나누면 월 ${fmtWon(Math.ceil(remaining / months))}`);
+  } else if (remaining === 0) {
+    bits.push('목표 금액을 채웠습니다');
+  }
+  item.appendChild(h('div', { class: 'cat-bar-bottom' }, h('span', { class: 'goal-meta' }, bits.join(' · '))));
+  return item;
+}
+
+function buildGoalForm(profile) {
+  const goals = (profile && profile.goals) || [];
+  const editing = state.lifecycle.editingGoalId
+    ? goals.find((g) => g.id === state.lifecycle.editingGoalId)
+    : null;
+
+  const card = h('div', { class: 'panel-card' });
+  card.appendChild(h('h3', {}, editing ? '목표 수정' : '목표 추가'));
+
+  const form = h('form', { 'aria-label': editing ? '목표 수정 폼' : '목표 추가 폼' });
+  const grid = h('div', { class: 'form-grid' });
+  const kindSel = selectField('goal_kind', '종류', GOAL_KIND_LABELS, editing ? editing.kind : 'housing');
+  const labelF = fieldText('goal_label', '이름', editing ? editing.label : '');
+  const amountF = fieldMoney('goal_target_amount', '목표 금액', editing ? editing.target_amount : 0);
+  const dateF = fieldDate('goal_target_date', '목표일', editing ? editing.target_date : '');
+  const savedF = fieldMoney('goal_saved_amount', '지금까지 모은 금액', editing ? editing.saved_amount : 0);
+  const changeF = fieldNumber('goal_income_change', '목표 시점 소득 변화율(예: -0.3)',
+    editing ? editing.monthly_income_change_pct : 0, { step: 0.05 });
+  const priorityF = fieldNumber('goal_priority', '우선순위(작을수록 먼저)', editing ? editing.priority : 100, { min: 0 });
+  [kindSel, labelF, amountF, dateF, savedF, changeF, priorityF].forEach((f) => grid.appendChild(f.wrap));
+  form.appendChild(grid);
+
+  const msgSlot = h('div', {});
+  const actions = h('div', { class: 'form-actions' });
+  const submitBtn = h('button', { type: 'submit', class: 'btn btn-primary' }, editing ? '목표 저장' : '목표 추가');
+  actions.appendChild(submitBtn);
+  actions.appendChild(h('button', {
+    type: 'button', class: 'btn btn-secondary',
+    onClick: () => {
+      state.lifecycle.editingGoalId = null;
+      state.lifecycle.goalFormOpen = false;
+      renderLifecycle();
+    },
+  }, '닫기'));
+  form.appendChild(actions);
+  form.appendChild(msgSlot);
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    clearNode(msgSlot);
+    const label = labelF.input.value.trim();
+    const targetDate = dateF.input.value;
+    const targetAmount = parseMoney(amountF.input.value);
+    if (!targetDate) {
+      msgSlot.appendChild(noticeBox('목표일을 입력해주세요.', { error: true }));
+      return;
+    }
+    if (targetAmount <= 0) {
+      msgSlot.appendChild(noticeBox('목표 금액을 0보다 크게 입력해주세요.', { error: true }));
+      return;
+    }
+    const goalObj = {
+      id: editing ? editing.id : nextGoalId(goals),
+      kind: kindSel.select.value,
+      label: label || GOAL_KIND_LABELS[kindSel.select.value] || '목표',
+      target_amount: targetAmount,
+      target_date: targetDate,
+      priority: toInt(priorityF.input.value),
+      saved_amount: parseMoney(savedF.input.value),
+      monthly_income_change_pct: toFloat(changeF.input.value),
+    };
+    const nextGoals = editing
+      ? goals.map((g) => (g.id === editing.id ? { ...g, ...goalObj } : g))
+      : [...goals, goalObj];
+    submitBtn.disabled = true;
+    const r = await saveGoals(nextGoals);
+    submitBtn.disabled = false;
+    if (!r.ok) {
+      msgSlot.appendChild(noticeBox('저장하지 못했습니다. ' + (r.error || ''), { error: true }));
+      return;
+    }
+    state.lifecycle.editingGoalId = null;
+    state.lifecycle.goalFormOpen = false;
+    renderLifecycle();
+  });
+
+  card.appendChild(form);
+  return card;
+}
+
+function buildGoalsSection(goalViews, profile) {
+  const wrap = h('div', {});
+  const list = goalViews || [];
+  if (!list.length) {
+    wrap.appendChild(noticeBox('등록된 목표가 없습니다. 목표를 넣으면 진행률과 필요한 월 저축액을 함께 보여드려요.'));
+  } else {
+    const listWrap = h('div', { class: 'goal-list' });
+    list.forEach((g) => listWrap.appendChild(buildGoalItem(g, profile)));
+    wrap.appendChild(listWrap);
+  }
+
+  if (state.lifecycle.goalFormOpen) {
+    wrap.appendChild(buildGoalForm(profile));
+  } else {
+    const row = h('div', { class: 'form-actions' });
+    row.appendChild(h('button', {
+      type: 'button', class: 'btn btn-secondary',
+      onClick: () => {
+        state.lifecycle.editingGoalId = null;
+        state.lifecycle.goalFormOpen = true;
+        renderLifecycle();
+      },
+    }, '목표 추가'));
+    wrap.appendChild(row);
+  }
+  return wrap;
+}
+
+async function renderLifecycle() {
+  const { root, isStale } = mountView('lifecycle');
+  focusMainAfterRender();
+  appendViewHeader(root, '생애 흐름', LIFECYCLE_LEAD);
+  root.appendChild(h('p', { class: 'loading-text' }, '불러오는 중...'));
+
+  const [lifeRes, profileRes] = await Promise.all([Api.getLifecycle(), Api.getProfile()]);
+  if (isStale()) return;
+  clearNode(root);
+  appendViewHeader(root, '생애 흐름', LIFECYCLE_LEAD);
+
+  if (profileRes.ok) state.profile = profileRes.data;
+
+  if (!lifeRes.ok) {
+    if (lifeRes.status === 404) {
+      root.appendChild(noticeBox('아직 저장된 프로필이 없습니다. 계정을 고르거나 내 부채 화면에서 정보를 입력해주세요.'));
+      const row = h('div', { class: 'form-actions' });
+      row.appendChild(h('button', { type: 'button', class: 'btn btn-primary', onClick: () => navigateTo('personas') }, '계정 고르기'));
+      row.appendChild(h('button', { type: 'button', class: 'btn btn-secondary', onClick: () => navigateTo('debts') }, '내 부채로 가기'));
+      root.appendChild(row);
+      return;
+    }
+    root.appendChild(noticeBox('서버에 연결되지 않았습니다.', { error: true, onRetry: renderLifecycle }));
+    return;
+  }
+
+  const data = lifeRes.data || {};
+  state.lifecycle.data = data;
+  const profile = state.profile;
+
+  root.appendChild(buildStageCard(data.stage || {}));
+
+  root.appendChild(h('h2', { class: 'section-title' }, '재무 비율'));
+  root.appendChild(h('p', { class: 'section-lead' },
+    '생애 단계별 기준값과 비교한 결과입니다. 기준값은 참고용이며 개인 상황에 따라 다를 수 있습니다.'));
+  root.appendChild(buildRatioTiles(data.ratios || {}));
+
+  const retirement = data.retirement || [];
+  if (retirement.length) {
+    root.appendChild(h('h2', { class: 'section-title' }, '노후 자금 시뮬레이션'));
+    root.appendChild(h('p', { class: 'section-lead' },
+      '낙관·기준·비관 세 가지 가정으로 같은 계산을 돌린 결과입니다.'));
+    root.appendChild(buildRetirementSection(retirement));
+  }
+
+  const path = data.net_worth_path || [];
+  if (path.length) {
+    root.appendChild(h('h2', { class: 'section-title' }, '순자산 흐름'));
+    root.appendChild(buildNetWorthChart(path));
+    const table = buildNetWorthTable(path);
+    if (table) {
+      root.appendChild(table);
+      root.appendChild(h('p', { class: 'table-note' }, '5년 간격으로 추린 값이며 연 단위 근사입니다.'));
+    }
+  }
+
+  const gapMap = data.income_gap_map;
+  if (gapMap && gapMap.length) {
+    root.appendChild(h('h2', { class: 'section-title' }, '소득 공백 지도'));
+    root.appendChild(h('p', { class: 'section-lead' },
+      '퇴직부터 연금 개시까지 소득이 비는 구간을 네 시기로 나눠 봅니다.'));
+    root.appendChild(buildIncomeGapMap(gapMap));
+  }
+
+  root.appendChild(h('h2', { class: 'section-title' }, '목표'));
+  root.appendChild(buildGoalsSection(data.goals || [], profile));
+
+  const assumptions = data.assumptions || [];
+  const footer = h('div', { class: 'lifecycle-footer' });
+  if (assumptions.length) {
+    const details = h('details', { class: 'collapsible quiet' });
+    details.appendChild(h('summary', {}, `이 화면이 쓴 가정 ${assumptions.length}개 보기`));
+    details.appendChild(plainList(assumptions, 'plain-list'));
+    footer.appendChild(details);
+  }
+  footer.appendChild(h('p', { class: 'lifecycle-disclaimer' }, data.disclaimer || LIFECYCLE_LEAD));
+  root.appendChild(footer);
+}
+
 /* ---------- 11. 화면: 페르소나 ---------- */
 
 /* 계정(페르소나)이 바뀌면 대화는 그 계정의 것이므로 화면에서 비운다. */
@@ -2663,6 +3435,12 @@ async function handleChipClick(chip) {
       break;
     case 'spending':
       navigateTo('spending');
+      break;
+    case 'lifecycle':
+    case 'retirement':
+    case 'saving':
+    case 'liquidity':
+      navigateTo('lifecycle');
       break;
     case 'onboarding':
       navigateTo(state.profile ? 'debts' : 'personas');

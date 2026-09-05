@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Optional, Any
 
 import yaml
 
@@ -30,11 +30,20 @@ def load_thresholds(path: str = DEFAULT_THRESHOLDS_PATH) -> dict[str, dict[str, 
     return parse_thresholds(data)
 
 
-def _goal_view(profile: UserProfile) -> list[dict[str, Any]]:
+def _goal_view(profile: UserProfile, *, today: Optional[date] = None) -> list[dict[str, Any]]:
+    """목표별 진행률과 남은 개월, 월 필요 저축액. 계산은 여기(엔진)에서 하고 화면은 표시만 한다."""
     out: list[dict[str, Any]] = []
     for g in sorted(profile.goals, key=lambda x: (x.priority, x.target_date, x.id)):
         progress_pct = round(min(g.saved_amount / g.target_amount, 1.0) * 100, 1) if g.target_amount > 0 else None
+        remaining_months = None
+        monthly_needed = None
+        if today is not None:
+            remaining_months = max((g.target_date.year - today.year) * 12 + (g.target_date.month - today.month), 0)
+            gap = max(g.target_amount - g.saved_amount, 0)
+            monthly_needed = -(-gap // remaining_months) if remaining_months > 0 else gap  # 올림 나눗셈
         out.append({
+            "remaining_months": remaining_months,
+            "monthly_needed": monthly_needed,
             "id": g.id,
             "kind": g.kind,
             "label": g.label,
@@ -75,7 +84,7 @@ def build_lifecycle_view(
         profile, params, today=today, until_age=until_age, scenario_returns=scenario_returns,
     )
 
-    goals_view = _goal_view(profile)
+    goals_view = _goal_view(profile, today=today)
 
     assumptions: list[str] = []
     assumptions.append(f"생애 단계 판정 근거: {' '.join(stage_result.reasons)}")

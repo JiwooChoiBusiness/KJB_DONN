@@ -1519,6 +1519,209 @@ table.data-table tfoot td {
   line-height: 1.6;
 }
 
+/* 생애 흐름 (P7) */
+.link-btn {
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  padding: 0;
+}
+.link-btn:hover { color: var(--accent-dark); }
+.form-hint { font-size: 11.5px; color: var(--muted); margin-top: var(--sp-2); }
+
+/* 내 부채 안의 자산·연금 구역: 접이식 제목 줄 오른쪽에 화면 이동 링크를 둔다. */
+.life-fields { position: relative; margin-top: var(--sp-4); }
+.life-fields-link { position: absolute; right: 0; top: 10px; }
+.life-fields details.collapsible { margin-top: 0; }
+
+/* 재무비율 타일 */
+.ratio-tiles {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--sp-3);
+}
+.ratio-tile {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--neutral);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  padding: var(--sp-3);
+  background: #fff;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ratio-tile.is-ok { border-left-color: var(--positive); }
+.ratio-tile.is-warn { border-left-color: #B45309; background: var(--warn-bg); }
+.ratio-tile.is-na, .ratio-tile.is-ref { border-left-color: #D1D5DB; }
+.ratio-tile-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-1); }
+.ratio-label { font-size: 11.5px; color: var(--muted); font-weight: 500; }
+.ratio-flag { font-size: 10.5px; font-weight: 500; flex: none; }
+.ratio-tile.is-ok .ratio-flag { color: var(--positive); }
+.ratio-tile.is-warn .ratio-flag { color: #B45309; }
+.ratio-tile.is-na .ratio-flag, .ratio-tile.is-ref .ratio-flag { color: var(--muted); }
+.ratio-value {
+  font-size: 18px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.ratio-tile.is-ok .ratio-value { color: var(--positive); }
+.ratio-tile.is-warn .ratio-value { color: #B45309; }
+.ratio-tile.is-na .ratio-value { color: var(--muted); }
+.ratio-tile.is-ref .ratio-value { color: var(--text); }
+.ratio-threshold { font-size: 11px; color: var(--muted); }
+.ratio-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+  margin-top: var(--sp-1);
+  padding-top: var(--sp-1);
+  border-top: 1px dashed var(--border);
+  overflow-wrap: anywhere;
+}
+.ratio-tile.is-warn .ratio-note { color: var(--warn-text); border-top-color: #FCD34D; }
+
+/* 생애 단계 카드 */
+.stage-badge { font-size: 12.5px; padding: 3px var(--sp-3); }
+.stage-cols {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+}
+.stage-col {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--sp-3);
+  background: var(--bg-subtle);
+  min-width: 0;
+}
+.stage-col.is-priority { border-left: 3px solid var(--accent); }
+.stage-col.is-avoid { border-left: 3px solid #B45309; }
+.stage-col-title { font-size: 12.5px; font-weight: 600; margin-bottom: var(--sp-2); }
+.stage-list { display: flex; flex-direction: column; gap: var(--sp-1); font-size: 13px; }
+.stage-list li { padding-left: var(--sp-3); position: relative; }
+.stage-list li::before { content: "\2022"; position: absolute; left: 0; color: var(--muted); }
+.stage-note {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.6;
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-2);
+  border-top: 1px dashed var(--border);
+}
+
+/* 노후 자금 시나리오 카드 */
+.scenario-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sp-3);
+}
+.scenario-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: var(--sp-4);
+  background: #fff;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.scenario-card.is-base { border-color: var(--accent); box-shadow: var(--shadow-raised); }
+.scenario-card-head { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.scenario-name { font-size: 15px; font-weight: 600; }
+.scenario-sub { font-size: 11.5px; color: var(--muted); margin-top: var(--sp-1); line-height: 1.5; }
+.scn-rows { display: flex; flex-direction: column; margin-top: var(--sp-3); }
+.scn-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+}
+.scn-row:last-child { border-bottom: none; }
+.scn-row-label { color: var(--muted); flex: none; }
+.scn-row-value { font-variant-numeric: tabular-nums; font-weight: 500; text-align: right; overflow-wrap: anywhere; }
+.scenario-card details.collapsible { margin-top: auto; }
+
+/* 순자산 곡선 */
+.nw-chart-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+  background: #fff;
+}
+.nw-chart { display: block; width: 100%; height: auto; }
+.nw-axis-text { font-size: 10px; fill: var(--muted); }
+.nw-axis-title { font-size: 10px; fill: var(--muted); }
+.nw-hit { cursor: crosshair; }
+.nw-readout {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-top: var(--sp-2);
+  min-height: 18px;
+}
+.nw-legend { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin-top: var(--sp-2); }
+.nw-legend-item { display: inline-flex; align-items: center; gap: var(--sp-1); font-size: 11.5px; color: var(--muted); }
+.nw-swatch { display: inline-block; width: 16px; height: 3px; border-radius: 2px; flex: none; }
+.nw-swatch.is-dashed { height: 0; border-top: 3px dashed currentColor; background: none !important; }
+
+/* 소득 공백 지도 */
+.gap-list { display: flex; flex-direction: column; gap: var(--sp-2); }
+.gap-item {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-md);
+  padding: var(--sp-3) var(--sp-4);
+  background: #fff;
+}
+.gap-period { font-size: 13.5px; font-weight: 600; }
+.gap-flows { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-5); margin-top: var(--sp-1); font-size: 12.5px; }
+.gap-flow { display: inline-flex; align-items: baseline; gap: var(--sp-2); min-width: 0; }
+.gap-flow-label {
+  font-size: 10.5px;
+  color: var(--accent);
+  background: var(--accent-light);
+  border-radius: 999px;
+  padding: 1px var(--sp-2);
+  flex: none;
+}
+.gap-question { font-size: 12.5px; color: var(--muted); margin-top: var(--sp-2); }
+.gap-item .evidence-row { flex-wrap: wrap; overflow: visible; margin-top: var(--sp-2); }
+
+/* 목표 */
+.goal-list { display: flex; flex-direction: column; gap: var(--sp-3); margin-bottom: var(--sp-4); }
+.goal-item {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--sp-3) var(--sp-4);
+  background: #fff;
+  box-shadow: var(--shadow-card);
+}
+.goal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-2);
+}
+.goal-head-left { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; flex-wrap: wrap; }
+.goal-label { font-size: 13.5px; font-weight: 600; }
+.goal-meta { font-variant-numeric: tabular-nums; }
+
+.lifecycle-footer { margin-top: var(--sp-6); padding-top: var(--sp-3); border-top: 1px solid var(--border); }
+.lifecycle-footer details.collapsible { margin-top: 0; border-top: none; padding-top: 0; }
+.lifecycle-disclaimer { font-size: 11.5px; color: var(--muted); line-height: 1.6; margin-top: var(--sp-3); }
+
 /* ---------- 9. 푸터 ---------- */
 .footer-disclaimer {
   flex: none;
@@ -1548,6 +1751,7 @@ table.data-table tfoot td {
 
 @media (max-width: 1023.98px) {
   .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ratio-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 768px) {
@@ -1579,6 +1783,10 @@ table.data-table tfoot td {
   .main-content { padding: var(--sp-4) var(--sp-4) var(--sp-6); }
   /* 소비 패턴 타일은 좁은 화면에서 2개씩 */
   .stat-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* 생애 흐름: 비율 타일 2개씩, 시나리오 카드와 단계 열은 세로로 쌓는다 */
+  .ratio-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .scenario-cards { grid-template-columns: 1fr; }
+  .stage-cols { grid-template-columns: 1fr; }
   .home-title { font-size: 30px; }
   .home-hero { margin: var(--sp-1) 0 var(--sp-4); }
   .chat-bubble, .kb-card { max-width: 88%; }
@@ -1644,4 +1852,14 @@ table.data-table tfoot td {
   .cat-bar-top { font-size: 12.5px; }
   .decision-row { align-items: flex-start; flex-direction: column; }
   .footer-disclaimer { padding: var(--sp-2) var(--sp-3); }
+
+  /* 생애 흐름: 좁은 화면에서는 링크를 제목 줄 아래로 내린다 */
+  .ratio-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); }
+  .ratio-tile { padding: var(--sp-2) var(--sp-3); }
+  .ratio-value { font-size: 16px; }
+  .life-fields-link { position: static; display: inline-block; margin-bottom: var(--sp-2); }
+  .nw-chart-wrap { padding: var(--sp-3); }
+  .nw-readout { font-size: 11.5px; }
+  .gap-flows { flex-direction: column; gap: var(--sp-1); }
+  .goal-head { align-items: flex-start; }
 }
