@@ -243,6 +243,48 @@ def test_rank_marks_disclosed_avg_rate_note():
     assert other_item.notes == []
 
 
+def test_rank_excludes_zero_and_none_rate_options():
+    """금리가 0 이하이거나 미공시(None)인 옵션은 순위에서 제외한다(금리 미공시 취급)."""
+    products = [
+        make_product(id="zero-rate", options=[ProductOption(rate=0.0, rate_kind="base", term_months=36)]),
+        make_product(id="none-rate", options=[ProductOption(rate=None, rate_kind="base", term_months=36)]),
+        make_product(id="negative-rate", options=[ProductOption(rate=-1.0, rate_kind="base", term_months=36)]),
+        make_product(id="normal", options=[ProductOption(rate=5.0, rate_kind="base", term_months=36)]),
+    ]
+    ctx = make_ctx()
+    items = rank(products, ctx, EMPTY_PARAMS)
+    assert [i.product_ref for i in items] == ["normal"]
+
+
+def test_rank_drops_selected_option_over_max_rate_or_wrong_rate_type():
+    """select_option은 credit_band 일치를 최우선으로 고르므로, 그 결과가 max_rate를
+    넘거나 rate_type이 다르면 (다른 옵션으로 몰래 바꾸지 않고) 상품 자체를 제외해야 한다."""
+    products = [
+        make_product(
+            id="band-over-cap",
+            options=[
+                ProductOption(rate=9.0, rate_kind="base", term_months=36, credit_band="4-6등급", rate_type="fixed"),
+                ProductOption(rate=4.0, rate_kind="base", term_months=36, rate_type="fixed"),
+            ],
+        ),
+        make_product(
+            id="band-ok",
+            options=[
+                ProductOption(rate=4.5, rate_kind="base", term_months=36, credit_band="4-6등급", rate_type="fixed"),
+            ],
+        ),
+        make_product(
+            id="wrong-rate-type",
+            options=[
+                ProductOption(rate=4.0, rate_kind="base", term_months=36, credit_band="4-6등급", rate_type="variable"),
+            ],
+        ),
+    ]
+    ctx = make_ctx(credit_band="4-6등급", max_rate=5.0, rate_type=RateType.FIXED)
+    items = rank(products, ctx, EMPTY_PARAMS)
+    assert [i.product_ref for i in items] == ["band-ok"]
+
+
 def test_rank_vs_current_total_interest():
     products = [make_product(id="only", options=[ProductOption(rate=5.0, rate_kind="base", term_months=36)])]
     ctx = make_ctx()

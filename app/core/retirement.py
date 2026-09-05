@@ -259,19 +259,34 @@ def retirement_gap_projection(
 ) -> list[RetirementProjection]:
     """낙관/기준/비관 시나리오별 노후자금 격차를 계산한다(문서 2.6, 3.7~3.11).
 
+    단위(2026-09-06 리뷰로 수정): 이 함수가 다루는 모든 금액(생활비, 확정소득, 월 부족액,
+    필요자금, 적립 예상액)은 "오늘 기준 실질 금액"(구매력 기준, 물가상승률로 부풀리지
+    않은 값)이다. 기존 구현은 생활비만 물가상승률로 은퇴시점 명목값으로 불린 뒤 확정소득
+    (오늘 기준)과 그대로 뺄셈해 단위가 섞였고(명목 - 실질), 그 결과를 실질수익률로 할인하는
+    `annuity_pv`에 넣어 필요자금을 실제보다 크게 부풀렸다. 시나리오의 `real_return`(실질
+    수익률)은 정의상 이미 물가효과를 제거한 값이므로, 실질 금액 그대로 실질수익률로
+    할인·적립하면 단위가 맞다(`inflation`은 시나리오 설명용 메타데이터로만 남긴다).
+
     - 은퇴시점 생활비: `profile.target_retirement_monthly_expense`가 있으면 그 값을,
-      없으면 현재 고정+변동지출을 "현재 생활비"로 보고 물가상승률로 은퇴시점까지 불린다.
+      없으면 현재 고정+변동지출을 그대로 쓴다(둘 다 "오늘 기준", 물가로 불리지 않음).
     - 확정소득: `profile.assets.pension.expected_national_pension_monthly`가 있으면 그 값을,
-      없으면 `national_pension_estimate`로 policy의 A값과 본인 소득(B값 근사)으로 추정한다.
-    - 필요자금(PV): 월 부족액을 시나리오 실질수익률로 `LATE_LIFE_END_AGE`까지 인출한다고 보고
-      `annuity_pv`로 계산한다.
+      없으면 `national_pension_estimate`로 policy의 A값과 본인 소득(B값 근사)으로 추정한다
+      (마찬가지로 오늘 기준 실질 금액으로 취급).
+    - 국민연금 개시연령 이전 은퇴(브릿지 구간, 문서 2.5절): `retirement_age`가
+      policy `national_pension_start_age`(기본 65, 확인 필요)보다 빠르면, 그 사이
+      기간(브릿지 연수)에는 국민연금이 아직 없어 생활비 전액을 자산에서 인출해야 한다.
+      필요자금(PV) = 브릿지 기간 생활비 전액의 현재가치
+      (`annuity_pv(생활비, r, 브릿지연수)`) + 브릿지 이후(국민연금 개시 후) 월 부족액을
+      나머지 기간 인출하는 데 필요한 자금을 다시 브릿지 연수만큼 현재가치로 당긴 값
+      (`pv_lump(annuity_pv(부족액, r, 잔여연수), r, 브릿지연수)`). 브릿지가 없으면(은퇴연령
+      >= 개시연령) 기존처럼 월 부족액을 `LATE_LIFE_END_AGE`까지 인출한다고 보고 계산한다.
     - 적립 예상액(FV): 현재 연금성 자산(DB/DC+IRP/연금저축+ISA)이 실질수익률로 불어난 값과,
       현재 저축여력(capacity.net_monthly, 음수면 0)을 은퇴까지 전액 적립한다고 가정한 값의 합.
     - shortfall = 필요자금 - 적립 예상액(양수면 부족, 음수면 여유). 부족하면 격차를 닫기 위한
       추가 월 저축액도 함께 계산한다.
 
-    모든 가정은 반환되는 `RetirementProjection.assumptions`에 적힌다. 특정 상품·자산배분을
-    권하지 않는다(`models.LIFECYCLE_DISCLAIMER`).
+    모든 가정은 반환되는 `RetirementProjection.assumptions`에 적힌다(단위 고지 포함).
+    특정 상품·자산배분을 권하지 않는다(`models.LIFECYCLE_DISCLAIMER`).
     """
     scenarios = scenarios or DEFAULT_RETIREMENT_SCENARIOS
 
@@ -280,10 +295,21 @@ def retirement_gap_projection(
     years_to_retirement = max(retirement_age - age, 0)
     withdrawal_years = max(LATE_LIFE_END_AGE - retirement_age, 1)
 
+    national_pension_start_age, pension_age_needs_verification = _policy_value(
+        params, "national_pension_start_age", 65
+    )
+    national_pension_start_age = int(national_pension_start_age)
+    bridge_years = 0
+    if retirement_age < national_pension_start_age:
+        bridge_years = min(national_pension_start_age - retirement_age, withdrawal_years)
+    remaining_years_after_bridge = max(withdrawal_years - bridge_years, 0)
+
     current_monthly_cost = profile.target_retirement_monthly_expense
     cost_is_estimated = current_monthly_cost is None
     if current_monthly_cost is None:
         current_monthly_cost = profile.fixed_expenses + profile.variable_expenses
+    # 오늘 기준 실질 금액 그대로 쓴다(은퇴시점 명목값으로 불리지 않는다 - 위 docstring 참고).
+    living_cost = current_monthly_cost
 
     pension = profile.assets.pension if profile.assets is not None else PensionAssets()
     current_pension_fund = (
@@ -297,36 +323,53 @@ def retirement_gap_projection(
     a_value, a_needs_verification = _policy_value(params, "national_pension_a_value", 3_190_000)
     verify_note = "확인 필요" if a_needs_verification else "확인됨"
 
+    if pension.expected_national_pension_monthly is not None:
+        guaranteed = pension.expected_national_pension_monthly
+        guaranteed_note = "국민연금 예상액은 프로필에 입력된 값을 그대로 사용했습니다(오늘 기준 실질 금액으로 취급)."
+    else:
+        guaranteed = national_pension_estimate(
+            a_value, profile.monthly_income, pension.national_pension_months_paid,
+            pension.national_pension_months_paid,
+        )
+        guaranteed_note = (
+            f"국민연금 예상액은 policy: national_pension_a_value={a_value:,}원({verify_note})과 "
+            "현재 월소득을 B값으로 근사해 문서 3.3절 산식으로 추정한 교육용 값입니다(오늘 기준 실질 금액)."
+        )
+    monthly_gap = max(living_cost - guaranteed, 0)
+
     results: list[RetirementProjection] = []
     for name, cfg in scenarios.items():
         rr = float(cfg["real_return"])
         inflation = float(cfg.get("inflation", 0.02))
 
-        living_cost = retirement_living_cost(current_monthly_cost, inflation, years_to_retirement)
-
         assumptions = [
-            f"{name} 시나리오: 은퇴 후 실질수익률 연 {rr * 100:.1f}%, 물가상승률 연 {inflation * 100:.1f}% 가정"
-            "(내부 참고 시나리오, 문서 3.7~3.10 예시 기준).",
+            "모든 금액(생활비·확정소득·필요자금·적립 예상액)은 물가상승률로 부풀린 명목 금액이 "
+            "아니라 오늘 기준 실질 금액(오늘의 구매력 기준)입니다.",
+            f"{name} 시나리오: 은퇴 후 실질수익률 연 {rr * 100:.1f}% 가정(참고용 물가상승률 연 "
+            f"{inflation * 100:.1f}%는 이 실질수익률의 배경 설명일 뿐 계산에 별도로 쓰이지 않습니다, "
+            "내부 참고 시나리오, 문서 3.7~3.10 예시 기준).",
             f"은퇴연령 {retirement_age}세, 인출 종료 연령 {LATE_LIFE_END_AGE}세(내부 가정, 장수위험 고려 시 조정 필요).",
         ]
         if cost_is_estimated:
-            assumptions.append("목표 은퇴 생활비를 입력하지 않아 현재 고정+변동지출을 현재 생활비로 가정했습니다.")
+            assumptions.append("목표 은퇴 생활비를 입력하지 않아 현재 고정+변동지출을 생활비로 가정했습니다.")
+        assumptions.append(guaranteed_note)
 
-        if pension.expected_national_pension_monthly is not None:
-            guaranteed = pension.expected_national_pension_monthly
-            assumptions.append("국민연금 예상액은 프로필에 입력된 값을 그대로 사용했습니다.")
-        else:
-            guaranteed = national_pension_estimate(
-                a_value, profile.monthly_income, pension.national_pension_months_paid,
-                pension.national_pension_months_paid,
+        if bridge_years > 0:
+            bridge_pv = annuity_pv(living_cost, rr, bridge_years)
+            remaining_pv_at_pension_start = (
+                annuity_pv(monthly_gap, rr, remaining_years_after_bridge)
+                if remaining_years_after_bridge > 0 else 0
             )
+            required_fund_pv = bridge_pv + pv_lump(remaining_pv_at_pension_start, rr, bridge_years)
             assumptions.append(
-                f"국민연금 예상액은 policy: national_pension_a_value={a_value:,}원({verify_note})과 "
-                "현재 월소득을 B값으로 근사해 문서 3.3절 산식으로 추정한 교육용 값입니다."
+                f"은퇴연령({retirement_age}세)이 국민연금 개시연령(policy: "
+                f"national_pension_start_age={national_pension_start_age}세, "
+                f"{'확인 필요' if pension_age_needs_verification else '확인됨'})보다 빨라 "
+                f"브릿지 기간 {bridge_years}년 동안은 국민연금 없이 생활비 전액을 자산에서 "
+                "인출한다고 가정해 필요자금에 반영했습니다."
             )
-
-        monthly_gap = max(living_cost - guaranteed, 0)
-        required_fund_pv = annuity_pv(monthly_gap, rr, withdrawal_years) if monthly_gap > 0 else 0
+        else:
+            required_fund_pv = annuity_pv(monthly_gap, rr, withdrawal_years) if monthly_gap > 0 else 0
 
         projected_fund_fv = fv_lump(current_pension_fund, rr, years_to_retirement) + fv_monthly_saving(
             savings_capacity, rr, years_to_retirement

@@ -10,8 +10,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from app.kb.search import DISCLAIMER, REQUIRED_SECTIONS, KbDoc, answer, load_docs, search
+from app.llm.guardrails import check_text
 
 KB_DIR = Path(__file__).resolve().parent.parent / "kb"
 
@@ -83,6 +85,21 @@ BANNED_PRIVATE_NAMES = [
     "삼성화재",
     "DB손해보험",
     "메리츠화재",
+]
+
+# 상호금융권 개별 기관명(SEV5 #3). "상호금융권"이라는 업권 일반 명칭은 허용하되, 특정
+# 기관 실명은 금지한다(kb/deposit-insurance.md, kb/prepayment-fee.md가 과거 이 이름들을
+# 직접 언급해 M0 실명 비노출 원칙을 어겼다). products 테이블에 이 기관들의 상품이 실려
+# 있으면 채팅 응답 금칙어 검사(app.services.insights.get_banned_terms)에도 걸리므로,
+# 아래 목록은 "KB 문서 자체"에 실명이 남아있는지를 직접 검사하는 보강 장치다.
+BANNED_MUTUAL_FINANCE_NAMES = [
+    "새마을금고",
+    "신협중앙회",
+    "신협",
+    "농협중앙회",
+    "농협",
+    "수협중앙회",
+    "수협",
 ]
 
 
@@ -168,6 +185,15 @@ def test_no_banned_private_financial_company_names() -> None:
             assert name not in text, f"{path.name}: 금지된 민간 금융회사명 '{name}' 발견"
 
 
+def test_no_individual_mutual_finance_institution_names() -> None:
+    """SEV5 #3: 상호금융권을 가리킬 때도 개별 기관 실명(새마을금고/신협/농협/수협 등)이
+    아니라 "상호금융권" 같은 업권 일반 명칭만 써야 한다."""
+    for path in _kb_files():
+        text = path.read_text(encoding="utf-8")
+        for name in BANNED_MUTUAL_FINANCE_NAMES:
+            assert name not in text, f"{path.name}: 금지된 상호금융권 기관 실명 '{name}' 발견"
+
+
 def test_no_em_dash_in_any_doc() -> None:
     for path in _kb_files():
         text = path.read_text(encoding="utf-8")
@@ -178,6 +204,45 @@ def test_no_recommend_word_in_any_doc() -> None:
     for path in _kb_files():
         text = path.read_text(encoding="utf-8")
         assert "추천" not in text, f"{path.name}: '추천' 단어 발견(안내/비교/확인으로 대체해야 함)"
+
+
+def test_all_docs_chat_reply_passes_guardrail_check() -> None:
+    """SEV5 #3: app/api/routes.py가 KB 응답에 대해서만 금칙어 검사를 건너뛰던 우회를
+    없앴으므로, 15개 문서 전부 실제 채팅 응답 형식(제목+스니펫+확인필요 문구+면책)으로
+    조립했을 때도 금칙어 검사(민간 금융회사명 + 상호금융권 개별 기관명)를 통과해야 한다."""
+    banned = BANNED_PRIVATE_NAMES + BANNED_MUTUAL_FINANCE_NAMES
+    docs = load_docs()
+    assert len(docs) == 15
+    for doc in docs:
+        hit = answer(doc.title)
+        assert hit is not None and hit["slug"] == doc.slug, f"{doc.slug}: 제목으로 질의했는데 자기 자신이 최상위가 아님"
+        reply_text = f"{hit['title']} 안내입니다. {hit['snippet']}"
+        if hit.get("needs_verification"):
+            reply_text += " 일부 수치는 확인이 필요한 항목입니다."
+        reply_text += f" {hit['disclaimer']}"
+        hits_found = check_text(reply_text, banned)
+        assert hits_found == [], f"{doc.slug}: 응답 문장이 금칙어 검사에 걸림 -> {hits_found}"
+
+
+def test_no_loan_comparison_platform_steering_in_any_doc() -> None:
+    """SEV3 #11: 대출비교 플랫폼(판매대리·중개업자)으로 안내하는 문구를 KB에서 없앤다.
+    금융결제원, 금감원 파인, 금융회사 앱/창구 안내는 그대로 유지한다."""
+    for path in _kb_files():
+        text = path.read_text(encoding="utf-8")
+        assert "대출비교 플랫폼" not in text, f"{path.name}: '대출비교 플랫폼' 안내 문구 발견"
+
+
+def test_needs_verification_true_when_doc_contains_confirm_needed_marker() -> None:
+    """SEV3 #20: 본문에 "(확인 필요)"가 있는 문서는 프런트매터 needs_verification도
+    true여야 한다(문구와 배지가 어긋나면 안 된다)."""
+    for path in _kb_files():
+        text = path.read_text(encoding="utf-8")
+        data, body = text.split("---", 2)[1:]  # 프런트매터 vs 본문 (첫 '---'는 빈 문자열)
+        if "(확인 필요)" in body:
+            fm = yaml.safe_load(data) or {}
+            assert fm.get("needs_verification") is True, (
+                f"{path.name}: 본문에 '(확인 필요)'가 있는데 needs_verification이 true가 아님"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +312,39 @@ def test_search_empty_query_returns_empty(docs: list[KbDoc]) -> None:
     assert search("   ", docs=docs) == []
 
 
+def test_search_single_character_query_returns_empty(docs: list[KbDoc]) -> None:
+    """SEV3 #19: 2자 미만 질의는 어떤 문서와도 의미 있게 구분되지 않으므로 빈 결과."""
+    assert search("금", docs=docs) == []
+    assert search("가", docs=docs) == []
+
+
+def test_search_unrelated_english_sentence_returns_empty(docs: list[KbDoc]) -> None:
+    """SEV3 #19: ANSWER_THRESHOLD를 search() 안에서도 적용해, 전혀 무관한 질의에는
+    "상위 k개"를 채우기 위해 무관한 문서를 끼워 넣지 않는다."""
+    assert search("hello world how are you", docs=docs) == []
+
+
+def test_snippet_cuts_at_last_sentence_boundary_before_400_chars() -> None:
+    """SEV3 #20: 스니펫이 400자 언저리에서 단어/문장 중간이 아니라 마지막 문장 부호
+    (.·?·!) 뒤에서 잘려야 한다."""
+    long_section = ("이것은 테스트 문장입니다. " * 40).strip()
+    assert len(long_section) > 400
+    doc = KbDoc(
+        slug="snippet-test", title="스니펫 테스트 문서", category="test",
+        keywords=["스니펫테스트키워드"],
+        sources=[{"title": "t", "url": "https://example.com", "accessed": "2026-09-06"}],
+        verified_at="2026-09-06", needs_verification=False,
+        body=f"## 개요\n\n{long_section}\n",
+        sections={"개요": long_section},
+    )
+    hits = search("스니펫테스트키워드", docs=[doc], k=1)
+    assert hits
+    snippet = hits[0].snippet
+    assert len(snippet) <= 400
+    assert snippet.endswith("."), f"문장 경계가 아닌 곳에서 잘림: {snippet!r}"
+    assert not snippet.endswith("...")
+
+
 # ---------------------------------------------------------------------------
 # answer()
 # ---------------------------------------------------------------------------
@@ -254,6 +352,12 @@ def test_search_empty_query_returns_empty(docs: list[KbDoc]) -> None:
 
 def test_answer_none_for_unrelated_query() -> None:
     assert answer("전혀 관계없는 문장 xyz") is None
+
+
+def test_answer_none_for_single_character_query() -> None:
+    """SEV3 #19: "금"처럼 짧은 질의가 "예금"·"국민연금" 등 무관한 키워드에 부분
+    문자열로 걸려 답을 만들어내던 문제(질의가 키워드의 부분 문자열인 반대 방향 매칭)."""
+    assert answer("금") is None
 
 
 def test_answer_shape_for_relevant_query() -> None:

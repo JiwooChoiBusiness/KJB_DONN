@@ -34,3 +34,25 @@ def test_chat_log_is_scoped_to_persona(monkeypatch):
     assert client.delete(f"/api/chats/{chat_id}").json()["ok"] is True
     assert client.delete(f"/api/chats/{created['id']}").json()["ok"] is True
     client.delete("/api/session")
+
+
+def test_new_chat_title_masks_pii_from_first_message(monkeypatch):
+    """SEV5 #1: 자동 생성되는 대화 제목은 원문 발화가 아니라 mask_pii를 거친 문자열의
+    앞 30자여야 한다(연락처 등 개인정보가 대화 목록 제목에 그대로 남으면 안 된다)."""
+    from app.api import routes as routes_module
+
+    monkeypatch.setattr(routes_module, "_llm_provider", _FakeUnavailableProvider())
+
+    assert client.post("/api/session/persona/P2").status_code == 200
+    r = client.post("/api/chat", json={"message": "010-1234-5678로 연락주세요 상환표 보여줘"})
+    assert r.status_code == 200
+    chat_id = r.json()["chat_id"]
+
+    chats = client.get("/api/chats").json()
+    chat = next(c for c in chats if c["id"] == chat_id)
+    assert "010-1234-5678" not in chat["title"]
+    assert chat["title"].startswith("[전화번호]")
+    assert len(chat["title"]) <= 30
+
+    client.delete(f"/api/chats/{chat_id}")
+    client.delete("/api/session")

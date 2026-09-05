@@ -41,6 +41,13 @@ const CATEGORY_LABELS = {
   deposit: '예금', saving: '적금', mortgage: '주택담보대출',
   jeonse: '전세자금대출', credit: '신용대출', policy: '정책상품',
 };
+/* PMO 결정 D5: M0 에서 예금·적금은 순위 비교 대상이 아니고 공시 열람만 제공한다.
+   서버도 이 카테고리로 들어온 비교 요청을 422 로 돌려준다. */
+const COMPARE_VIEW_ONLY_CATEGORIES = ['deposit', 'saving'];
+const COMPARE_VIEW_ONLY_NOTICE = '예·적금은 순위 비교 대상이 아닙니다. 공시 열람만 제공합니다.';
+/* 정책상품 공시는 정책기관 권역에만 있다. */
+const COMPARE_POLICY_CATEGORY = 'policy';
+const COMPARE_POLICY_LENDER_GROUP = 'policy';
 const SORT_KEY_LABELS = {
   total_cost: '총이자(총비용)', monthly_payment: '월 납입액', rate: '금리',
 };
@@ -301,6 +308,13 @@ function timeAgo(iso) {
     return new Date(iso).toLocaleDateString('ko-KR');
   } catch (_) { return ''; }
 }
+/* 서버가 보낸 수치를 숫자로 바꾼다. null·빈 값·숫자가 아닌 값은 null 로 돌려
+   "값이 없다"와 "값이 0이다"를 구분한다. */
+function numOrNull(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
 function toInt(v) {
   const n = Math.round(Number(v));
   return Number.isFinite(n) ? n : 0;
@@ -327,13 +341,54 @@ function lsSetStr(key, val) {
 
 /* ---------- 3. API 헬퍼 ---------- */
 
-function extractErrorMessage(data, res) {
+/* 서버 오류 원문(Pydantic 의 영어 검증 메시지, fetch 예외 문자열 등)은 화면에 절대
+   내보내지 않는다. 상태 코드별 고정 한국어 문장만 보여주고 원문은 console.debug 로만 남긴다. */
+const API_ERROR_MESSAGES = {
+  badRequest: '입력값을 확인해 주세요.',
+  notFound: '데이터가 없습니다.',
+  server: '서버 오류가 발생했습니다.',
+  network: '서버에 연결되지 않았습니다.',
+  unknown: '잠시 후 다시 시도해 주세요.',
+};
+
+function statusErrorMessage(status) {
+  if (!status) return API_ERROR_MESSAGES.network;
+  if (status === 400 || status === 422) return API_ERROR_MESSAGES.badRequest;
+  if (status === 404) return API_ERROR_MESSAGES.notFound;
+  if (status >= 500) return API_ERROR_MESSAGES.server;
+  return API_ERROR_MESSAGES.unknown;
+}
+
+/* 응답 본문에서 개발자용 원문을 뽑는다(로그 전용). */
+function rawErrorDetail(data, res) {
   if (data && typeof data === 'object') {
     if (typeof data.detail === 'string') return data.detail;
-    if (Array.isArray(data.detail) && data.detail[0] && data.detail[0].msg) return data.detail[0].msg;
+    if (Array.isArray(data.detail)) {
+      const msgs = data.detail.map((d) => (d && d.msg) || '').filter(Boolean);
+      if (msgs.length) return msgs.join(' / ');
+    }
     if (typeof data.message === 'string') return data.message;
   }
-  return res.statusText || '알 수 없는 오류';
+  return (res && res.statusText) || '';
+}
+
+/* 우리 백엔드가 사람에게 보여주려고 쓴 한국어 안내 문장인지 본다.
+   (예: "예·적금은 순위 비교 대상이 아닙니다. 공시 열람만 제공합니다.")
+   한글 비중이 낮거나 지나치게 긴 문자열은 내부 오류로 보고 쓰지 않는다. */
+function isKoreanNotice(text) {
+  if (typeof text !== 'string') return false;
+  const s = text.trim();
+  if (!s || s.length > 200) return false;
+  const hangul = (s.match(/[가-힣]/g) || []).length;
+  return hangul >= 2 && hangul / s.length >= 0.3;
+}
+
+function toUserErrorMessage(path, res, data) {
+  const detail = rawErrorDetail(data, res);
+  if (detail) console.debug('[DONN] API 오류', res.status, path, detail);
+  /* 422 는 백엔드가 정책 안내(D5 등)를 한국어 문장으로 돌려주는 경우가 있어 그대로 쓴다. */
+  if (res.status === 422 && isKoreanNotice(detail)) return detail.trim();
+  return statusErrorMessage(res.status);
 }
 
 async function apiGet(path) {
@@ -341,10 +396,11 @@ async function apiGet(path) {
     const res = await fetch(API_BASE + path, { headers: { Accept: 'application/json' } });
     let data = null;
     try { data = await res.json(); } catch (_) { /* 본문 없음 */ }
-    if (!res.ok) return { ok: false, status: res.status, data, error: extractErrorMessage(data, res) };
+    if (!res.ok) return { ok: false, status: res.status, data, error: toUserErrorMessage(path, res, data) };
     return { ok: true, status: res.status, data };
   } catch (e) {
-    return { ok: false, status: 0, data: null, error: String((e && e.message) || e) };
+    console.debug('[DONN] 네트워크 오류', path, (e && e.message) || e);
+    return { ok: false, status: 0, data: null, error: API_ERROR_MESSAGES.network };
   }
 }
 
@@ -357,11 +413,18 @@ async function apiSend(method, path, body) {
     });
     let data = null;
     try { data = await res.json(); } catch (_) { /* 본문 없음 */ }
-    if (!res.ok) return { ok: false, status: res.status, data, error: extractErrorMessage(data, res) };
+    if (!res.ok) return { ok: false, status: res.status, data, error: toUserErrorMessage(path, res, data) };
     return { ok: true, status: res.status, data };
   } catch (e) {
-    return { ok: false, status: 0, data: null, error: String((e && e.message) || e) };
+    console.debug('[DONN] 네트워크 오류', path, (e && e.message) || e);
+    return { ok: false, status: 0, data: null, error: API_ERROR_MESSAGES.network };
   }
+}
+
+/* 실패한 API 응답을 화면 문장으로 바꾼다. 앞머리(무엇을 못 했는지)와 원인 문장을 붙인다. */
+function apiErrorText(res, prefix) {
+  const msg = (res && res.error) || API_ERROR_MESSAGES.unknown;
+  return prefix ? `${prefix} ${msg}` : msg;
 }
 
 const Api = {
@@ -596,10 +659,18 @@ function fieldNumberWithBadge(name, label, value, estimated, opts) {
   const wrap = h('div', { class: 'form-field' }, labelWithBadge(label, id, estimated), input);
   return { input, wrap };
 }
-function selectFieldWithBadge(name, label, labelsMap, value, estimated) {
+/* opts.disabledKeys 로 고를 수 없는 항목을 표시한다(목록에서 지우지 않고 이유를 함께 보여준다).
+   opts.disabledSuffix 는 그 항목 뒤에 괄호로 붙는 짧은 설명이다. */
+function selectFieldWithBadge(name, label, labelsMap, value, estimated, opts) {
+  opts = opts || {};
+  const disabledKeys = new Set(opts.disabledKeys || []);
   const id = 'f_' + name;
   const select = h('select', { id, name });
-  Object.keys(labelsMap).forEach((key) => select.appendChild(h('option', { value: key, selected: key === value }, labelsMap[key])));
+  Object.keys(labelsMap).forEach((key) => {
+    const off = disabledKeys.has(key);
+    const text = off && opts.disabledSuffix ? `${labelsMap[key]} (${opts.disabledSuffix})` : labelsMap[key];
+    select.appendChild(h('option', { value: key, selected: key === value, disabled: off }, text));
+  });
   const wrap = h('div', { class: 'form-field' }, labelWithBadge(label, id, estimated), select);
   return { select, wrap };
 }
@@ -910,7 +981,7 @@ function buildProfileSummaryCard(profile, hasProfile) {
     saveBtn.disabled = true;
     const r = await saveProfile(base);
     saveBtn.disabled = false;
-    if (!r.ok) msgSlot.appendChild(noticeBox('저장하지 못했습니다. ' + (r.error || ''), { error: true }));
+    if (!r.ok) msgSlot.appendChild(noticeBox(apiErrorText(r, '저장하지 못했습니다.'), { error: true }));
     else renderDebts();
   });
 
@@ -1243,7 +1314,7 @@ function buildLoanForm(profile, hasProfile) {
     clearNode(msgSlot);
     const r = await saveProfile(base);
     if (!r.ok) {
-      msgSlot.appendChild(noticeBox('저장하지 못했습니다. ' + (r.error || ''), { error: true }));
+      msgSlot.appendChild(noticeBox(apiErrorText(r, '저장하지 못했습니다.'), { error: true }));
     } else {
       state.debts.editingLoanId = null;
       renderDebts();
@@ -1358,6 +1429,23 @@ function buildCompareStep1(ctx) {
   const wrap = h('div', {});
   wrap.appendChild(compareStepIndicator(1));
 
+  /* D5: 예·적금은 M0 에서 순위 비교 대상이 아니다. 대화나 칩에서 이 카테고리로 넘어오면
+     조건 폼 대신 안내만 보여주고, 대출 카테고리로 이어갈 길만 남긴다. */
+  if (COMPARE_VIEW_ONLY_CATEGORIES.includes(ctx.category)) {
+    wrap.appendChild(noticeBox(COMPARE_VIEW_ONLY_NOTICE));
+    wrap.appendChild(h('p', { class: 'field-hint' },
+      '예금과 적금은 금융감독원 공시를 그대로 열람하는 화면에서만 다룹니다.'));
+    wrap.appendChild(h('div', { class: 'form-actions' },
+      h('button', {
+        type: 'button', class: 'btn btn-primary',
+        onClick: () => {
+          state.compare.context = { ...ctx, category: 'credit', estimated_fields: [], user_confirmed: false };
+          renderCompare();
+        },
+      }, '대출 조건으로 비교하기')));
+    return wrap;
+  }
+
   const estimated = new Set(ctx.estimated_fields || []);
   const card = h('div', { class: 'panel-card confirm-card' });
   const head = h('div', { class: 'panel-card-head' });
@@ -1375,7 +1463,8 @@ function buildCompareStep1(ctx) {
   const form = h('form', { 'aria-label': '비교 조건' });
   const grid = h('div', { class: 'form-grid' });
 
-  const categorySel = selectFieldWithBadge('category', '카테고리', CATEGORY_LABELS, ctx.category, estimated.has('category'));
+  const categorySel = selectFieldWithBadge('category', '카테고리', CATEGORY_LABELS, ctx.category, estimated.has('category'),
+    { disabledKeys: COMPARE_VIEW_ONLY_CATEGORIES, disabledSuffix: '공시 열람만' });
   const amountField = fieldMoneyWithBadge('amount', '금액', ctx.amount, estimated.has('amount'));
   const termField = fieldNumberWithBadge('term_months', '기간(개월)', ctx.term_months, estimated.has('term_months'));
   const methodSel = selectFieldWithBadge('repay_method', '상환방식', REPAY_METHOD_LABELS, ctx.repay_method, estimated.has('repay_method'));
@@ -1411,7 +1500,23 @@ function buildCompareStep1(ctx) {
     lenderGrid.appendChild(h('div', { class: 'checkbox-field' }, cb, h('label', { for: id }, LENDER_GROUP_LABELS[key])));
   });
   lenderFieldset.appendChild(lenderGrid);
+  /* 정책상품은 정책기관 공시에만 있다. 취급 기관에서 정책기관이 빠지면 결과가 0건이 되므로
+     카테고리가 정책상품이면 정책기관을 자동으로 켜고 이유를 적는다. */
+  const policyHint = h('p', { class: 'field-hint is-hidden' },
+    '정책상품은 정책기관 공시에만 있어 "정책기관"을 자동으로 포함합니다.');
+  lenderFieldset.appendChild(policyHint);
   form.appendChild(lenderFieldset);
+
+  function syncLenderGroupsWithCategory() {
+    const isPolicy = categorySel.select.value === COMPARE_POLICY_CATEGORY;
+    const policyCb = lenderChecks[COMPARE_POLICY_LENDER_GROUP];
+    if (policyCb) {
+      if (isPolicy) { policyCb.checked = true; policyCb.disabled = true; } else { policyCb.disabled = false; }
+    }
+    policyHint.classList.toggle('is-hidden', !isPolicy);
+  }
+  categorySel.select.addEventListener('change', syncLenderGroupsWithCategory);
+  syncLenderGroupsWithCategory();
 
   const msgSlot = h('div', {});
   const submitBtn = h('button', { type: 'submit', class: 'btn btn-primary btn-lg' }, '이 조건으로 비교');
@@ -1424,9 +1529,15 @@ function buildCompareStep1(ctx) {
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    const category = categorySel.select.value;
+    const lenderGroups = Object.keys(lenderChecks).filter((k) => lenderChecks[k].checked);
+    /* 체크박스를 못 건드린 경로(브라우저 복원 등)까지 대비해 한 번 더 강제한다. */
+    if (category === COMPARE_POLICY_CATEGORY && !lenderGroups.includes(COMPARE_POLICY_LENDER_GROUP)) {
+      lenderGroups.push(COMPARE_POLICY_LENDER_GROUP);
+    }
     const newCtx = {
       ...ctx,
-      category: categorySel.select.value,
+      category,
       amount: parseMoney(amountField.input.value),
       term_months: toInt(termField.input.value),
       repay_method: methodSel.select.value,
@@ -1435,7 +1546,7 @@ function buildCompareStep1(ctx) {
       max_rate: maxRateField.input.value === '' ? null : toFloat(maxRateField.input.value),
       exclude_companies: excludeField.input.value.split(',').map((s) => s.trim()).filter(Boolean),
       sort_key: Object.keys(sortRadios).find((k) => sortRadios[k].checked) || ctx.sort_key,
-      lender_groups: Object.keys(lenderChecks).filter((k) => lenderChecks[k].checked),
+      lender_groups: lenderGroups,
       user_confirmed: true,
     };
     clearNode(msgSlot);
@@ -1446,7 +1557,7 @@ function buildCompareStep1(ctx) {
     submitBtn.textContent = '이 조건으로 비교';
     state.compare.context = newCtx;
     if (!res.ok) {
-      msgSlot.appendChild(noticeBox('비교를 실행하지 못했습니다. ' + (res.error || ''), { error: true }));
+      msgSlot.appendChild(noticeBox(apiErrorText(res, '비교를 실행하지 못했습니다.'), { error: true }));
       return;
     }
     state.compare.result = res.data;
@@ -1474,41 +1585,85 @@ function metricBlock(label, value) {
   return h('div', { class: 'metric-block' }, h('div', { class: 'metric-label' }, label), h('div', { class: 'metric-value' }, value));
 }
 
+/* 공시 링크 문구는 링크가 가리키는 기관에 따라 다르다. 정책상품은 금융상품한눈에가 아니라
+   서민금융진흥원·주택금융공사 안내로 가고, 공공데이터포털(data.go.kr) 원본 주소처럼
+   일반 이용자가 볼 화면이 아닌 곳은 링크를 만들지 않는다. */
+const DISCLOSURE_HOST_LABELS = [
+  { host: 'finlife.fss.or.kr', label: '금융상품한눈에에서 확인' },
+  { host: 'kinfa.or.kr', label: '서민금융진흥원 안내' },
+  { host: 'hf.go.kr', label: '주택금융공사 안내' },
+];
+
+/* 링크로 만들 수 있으면 문구를, 아니면 null 을 돌려준다(http/https 만 허용). */
+function disclosureLinkLabel(url) {
+  if (typeof url !== 'string' || !/^https?:\/\//i.test(url.trim())) return null;
+  let host;
+  try {
+    const parsed = new URL(url.trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+  } catch (_) {
+    return null;
+  }
+  const hit = DISCLOSURE_HOST_LABELS.find((e) => host === e.host || host.endsWith('.' + e.host));
+  return hit ? hit.label : null;
+}
+
+/* 금리가 없거나 0 이하이면 순위 계산의 근거가 없으므로 금액 지표를 그리지 않는다.
+   (백엔드가 이런 항목을 걸러내지만 화면에서도 한 번 더 막는다.) */
+function hasUsableRate(item) {
+  if (!item || item.rate === null || item.rate === undefined || item.rate === '') return false;
+  const n = Number(item.rate);
+  return Number.isFinite(n) && n > 0;
+}
+
 function buildCompareItemCard(item) {
   const card = h('div', { class: 'compare-item-card' });
+  const rateOk = hasUsableRate(item);
 
   const head = h('div', { class: 'compare-item-head' });
   head.appendChild(h('span', { class: 'compare-item-rank', 'aria-label': `${item.rank}순위` }, String(item.rank)));
   head.appendChild(h('span', { class: 'compare-item-label' }, item.anon_label));
-  head.appendChild(h('span', { class: 'compare-item-rate-wrap' },
-    h('span', { class: 'compare-item-rate' }, `${item.rate}%`),
-    badge(rateKindLabel(item), 'badge-accent')));
+  head.appendChild(rateOk
+    ? h('span', { class: 'compare-item-rate-wrap' },
+      h('span', { class: 'compare-item-rate' }, `${item.rate}%`),
+      badge(rateKindLabel(item), 'badge-accent'))
+    : h('span', { class: 'compare-item-rate-wrap' },
+      h('span', { class: 'compare-item-rate is-missing' }, '금리 미공시')));
   card.appendChild(head);
 
-  const metrics = h('div', { class: 'compare-item-metrics' });
-  metrics.appendChild(metricBlock('월 납입', fmtWon(item.monthly_payment)));
-  metrics.appendChild(metricBlock('총이자', fmtWon(item.total_interest)));
-  const v = item.vs_current_total_interest;
-  if (v === null || v === undefined) {
-    const block = metricBlock('현재 대비', '-');
-    block.querySelector('.metric-value').classList.add('value-neutral');
-    metrics.appendChild(block);
+  if (rateOk) {
+    const metrics = h('div', { class: 'compare-item-metrics' });
+    metrics.appendChild(metricBlock('월 납입', fmtWon(item.monthly_payment)));
+    metrics.appendChild(metricBlock('총이자', fmtWon(item.total_interest)));
+    const v = item.vs_current_total_interest;
+    if (v === null || v === undefined) {
+      const block = metricBlock('현재 대비', '-');
+      block.querySelector('.metric-value').classList.add('value-neutral');
+      metrics.appendChild(block);
+    } else {
+      const cls = v < 0 ? 'value-positive' : v > 0 ? 'value-negative' : 'value-neutral';
+      const block = metricBlock('현재 대비', fmtWonSigned(v));
+      block.querySelector('.metric-value').classList.add(cls);
+      metrics.appendChild(block);
+    }
+    card.appendChild(metrics);
   } else {
-    const cls = v < 0 ? 'value-positive' : v > 0 ? 'value-negative' : 'value-neutral';
-    const block = metricBlock('현재 대비', fmtWonSigned(v));
-    block.querySelector('.metric-value').classList.add(cls);
-    metrics.appendChild(block);
+    card.appendChild(h('p', { class: 'compare-item-nometric' },
+      '금리가 공시되지 않아 월 납입과 총이자를 계산하지 않았습니다.'));
   }
-  card.appendChild(metrics);
 
   const foot = h('div', { class: 'compare-item-foot' });
-  if (item.disclosure_url && /^https?:\/\//i.test(item.disclosure_url)) {
+  const linkLabel = disclosureLinkLabel(item.disclosure_url);
+  if (linkLabel) {
     foot.appendChild(h('a', {
       href: item.disclosure_url, target: '_blank', rel: 'noopener noreferrer', class: 'disclosure-link',
       'aria-label': `${item.anon_label} 공시 열람`,
-    }, '금융상품한눈에에서 확인'));
+    }, linkLabel));
+  } else {
+    foot.appendChild(h('span', { class: 'disclosure-none' }, '공시 링크 없음'));
   }
-  if (foot.childNodes.length) card.appendChild(foot);
+  card.appendChild(foot);
 
   const notes = plainList(item.notes, 'plain-list');
   if (notes) card.appendChild(notes);
@@ -1992,7 +2147,7 @@ async function runSyntheticAnalysis(months, btn, msgSlot) {
   if (btn) { btn.disabled = false; btn.textContent = label; }
 
   if (!res.ok) {
-    if (msgSlot) msgSlot.appendChild(noticeBox(`분석하지 못했습니다. ${res.error || ''}`, { error: true }));
+    if (msgSlot) msgSlot.appendChild(noticeBox(apiErrorText(res, '분석하지 못했습니다.'), { error: true }));
     return;
   }
   state.spending.data = res.data;
@@ -2243,7 +2398,7 @@ async function runUploadAnalysis(btn, msgSlot) {
   btn.textContent = label;
 
   if (!res.ok) {
-    msgSlot.appendChild(noticeBox(`분석하지 못했습니다. ${res.error || ''}`, { error: true }));
+    msgSlot.appendChild(noticeBox(apiErrorText(res, '분석하지 못했습니다.'), { error: true }));
     return;
   }
   state.spending.data = res.data;
@@ -2876,15 +3031,22 @@ function buildGoalItem(goal, profile) {
     h('span', { class: 'cat-fill', style: `width:${Math.max(0, Math.min(100, pct)).toFixed(1)}%` })));
 
   const remaining = Math.max(0, target - saved);
-  const months = monthsUntilDate(goal.target_date);
+  /* 남은 개월과 월 필요 저축액은 서버(app/services/lifecycle.py)가 계산해서 내려준다.
+     값이 오면 그대로 쓰고, 없을 때만 화면에서 목표일로 되짚어 계산한다. */
+  const serverMonths = numOrNull(goal.remaining_months);
+  const months = serverMonths !== null ? serverMonths : monthsUntilDate(goal.target_date);
+  const serverNeeded = numOrNull(goal.monthly_needed);
+
   const bits = [`목표일 ${goal.target_date || '-'}`];
   if (months === null) bits.push('남은 기간 확인 불가');
   else if (months > 0) bits.push(`남은 기간 ${months}개월`);
   else bits.push('목표일이 지났습니다');
-  if (remaining > 0 && months !== null && months > 0) {
-    bits.push(`남은 기간으로 나누면 월 ${fmtWon(Math.ceil(remaining / months))}`);
-  } else if (remaining === 0) {
+
+  if (remaining === 0) {
     bits.push('목표 금액을 채웠습니다');
+  } else if (months !== null && months > 0) {
+    const needed = serverNeeded !== null ? serverNeeded : Math.ceil(remaining / months);
+    if (needed > 0) bits.push(`남은 기간으로 나누면 월 ${fmtWon(needed)}`);
   }
   item.appendChild(h('div', { class: 'cat-bar-bottom' }, h('span', { class: 'goal-meta' }, bits.join(' · '))));
   return item;
@@ -2958,7 +3120,7 @@ function buildGoalForm(profile) {
     const r = await saveGoals(nextGoals);
     submitBtn.disabled = false;
     if (!r.ok) {
-      msgSlot.appendChild(noticeBox('저장하지 못했습니다. ' + (r.error || ''), { error: true }));
+      msgSlot.appendChild(noticeBox(apiErrorText(r, '저장하지 못했습니다.'), { error: true }));
       return;
     }
     state.lifecycle.editingGoalId = null;
@@ -3138,7 +3300,7 @@ async function renderPersonas() {
     onClick: async () => {
       clearNode(msgSlot);
       const r = await clearSessionProfile();
-      if (!r.ok) { msgSlot.appendChild(noticeBox('초기화하지 못했습니다. ' + (r.error || ''), { error: true })); return; }
+      if (!r.ok) { msgSlot.appendChild(noticeBox(apiErrorText(r, '초기화하지 못했습니다.'), { error: true })); return; }
       state.personaNotice = '프로필이 초기화되었습니다.';
       renderPersonas();
     },
@@ -3560,14 +3722,9 @@ function setFooterTexts(home) {
   const noticeEl = document.getElementById('aiNoticeText');
   const disclaimer = (home && home.disclaimer) || FALLBACK_DISCLAIMER;
   const notice = (home && home.ai_notice) || FALLBACK_AI_NOTICE;
-  if (disclaimerEl) {
-    disclaimerEl.textContent = disclaimer;
-    disclaimerEl.setAttribute('title', disclaimer);
-  }
-  if (noticeEl) {
-    noticeEl.textContent = notice;
-    noticeEl.setAttribute('title', notice);
-  }
+  /* 두 줄 모두 화면에서 전체가 보이므로(styles.css .footer-line) title 툴팁은 두지 않는다. */
+  if (disclaimerEl) disclaimerEl.textContent = disclaimer;
+  if (noticeEl) noticeEl.textContent = notice;
 }
 
 function renderPinnedAction() {

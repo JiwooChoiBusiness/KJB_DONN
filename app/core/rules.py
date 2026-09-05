@@ -419,7 +419,7 @@ def _rule_r3(loan: Loan, params: PolicyParams, today: date) -> Optional[ActionCa
     monthly_interest_saving = _round_half_up(loan.balance * refi_gap / 100 / 12)
     if monthly_interest_saving <= 0:
         return None
-    fee = prepay_fee(loan, loan.balance, today)
+    fee = prepay_fee(loan, loan.balance, today, params=params)
     breakeven_months = -(-fee // monthly_interest_saving) if fee > 0 else 0
     if breakeven_months >= loan.remaining_months:
         return None

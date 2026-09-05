@@ -246,6 +246,7 @@ def _run_one(
                 income=income,
                 debt_payment=month_payment,
                 expenses=expenses,
+                goal_outflow=goal_outflow,
                 net=net,
                 total_balance=total_balance,
                 cumulative_net=cumulative_net,
@@ -311,9 +312,11 @@ def run_lifecycle_projection(
 
     자산(유동·투자·연금성 자산)은 시나리오 실질수익률로 증식하고, 매년 저축여력
     (`capacity.net_monthly` x 12, 음수면 0)을 유동자산에 더한다고 가정한다. 부채 잔액은
-    현재 원리금상환액(`capacity.debt_service` x 12)만큼 매년 선형으로 줄어든다고 근사한다
-    (실제 대출별 상환 스케줄보다 단순화된 참고용 경로 - 이자 감소에 따른 상환 가속을
-    반영하지 않아 실제보다 부채가 더디게 줄어드는 보수적인 근사다).
+    대출별 현재 상환 스케줄(`app.core.schedule.build_schedule`)에서 그 해(회차 1~12,
+    13~24, ...)에 예정된 "원금" 상환분만큼만 매년 줄어든다고 가정한다(원리금 전체를
+    빼면 이자까지 잔액 감소로 계산돼 실제보다 훨씬 빠르게 상환되는 것으로 과대평가된다
+    - 2026-09-06 리뷰 지적). 대출의 스케줄이 끝나면(완제) 그 대출은 그 이후 잔액을
+    0으로 유지한다.
 
     결정론: 난수를 쓰지 않고, 날짜는 `today` 인자로만 받는다. 반환값은 시나리오별로 이어붙인
     평평한 리스트이며 각 행에 "scenario" 키로 어느 시나리오인지 표시한다.
@@ -322,7 +325,14 @@ def run_lifecycle_projection(
     schedules = [build_schedule(loan) for loan in profile.loans]
     capacity = compute_capacity(profile, schedules)
     annual_savings_capacity = max(capacity.net_monthly, 0) * 12
-    annual_debt_service = capacity.debt_service * 12
+
+    # 대출별로 회차 원금(이자 제외)만 12개월 단위 연차로 묶어 둔다. 스케줄이 짧아
+    # until_age보다 먼저 끝나는 대출은(완제) 그 이후 연차에 principal=0으로 취급한다.
+    per_loan_annual_principal: list[list[int]] = [
+        [sum(r.principal for r in sched.rows[i : i + 12]) for i in range(0, len(sched.rows), 12)]
+        for sched in schedules
+    ]
+    per_loan_initial_balance = [loan.balance for loan in profile.loans]
 
     age0 = profile.age if profile.age is not None else 40
     year0 = today.year
@@ -335,7 +345,7 @@ def run_lifecycle_projection(
         pension_fund = Decimal(
             assets.pension.db_dc_balance + assets.pension.irp_pension_savings_balance + assets.pension.isa_balance
         )
-        debt_balance = Decimal(sum(l.balance for l in profile.loans))
+        loan_balances = [Decimal(b) for b in per_loan_initial_balance]
         growth = Decimal(1) + Decimal(str(real_return))
 
         for i, age in enumerate(ages):
@@ -343,7 +353,11 @@ def run_lifecycle_projection(
                 liquid = liquid * growth + Decimal(annual_savings_capacity)
                 investment = investment * growth
                 pension_fund = pension_fund * growth
-                debt_balance = max(debt_balance - Decimal(annual_debt_service), Decimal(0))
+                year_idx = i - 1  # i=1(1년 후)이 스케줄의 1년차(회차 1~12) 원금에 대응
+                for li, annual in enumerate(per_loan_annual_principal):
+                    principal_due = annual[year_idx] if year_idx < len(annual) else 0
+                    loan_balances[li] = max(loan_balances[li] - Decimal(principal_due), Decimal(0))
+            debt_balance = sum(loan_balances, Decimal(0))
             net_worth = liquid + investment + pension_fund + Decimal(assets.real_estate) - debt_balance
             rows.append({
                 "scenario": scenario_name,

@@ -306,6 +306,34 @@ def test_prepay_fee_zero_when_not_set():
     assert fee == 0
 
 
+def test_prepay_fee_uses_policy_period_months_when_given():
+    """(nit) prepay_fee_period_months를 policy에서 읽으면 분모 36 대신 그 값을 쓴다."""
+    loan = make_loan(
+        remaining_months=36,
+        prepay_fee_rate=1.4,
+        prepay_fee_until=date(2027, 9, 6),
+    )
+    params = PolicyParams(version="t", params={
+        "prepay_fee_period_months": PolicyParam(
+            key="prepay_fee_period_months", value=24, needs_verification=True,
+        ),
+    })
+    fee = prepay_fee(loan, 10_000_000, date(2026, 9, 6), params=params)
+    # 10,000,000 * 1.4% * (12/24) = 70,000 (분모가 36이면 46,667이 나와야 함)
+    assert fee == 70_000
+
+
+def test_prepay_fee_missing_policy_param_falls_back_to_36():
+    loan = make_loan(
+        remaining_months=36,
+        prepay_fee_rate=1.4,
+        prepay_fee_until=date(2027, 9, 6),
+    )
+    params = PolicyParams(version="t", params={})
+    fee = prepay_fee(loan, 10_000_000, date(2026, 9, 6), params=params)
+    assert fee == 46_667
+
+
 def test_refinance_compare_lower_rate_saves_interest_and_has_breakeven():
     loan = make_loan(
         principal=10_000_000,
@@ -330,6 +358,24 @@ def test_refinance_compare_no_saving_gives_none_breakeven():
     )
     # 더 높은 금리로 "대환"하면 월 납입액이 늘어나 손익분기가 없다
     result = refinance_compare(loan, new_rate=6.0, new_term_months=36, fee=50_000)
+    assert result["breakeven_months"] is None
+
+
+def test_refinance_compare_same_rate_longer_term_has_no_breakeven():
+    """SEV4 #5: 금리는 그대로 두고 기간만 늘리면 월 납입액은 줄어도 총이자는 늘어난다
+    (원리금균등 특성). breakeven_months는 월 "납입액" 절감이 아니라 월 "이자" 절감을
+    기준으로 삼아야 하므로, 이 경우처럼 interest_saving이 음수면 월 납입액 감소와
+    무관하게 breakeven_months는 항상 None이어야 한다(수수료를 내고 "갈아탈 이유"가 없는데도
+    손익분기가 계산되던 버그)."""
+    loan = make_loan(
+        principal=10_000_000,
+        balance=10_000_000,
+        annual_rate=6.0,
+        remaining_months=36,
+    )
+    result = refinance_compare(loan, new_rate=6.0, new_term_months=60, fee=500_000)
+    assert result["interest_saving"] < 0
+    assert result["monthly_after"] < result["monthly_before"]
     assert result["breakeven_months"] is None
 
 

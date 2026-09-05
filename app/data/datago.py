@@ -53,9 +53,13 @@ KINFA_LOAN_PRODUCT_URL = (
     "https://apis.data.go.kr/B553701/LoanProductSearchingInfo/LoanProductSearchingInfo/getLoanProductSearchingInfo"  # 게이트웨이가 서비스명을 두 번 요구 (2026-09-06 실 호출 확인, 단일 경로는 코드 12)
 )  # (확인 필요: 활용신청 승인 상태 - 본문 모듈 docstring 참고)
 
-DISCLOSURE_URL_DIDIMDOL = "https://www.data.go.kr/data/15082028/openapi.do"
-DISCLOSURE_URL_FSC = "https://www.data.go.kr/data/15094787/openapi.do"
-DISCLOSURE_URL_KINFA = "https://www.data.go.kr/data/15106208/openapi.do"
+# 2026-09-06 리뷰: data.go.kr 개발자용 API 명세 페이지(/data/<id>/openapi.do)는 일반
+# 이용자가 상품을 확인할 수 있는 화면이 아니다(개발자 문서일 뿐). 실제 공시·안내 주체인
+# 공공기관 홈페이지로 바꾼다: 디딤돌대출은 한국주택금융공사(HF), 서민금융 상품 기본정보와
+# 대출상품한눈에는 둘 다 서민금융진흥원(KINFA)이 일반 이용자에게 안내하는 창구다.
+DISCLOSURE_URL_DIDIMDOL = "https://www.hf.go.kr"
+DISCLOSURE_URL_FSC = "https://www.kinfa.or.kr"
+DISCLOSURE_URL_KINFA = "https://www.kinfa.or.kr"
 
 REPAY_METHOD_TEXT_MAP: dict[str, RepayMethod] = {
     "원리금균등분할상환": RepayMethod.EQUAL_PAYMENT,

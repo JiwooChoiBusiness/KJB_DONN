@@ -136,8 +136,14 @@ def rank(
 
     for product in products:
         option = select_option(product, ctx)
-        if option is None or option.rate is None:
-            continue
+        if option is None or option.rate is None or option.rate <= 0:
+            continue  # 금리 미공시(None) 또는 0 이하는 순위에 올리지 않는다.
+        if ctx.max_rate is not None and option.rate > ctx.max_rate:
+            continue  # eligible()은 상품 단위로 옵션 "존재 여부"만 보므로, 실제 선택된
+            # 옵션이 상한을 넘으면 여기서 다시 걸러야 한다(select_option이 credit_band/term
+            # 우선순위로 max_rate를 넘는 다른 옵션을 고를 수 있다).
+        if ctx.rate_type is not None and option.rate_type != ctx.rate_type.value:
+            continue  # 선택된 옵션 자체의 금리 유형이 요청 조건과 다르면 제외한다.
         temp_loan = _build_temp_loan(product, option, ctx)
         sched = build_schedule(temp_loan)
         scored.append((product, option, sched.first_payment, sched.total_interest))

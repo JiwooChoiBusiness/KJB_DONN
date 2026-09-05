@@ -8,7 +8,7 @@ sources:
   - {title: "위법계약의 해지권(찾기쉬운 생활법령정보)", url: "https://easylaw.go.kr/CSP/CnpClsMain.laf?popMenu=ov&csmSeq=1771&ccfNo=1&cciNo=2&cnpClsNo=2", accessed: "2026-09-06"}
   - {title: "금융분쟁조정위원회의 분쟁조정(찾기쉬운 생활법령정보)", url: "https://easylaw.go.kr/CSP/CnpClsMain.laf?popMenu=ov&csmSeq=1771&ccfNo=4&cciNo=1&cnpClsNo=1", accessed: "2026-09-06"}
 verified_at: 2026-09-06
-needs_verification: false
+needs_verification: true
 last_reviewed: 2026-09-06
 ---
 ## 개요

@@ -104,6 +104,8 @@ button { cursor: pointer; background: none; border: none; }
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* 모바일 주소창이 접혔다 펴져도 하단 고지 줄이 잘리지 않게 한다(미지원 브라우저는 위 100vh). */
+  height: 100dvh;
 }
 
 .topbar {
@@ -944,6 +946,8 @@ button { cursor: pointer; background: none; border: none; }
 
 .form-actions { display: flex; gap: var(--sp-2); margin-top: var(--sp-4); flex-wrap: wrap; align-items: center; }
 .form-actions .form-actions-hint { font-size: 12px; color: var(--muted); }
+/* 입력 묶음 아래에 붙는 한 줄 설명(자동으로 정해진 값의 이유 등) */
+.field-hint { font-size: 12px; color: var(--muted); margin-top: var(--sp-2); }
 
 .btn {
   display: inline-flex;
@@ -1111,6 +1115,9 @@ table.data-table tfoot td {
 .compare-item-label { font-weight: 600; font-size: 14px; flex: 1; min-width: 0; }
 .compare-item-rate-wrap { display: inline-flex; align-items: center; gap: var(--sp-2); flex: none; }
 .compare-item-rate { font-weight: 600; font-size: 17px; color: var(--accent-dark); font-variant-numeric: tabular-nums; }
+/* 금리가 공시되지 않은 항목: 숫자 자리에 상태 문구를 넣고 톤을 낮춘다 */
+.compare-item-rate.is-missing { font-size: 13px; font-weight: 500; color: var(--muted); }
+.compare-item-nometric { font-size: 12.5px; color: var(--muted); margin-top: var(--sp-2); }
 
 .compare-item-metrics {
   display: grid;
@@ -1145,6 +1152,8 @@ table.data-table tfoot td {
   text-underline-offset: 2px;
 }
 .disclosure-link:hover { color: var(--accent-dark); }
+/* 공시 열람 주소를 확인할 수 없는 출처(예: 공공데이터포털 원본)는 링크 대신 상태만 적는다 */
+.disclosure-none { font-size: 12.5px; color: var(--muted); }
 
 .result-meta-line {
   font-family: var(--mono);
@@ -1723,12 +1732,18 @@ table.data-table tfoot td {
 .lifecycle-disclaimer { font-size: 11.5px; color: var(--muted); line-height: 1.6; margin-top: var(--sp-3); }
 
 /* ---------- 9. 푸터 ---------- */
+/* 면책 고지와 AI 고지는 법적 의무 문구라 어떤 화면 폭에서도 전체가 보여야 한다.
+   줄임표(...)로 자르지 않고 여러 줄로 접는다. 푸터는 #app 세로 flex 의 마지막 칸이라
+   높이가 늘어나면 본문 영역(.layout)이 그만큼 줄어들 뿐 본문을 덮지 않는다. */
 .footer-disclaimer {
   flex: none;
   background: #fff;
   border-top: 1px solid var(--border);
   padding: var(--sp-2) var(--sp-4);
   z-index: 40;
+  /* 아주 낮은 창(가로 모드 등)에서 푸터가 화면을 다 먹지 않게 하는 안전장치 */
+  max-height: 45vh;
+  overflow-y: auto;
 }
 .footer-line {
   font-size: 12px;
@@ -1736,10 +1751,12 @@ table.data-table tfoot td {
   line-height: 1.45;
   max-width: 1180px;
   margin: 0 auto;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: break-word;
+  /* 한국어는 단어(어절) 단위로 접는다 */
+  word-break: keep-all;
 }
+.footer-line + .footer-line { margin-top: 2px; }
 
 /* ---------- 10. 반응형 ---------- */
 @media (min-width: 1100px) {
@@ -1790,7 +1807,6 @@ table.data-table tfoot td {
   .home-title { font-size: 30px; }
   .home-hero { margin: var(--sp-1) 0 var(--sp-4); }
   .chat-bubble, .kb-card { max-width: 88%; }
-  .footer-line { font-size: 11.5px; }
   .kb-panel { max-width: none; }
 }
 

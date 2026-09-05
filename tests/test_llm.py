@@ -128,6 +128,35 @@ def test_cooldown_skips_a_429_key_on_next_call():
     assert second.key_index == 1
 
 
+def test_per_request_timeout_shrinks_as_deadline_approaches():
+    """SEV3 #13: 느린(재시도되는) 응답이 이어질 때 요청별 timeout이 timeout_seconds
+    고정값이 아니라 남은 total_deadline_seconds 예산만큼 줄어들어야, 체인 전체가
+    total_deadline_seconds를 크게 초과하지 않는다(짧은 요청 한 번 정도의 초과만 허용)."""
+    provider = _provider(
+        ["model-a"], ["k1", "k2"],
+        total_deadline_seconds=4, timeout_seconds=20,
+    )
+    # 실제 시간이 흐르는 것처럼 매 time.monotonic() 호출마다 1초씩 흐르게 한다(느린 응답 모사).
+    fake_now = {"t": 0.0}
+
+    def _tick() -> float:
+        fake_now["t"] += 1.0
+        return fake_now["t"]
+
+    with patch("app.llm.gemini.time.monotonic", side_effect=_tick), \
+         patch("app.llm.gemini.requests.post") as mock_post:
+        mock_post.side_effect = [_resp(503), _resp(503)]
+        with pytest.raises(LLMUnavailable):
+            provider.extract("문의", {"type": "OBJECT"}, "system")
+
+    assert mock_post.call_count == 2
+    timeouts = [call.kwargs["timeout"] for call in mock_post.call_args_list]
+    # 두 번째 요청 시점에는 첫 번째보다 남은 예산이 줄어 있어야 한다.
+    assert timeouts[1] < timeouts[0]
+    # 어떤 요청도 설정된 timeout_seconds(20s)를 그대로 쓰지 않는다(둘 다 4s 예산 안에서 줄었다).
+    assert all(t <= 4 for t in timeouts)
+
+
 def test_all_exhausted_raises_llm_unavailable():
     provider = _provider(["model-a"], ["k1"])
     with patch("app.llm.gemini.requests.post") as mock_post:
@@ -196,6 +225,14 @@ def test_mask_pii_phone_number():
 
 def test_mask_pii_rrn():
     assert guardrails.mask_pii("주민등록번호 900101-1234567 입니다") == "주민등록번호 [주민등록번호] 입니다"
+
+
+def test_mask_pii_dot_separated_phone_number():
+    assert guardrails.mask_pii("010.1234.5678로 연락주세요") == "[전화번호]로 연락주세요"
+
+
+def test_mask_pii_dot_separated_rrn():
+    assert guardrails.mask_pii("주민등록번호 900101.1234567 입니다") == "주민등록번호 [주민등록번호] 입니다"
 
 
 def test_mask_pii_email():

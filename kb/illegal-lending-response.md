@@ -8,7 +8,7 @@ sources:
   - {title: "'21.7.7일부터 법정 최고금리가 20%로 인하됩니다(금융위원회 보도자료)", url: "https://www.fsc.go.kr/no010101/75641", accessed: "2026-09-06"}
   - {title: "채무자대리인 무료지원(금융위원회)", url: "https://www.fsc.go.kr/po010105/77867", accessed: "2026-09-06"}
 verified_at: 2026-09-06
-needs_verification: false
+needs_verification: true
 last_reviewed: 2026-09-06
 ---
 ## 개요

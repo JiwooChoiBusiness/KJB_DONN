@@ -10,6 +10,7 @@ import pytest
 
 from app.core.retirement import (
     DEFAULT_RETIREMENT_SCENARIOS,
+    LATE_LIFE_END_AGE,
     annuity_pv,
     coverage_ratio,
     fv_lump,
@@ -238,3 +239,60 @@ def test_retirement_gap_projection_assumptions_mention_verification():
     for r in results:
         assert r.assumptions
         assert any("national_pension_a_value" in a for a in r.assumptions)
+
+
+def test_retirement_gap_projection_assumptions_state_real_terms_unit():
+    """SEV4 #7: 모든 금액이 오늘 기준 실질 금액이라는 사실을 assumptions에 명시해야 한다."""
+    profile = _profile()
+    results = retirement_gap_projection(profile, _params(), today=date(2026, 9, 6))
+    for r in results:
+        assert any("실질 금액" in a for a in r.assumptions)
+
+
+def test_retirement_gap_projection_surplus_for_healthy_profile():
+    """SEV4 #7: 소득이 넉넉하고 지출이 적당하며 연금성 자산도 있는 45세 프로필은 기준
+    시나리오에서 부족(shortfall>0)이 아니라 여유로 나와야 한다. 단위를 통일하기 전에는
+    생활비만 물가상승률로 부풀려(명목) 확정소득(실질)과 뒤섞여 셈해, 실제로는 여유로운
+    프로필도 큰 부족액이 나오는 버그가 있었다."""
+    profile = _profile(
+        age=45, monthly_income=5_000_000, fixed_expenses=1_500_000, variable_expenses=500_000,
+        retirement_age=65, target_retirement_monthly_expense=2_000_000,
+        assets=Assets(
+            liquid=20_000_000, investment=10_000_000,
+            pension=PensionAssets(
+                national_pension_months_paid=240, db_dc_balance=80_000_000,
+                irp_pension_savings_balance=30_000_000, isa_balance=10_000_000,
+            ),
+        ),
+    )
+    results = {r.scenario: r for r in retirement_gap_projection(profile, _params(), today=date(2026, 9, 6))}
+    assert results["기준"].shortfall <= 0
+    assert results["기준"].required_monthly_saving == 0
+
+
+def test_retirement_gap_projection_bridge_years_increase_required_fund():
+    """SEV4 #8: 은퇴연령(58세)이 국민연금 개시연령(policy: national_pension_start_age,
+    기본 65세)보다 빨라 브릿지 기간(7년) 동안은 국민연금 없이 생활비 전액을 인출해야
+    한다. 이를 반영한 required_fund_pv는, 브릿지를 무시하고 은퇴 시점부터 곧바로
+    국민연금이 나온다고 가정한 단순 annuity_pv 계산보다 커야 한다."""
+    profile = _profile(age=45, retirement_age=58)
+    results = retirement_gap_projection(profile, _params(), today=date(2026, 9, 6))
+    base = next(r for r in results if r.scenario == "기준")
+
+    withdrawal_years = max(LATE_LIFE_END_AGE - 58, 1)
+    naive_required = annuity_pv(base.monthly_gap, base.real_return, withdrawal_years)
+    assert base.required_fund_pv > naive_required
+    assert any("브릿지" in a for a in base.assumptions)
+
+
+def test_retirement_gap_projection_no_bridge_when_retirement_at_or_after_start_age():
+    """은퇴연령이 국민연금 개시연령 이상이면 브릿지 문구가 없어야 하고, required_fund_pv는
+    단순 annuity_pv(월 부족액, 실질수익률, 인출연수)와 같아야 한다."""
+    profile = _profile(age=45, retirement_age=65)
+    results = retirement_gap_projection(profile, _params(), today=date(2026, 9, 6))
+    base = next(r for r in results if r.scenario == "기준")
+
+    withdrawal_years = max(LATE_LIFE_END_AGE - 65, 1)
+    expected = annuity_pv(base.monthly_gap, base.real_return, withdrawal_years) if base.monthly_gap > 0 else 0
+    assert base.required_fund_pv == expected
+    assert not any("브릿지" in a for a in base.assumptions)

@@ -290,6 +290,25 @@ def test_schedule_scenarios_and_actions_with_persona():
         assert not (set(card["numbers"].keys()) & raw_rule_keys)
 
 
+def test_scenarios_reflect_goal_outflow_for_persona_with_goal():
+    """SEV3 #22: /api/scenarios가 today=date.today()와 goals=profile.goals를 넘겨야
+    목표(Goal)의 목표 시점이 시야 안에 들 때 그 달에 goal_outflow가 반영된다. 어느 달이든
+    net == income - debt_payment - expenses - goal_outflow가 성립해야 한다."""
+    r = client.post("/api/session/persona/P1")
+    assert r.status_code == 200
+
+    r2 = client.get("/api/scenarios?horizon=12")
+    assert r2.status_code == 200
+    base = next(s for s in r2.json() if s["scenario"] == "base")
+    points = base["points"]
+    assert any(p["goal_outflow"] > 0 for p in points), (
+        "P1의 비상자금 목표(2027-03-06, 오늘 기준 12개월 시야 안)가 goal_outflow로 반영돼야 함"
+    )
+    for p in points:
+        assert p["net"] == p["income"] - p["debt_payment"] - p["expenses"] - p["goal_outflow"]
+    _clear_session()
+
+
 def test_actions_and_scenarios_404_without_profile():
     _clear_session()
     r = client.get("/api/actions")
@@ -381,6 +400,107 @@ def test_compare_run_with_max_rate_filters_out_high_rate_products():
     items = r.json()["items"]
     assert len(items) == 1
     assert items[0]["rate"] == pytest.approx(5.2)
+
+
+# ---------------------------------------------------------------------------
+# 예·적금은 순위 비교 대상이 아니다 (결정 D5, SEV4 #9)
+# ---------------------------------------------------------------------------
+
+_NO_RANKING_MESSAGE = "예·적금은 순위 비교 대상이 아닙니다. 공시 열람만 제공합니다."
+
+
+def test_compare_run_rejects_deposit_category():
+    _clear_session()
+    ctx = client.post("/api/compare/prepare", json={"intent": "compare", "params": {"category": "deposit"}}).json()
+    ctx["user_confirmed"] = True
+    r = client.post("/api/compare/run", json=ctx)
+    assert r.status_code == 422
+    assert r.json()["detail"] == _NO_RANKING_MESSAGE
+
+
+def test_compare_run_rejects_saving_category():
+    _clear_session()
+    ctx = client.post("/api/compare/prepare", json={"intent": "compare", "params": {"category": "saving"}}).json()
+    ctx["user_confirmed"] = True
+    r = client.post("/api/compare/run", json=ctx)
+    assert r.status_code == 422
+    assert r.json()["detail"] == _NO_RANKING_MESSAGE
+
+
+def test_compare_prepare_does_not_estimate_credit_band_for_deposit():
+    """SEV4 #9: prepare_context는 예·적금에 프로필의 credit_band를 추정해 넣지 않는다
+    (신용점수 구간별 금리 차등이 없는 상품이라 무관한 추정이다)."""
+    _clear_session()
+    r = client.post("/api/session/persona/P1")  # P1은 credit_band(701~800)가 있는 프로필
+    assert r.status_code == 200
+
+    ctx = client.post("/api/compare/prepare", json={"intent": "compare", "params": {"category": "deposit"}}).json()
+    assert ctx["category"] == "deposit"
+    assert ctx["credit_band"] is None
+    assert "credit_band" not in ctx["estimated_fields"]
+    _clear_session()
+
+
+def test_chat_compare_deposit_keyword_replies_with_disclosure_only_explanation(monkeypatch):
+    """SEV4 #9: 채팅에서 예금/적금 키워드로 비교를 요청하면 순위 비교 안내 대신 D5
+    설명 문구로 답해야 하고, prepare_compare 액션을 만들면 안 된다."""
+    monkeypatch.setattr(routes_module, "_llm_provider", _FakeUnavailableProvider())
+    _clear_session()
+    r = client.post("/api/chat", json={"message": "예금 비교해줘"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["reply_text"] == _NO_RANKING_MESSAGE
+    assert data["action"] is None
+
+    r2 = client.post("/api/chat", json={"message": "적금 상품 비교하고 싶어"})
+    assert r2.status_code == 200
+    data2 = r2.json()
+    assert data2["reply_text"] == _NO_RANKING_MESSAGE
+    assert data2["action"] is None
+
+
+# ---------------------------------------------------------------------------
+# 입력값 범위 검증 (SEV4 #12)
+# ---------------------------------------------------------------------------
+
+
+def test_compare_run_rejects_out_of_bounds_term_months():
+    """CompareContext.term_months는 1~600 범위를 벗어나면 422."""
+    _clear_session()
+    ctx = client.post("/api/compare/prepare", json={"intent": "compare", "params": {}}).json()
+    ctx["user_confirmed"] = True
+    ctx["term_months"] = 1_199_988
+    r = client.post("/api/compare/run", json=ctx)
+    assert r.status_code == 422
+
+
+def test_compare_run_rejects_non_positive_amount():
+    """CompareContext.amount는 0 이하면 422."""
+    _clear_session()
+    ctx = client.post("/api/compare/prepare", json={"intent": "compare", "params": {}}).json()
+    ctx["user_confirmed"] = True
+    ctx["amount"] = 0
+    r = client.post("/api/compare/run", json=ctx)
+    assert r.status_code == 422
+
+
+def test_scenarios_rejects_out_of_bounds_horizon():
+    """/api/scenarios horizon 쿼리는 1~360 범위를 벗어나면 422."""
+    r = client.post("/api/session/persona/P1")
+    assert r.status_code == 200
+    r2 = client.get("/api/scenarios?horizon=100000")
+    assert r2.status_code == 422
+    _clear_session()
+
+
+def test_loan_schedule_rejects_negative_extra():
+    """/api/loans/{id}/schedule?extra는 0 이상이어야 한다."""
+    r = client.post("/api/session/persona/P1")
+    assert r.status_code == 200
+    loan_id = r.json()["loans"][0]["id"]
+    r2 = client.get(f"/api/loans/{loan_id}/schedule?extra=-1")
+    assert r2.status_code == 422
+    _clear_session()
 
 
 # ---------------------------------------------------------------------------

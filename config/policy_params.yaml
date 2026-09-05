@@ -150,6 +150,20 @@ params:
   # kb/*.md 3개 문서(국민연금·퇴직연금·연금저축/ISA)의 수치와 같은 값을 유지하기 위한
   # 참고용 단일 출처이며, 화면에서 아직 계산에 직접 쓰지 않는 항목도 이후 확장을 위해 함께 둔다.
   # -------------------------------------------------------------------------
+  national_pension_start_age:
+    value: 65
+    unit: age_years
+    valid_from: null
+    source_url: "https://www.nps.or.kr/jsppage/info/easy/easy_04_01.jsp"
+    source_title: "국민연금공단(노령연금 수급개시연령 안내, 확인 필요)"
+    verified_at: null
+    needs_verification: true
+    note: >-
+      노령연금(국민연금) 수급개시연령. 출생연도별로 61~65세까지 단계적으로 상향되어
+      왔으며(1969년 이후 출생자 기준 65세), 이 값은 문서 2.5절이 쓰는 "브릿지 구간"(퇴직 후
+      국민연금 개시 전) 계산의 기본 가정이다. 개인별 정확한 개시연령은 국민연금공단 조회로
+      재확인이 필요하다.
+
   national_pension_a_value:
     value: 3190000
     unit: won_per_month

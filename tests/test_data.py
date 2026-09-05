@@ -16,6 +16,7 @@ from app.data.datago import (
     DataGoClient,
     normalize_didimdol,
     normalize_fsc_small_loan,
+    normalize_kinfa_loan_products,
 )
 from app.data.finlife import CRDT_GRADE_LABELS, FinlifeClient, normalize_finlife
 from app.models import LenderGroup, ProductCategory, RateSemantics
@@ -119,6 +120,8 @@ def test_normalize_didimdol():
     assert s.disclosure_month == "202609"
     term_months = sorted({o.term_months for o in s.options})
     assert term_months == [120, 180, 240, 360]
+    # SEV4 #10: 공시 링크는 data.go.kr 개발자 문서가 아니라 한국주택금융공사(HF) 안내 페이지
+    assert s.disclosure_url == "https://www.hf.go.kr"
 
 
 def test_normalize_fsc_small_loan_rate_parsing():
@@ -146,6 +149,22 @@ def test_normalize_fsc_small_loan_rate_parsing():
     # 애매한 텍스트는 rate=None으로 남고 원문은 note에 보존한다(임의 추정 금지)
     assert b.options[0].rate is None
     assert "10.5" in b.options[0].note
+    # SEV4 #10: 공시 링크는 data.go.kr 개발자 문서가 아니라 서민금융진흥원(KINFA) 안내 페이지
+    assert a.disclosure_url == "https://www.kinfa.or.kr"
+    assert b.disclosure_url == "https://www.kinfa.or.kr"
+
+
+def test_normalize_kinfa_loan_products_disclosure_url():
+    """SEV4 #10: 대출상품한눈에(KINFA)도 서민금융진흥원 안내 페이지를 공시 링크로 쓴다."""
+    rows = [{
+        "basym": "202608", "seq": "1", "finprdnm": "테스트 대출상품", "lnlmt": "2000",
+        "irtctg": "고정금리", "irt": "5.0", "rdptmthd": "원리금균등분할상환", "usge": "생계",
+        "trgt": "근로자", "hdlinst": "테스트은행", "suprtgtdtlcond": "-", "maxrdpttrm": "10",
+    }]
+    snaps = normalize_kinfa_loan_products(rows, "20260906-0000-datago")
+    assert len(snaps) == 1
+    assert snaps[0].disclosure_url == "https://www.kinfa.or.kr"
+    assert snaps[0].category == ProductCategory.POLICY
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ import re
 from datetime import date
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Query, Response
 
 from app.api.schemas import (ChatCreateRequest,
     ChatRequest,
@@ -17,6 +17,7 @@ from app.api.schemas import (ChatCreateRequest,
     SpendingAnalyzeRequest,
     SpendingAnalyzeSyntheticRequest,
 )
+from app.core.capacity import compute_capacity
 from app.core.schedule import build_schedule
 from app.core.scenarios import run_scenarios
 from app.core import lifecycle as lifecycle_core
@@ -161,7 +162,7 @@ def get_home() -> HomePayload:
 
 
 @router.get("/loans/{loan_id}/schedule", response_model=LoanSchedule)
-def get_loan_schedule(loan_id: str, extra: int = 0) -> LoanSchedule:
+def get_loan_schedule(loan_id: str, extra: int = Query(0, ge=0)) -> LoanSchedule:
     profile = session_service.get_profile()
     if profile is None:
         raise HTTPException(status_code=404, detail="저장된 프로필이 없습니다.")
@@ -172,12 +173,12 @@ def get_loan_schedule(loan_id: str, extra: int = 0) -> LoanSchedule:
 
 
 @router.get("/scenarios", response_model=list[ScenarioResult])
-def get_scenarios(horizon: int = 60) -> list[ScenarioResult]:
+def get_scenarios(horizon: int = Query(60, ge=1, le=360)) -> list[ScenarioResult]:
     profile = session_service.get_profile()
     if profile is None:
         raise HTTPException(status_code=404, detail="저장된 프로필이 없습니다.")
     params = policy.load_policy_params()
-    return run_scenarios(profile, params, horizon_months=horizon)
+    return run_scenarios(profile, params, horizon_months=horizon, today=date.today(), goals=profile.goals)
 
 
 @router.get("/actions", response_model=list[ActionCard])
@@ -451,12 +452,28 @@ def _build_lifecycle_chat_reply(
         if base is None:
             reply_text = "노후자금 시뮬레이션에 필요한 정보가 부족합니다. 생애 흐름 화면에서 확인해보세요."
         elif base.shortfall > 0:
-            reply_text = (
+            # 2026-09-06 리뷰: required_monthly_saving이 이번 달 실제 여력(capacity.net_monthly)
+            # 보다 크면(예: P6처럼 은퇴가 국민연금 개시 전이라 브릿지 구간까지 감당해야 하는
+            # 경우), "매달 이만큼 저축하세요"는 사실상 실행 불가능한 지시라 대신 격차 크기만
+            # 알리고 생애 흐름 화면에서 시나리오를 함께 살펴보도록 안내한다.
+            schedules = [build_schedule(loan) for loan in profile.loans]
+            capacity = compute_capacity(profile, schedules)
+            base_summary = (
                 f"기준 시나리오 기준 은퇴 시점({base.retirement_age}세) 생활비는 월 "
                 f"{base.retirement_living_cost:,}원, 확정소득은 월 {base.guaranteed_income_monthly:,}원으로 "
-                f"월 {base.monthly_gap:,}원이 부족할 것으로 추정됩니다. 필요자금 대비 {base.shortfall:,}원이 "
-                f"모자라 매월 {base.required_monthly_saving:,}원을 추가로 저축하는 방법이 안내됩니다."
+                f"월 부족액 {base.monthly_gap:,}원, 필요 자금 {base.required_fund_pv:,}원으로 추정됩니다."
             )
+            if base.required_monthly_saving > capacity.net_monthly:
+                reply_text = (
+                    f"{base_summary} 지금 이번 달 여력({capacity.net_monthly:,}원)만으로는 이 격차를 "
+                    "매달 저축만으로 채우기 어려운 규모라 특정 저축액을 안내하지 않습니다. "
+                    "생애 흐름 화면에서 은퇴 시점 조정 등 다른 시나리오를 함께 확인해보세요."
+                )
+            else:
+                reply_text = (
+                    f"{base_summary} 필요자금 대비 {base.shortfall:,}원이 모자라 매월 "
+                    f"{base.required_monthly_saving:,}원을 추가로 저축하는 방법이 안내됩니다."
+                )
         else:
             reply_text = (
                 f"기준 시나리오 기준 은퇴 시점({base.retirement_age}세) 생활비는 월 "
@@ -489,8 +506,59 @@ def _build_lifecycle_chat_reply(
     return reply_text, chips, action
 
 
-def _build_chat_reply(message: str) -> tuple[str, list[Chip], Optional[dict[str, Any]], bool]:
+_CRISIS_CONTACTS = {
+    "self_harm": "자살예방상담전화 109(24시간), 정신건강위기상담 1577-0199",
+    "financial": "신용회복위원회 1600-5500(채무조정 상담), 서민금융콜센터 1397, 불법 추심 신고 금융감독원 1332",
+}
+_FOLLOWUP_KEYS = ("category", "amount", "term_months", "sort_key", "repay_method", "rate_type", "credit_band",
+                  "lender_groups", "exclude_companies", "max_rate", "target_loan_id")
+_FOLLOWUP_LABELS = {"amount": "금액", "term_months": "기간", "max_rate": "금리 상한", "category": "카테고리",
+                    "sort_key": "정렬 기준", "exclude_companies": "제외 회사", "credit_band": "신용 구간",
+                    "repay_method": "상환방식", "rate_type": "금리 유형", "lender_groups": "취급 기관"}
+
+
+def _crisis_reply(level: str, profile: Optional[UserProfile]) -> tuple[str, list[Chip], Optional[dict[str, Any]]]:
+    """위기 발화 응답. 상품·비교 안내를 하지 않고 공적 상담 창구만 안내한다."""
+    chips = [
+        Chip(id="chip-crisis-ccrs", text="채무조정 제도 안내", tier=1, intent="faq", params={"slug": "ccrs-debt-adjustment"}),
+        Chip(id="chip-crisis-illegal", text="불법 추심 대응", tier=1, intent="faq", params={"slug": "illegal-lending-response"}),
+    ]
+    if level == "self_harm":
+        text = ("많이 힘드셨겠어요. 지금 마음이 많이 힘들다면 먼저 사람과 이야기해 주세요. "
+                f"{_CRISIS_CONTACTS['self_harm']}. 빚 문제는 혼자 해결하지 않아도 됩니다. "
+                f"{_CRISIS_CONTACTS['financial']}에서 무료로 상담받을 수 있어요.")
+        return text, chips, None
+    text = ("지금 상황이 많이 버거우실 것 같아요. 연체나 독촉이 있을 때는 새 대출보다 공적 상담이 먼저입니다. "
+            f"{_CRISIS_CONTACTS['financial']}. ")
+    if profile is not None:
+        text += "홈의 안전 모드 카드에 오늘 할 수 있는 일 한 가지를 정리해 두었어요."
+    else:
+        text += "계정을 선택하면 지금 상황에 맞는 오늘의 할 일을 함께 정리해 드려요."
+    return text, chips, {"type": "open_view", "payload": {"view": "home"}}
+
+
+def _merge_followup(base: dict[str, Any], new_params: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """같은 대화의 직전 비교 조건 위에 이번 발화의 델타만 덮어쓴다(후속 질의 재실행)."""
+    merged = {k: base[k] for k in _FOLLOWUP_KEYS if k in base and base[k] is not None}
+    changed: list[str] = []
+    for k, v in new_params.items():
+        if k == "exclude_companies":
+            v = sorted(set(list(merged.get("exclude_companies") or []) + list(v or [])))
+        if merged.get(k) != v:
+            changed.append(k)
+        merged[k] = v
+    merged["estimated_fields"] = [f for f in (base.get("estimated_fields") or []) if f not in new_params]
+    merged["user_confirmed"] = False
+    return merged, changed
+
+
+def _build_chat_reply(message: str, base_params: Optional[dict[str, Any]] = None) -> tuple[str, list[Chip], Optional[dict[str, Any]], bool]:
     masked = guardrails.mask_pii(message)
+
+    crisis = guardrails.detect_crisis(masked)
+    if crisis != "none":
+        text, chips, action = _crisis_reply(crisis, session_service.get_profile())
+        return text, chips, action, False
 
     slots: dict[str, Any] = {}
     llm_used = False
@@ -509,19 +577,42 @@ def _build_chat_reply(message: str) -> tuple[str, list[Chip], Optional[dict[str,
         slots = _ground_numeric_slots(slots, masked)
 
     intent = _normalize_intent(slots.get("intent"))
+    if (base_params and slots.get("intent") in (None, "", "faq") and intent != "compare"
+            and any(slots.get(k) not in (None, "", []) for k in ("max_rate", "term_months", "amount", "exclude_companies", "sort_key"))):
+        intent = "compare"  # 직전 비교 조건이 있는 대화에서 다른 의도 없이 조건만 말하면 후속 질의로 본다
     profile = session_service.get_profile()
     chips: list[Chip] = []
     action: Optional[dict[str, Any]] = None
 
     if intent == "compare":
         params = _clean_compare_params(slots)
-        ctx = compare_service.prepare_context(profile, params)
-        category_label = _CATEGORY_LABELS_KR.get(ctx.category.value, ctx.category.value)
-        reply_text = (
-            f"{category_label} 비교 조건을 준비했어요. 금액 {ctx.amount:,}원, 기간 {ctx.term_months}개월 "
-            "기준입니다. 공시 비교 화면에서 조건을 확인하고 실행해보세요."
-        )
-        action = {"type": "prepare_compare", "payload": {"params": ctx.model_dump(mode="json")}}
+        followup_changed: list[str] = []
+        if base_params and params.get("category") in (None, base_params.get("category")):
+            merged, followup_changed = _merge_followup(base_params, params)
+            try:
+                ctx = CompareContext.model_validate(merged)
+            except Exception:  # 직전 조건이 깨졌으면 새 추정으로 되돌아간다
+                ctx = compare_service.prepare_context(profile, params)
+        else:
+            ctx = compare_service.prepare_context(profile, params)
+        if ctx.category in (ProductCategory.DEPOSIT, ProductCategory.SAVING):
+            # 결정 D5: 예·적금은 순위 비교 대상이 아니다. 비교 화면으로 보내는 대신
+            # 공시 열람만 안내하고, prepare_compare 액션은 만들지 않는다(2026-09-06 리뷰).
+            reply_text = compare_service.NO_RANKING_CATEGORY_MESSAGE
+        else:
+            category_label = _CATEGORY_LABELS_KR.get(ctx.category.value, ctx.category.value)
+            if followup_changed:
+                labels = ", ".join(_FOLLOWUP_LABELS.get(k, k) for k in followup_changed)
+                reply_text = (
+                    f"이전 조건에서 {labels}만 바꿔 다시 준비했어요. {category_label}, 금액 {ctx.amount:,}원, "
+                    f"기간 {ctx.term_months}개월 기준입니다. 공시 비교 화면에서 확인하고 실행해보세요."
+                )
+            else:
+                reply_text = (
+                    f"{category_label} 비교 조건을 준비했어요. 금액 {ctx.amount:,}원, 기간 {ctx.term_months}개월 "
+                    "기준입니다. 공시 비교 화면에서 조건을 확인하고 실행해보세요."
+                )
+            action = {"type": "prepare_compare", "payload": {"params": ctx.model_dump(mode="json")}}
 
     elif intent in ("schedule", "scenario"):
         reply_text = "내 부채 화면에서 상환표와 시나리오를 확인할 수 있어요."
@@ -577,8 +668,10 @@ def _build_chat_reply(message: str) -> tuple[str, list[Chip], Optional[dict[str,
         ])
 
     banned = insights_service.get_banned_terms()
-    kb_reply = bool(action and action.get("type") == "open_kb")  # KB 문서는 작성 시 금지어 검사를 통과한 텍스트
-    if not kb_reply and guardrails.check_text(reply_text, banned):
+    # KB 응답도 예외 없이 검사한다(2026-09-06 리뷰: kb_reply 우회는 kb/*.md에 실제
+    # 금융회사명이 남아있어도 그대로 통과시키는 구멍이었다). kb/*.md는 이제 상호금융권 등
+    # 개별 기관 실명을 쓰지 않으므로(SEV5 #3) 15개 문서 전부 이 검사를 통과해야 한다.
+    if guardrails.check_text(reply_text, banned):
         reply_text = "안내 문구를 표시할 수 없어 기본 안내로 대체했습니다. 메뉴에서 원하는 화면을 선택해주세요."
 
     return reply_text, chips, action, llm_used
@@ -598,10 +691,18 @@ def post_chat(body: ChatRequest) -> ChatReply:
         chat = chatlog.get_chat(chat_id)
         if chat is None or chat["profile_id"] != profile_id:
             chat_id = None
+    base_params: Optional[dict[str, Any]] = None
+    if chat_id:
+        for m in reversed(chatlog.get_messages(chat_id)):
+            a = m.get("action") or {}
+            if a.get("type") == "prepare_compare":
+                base_params = (a.get("payload") or {}).get("params")
+                break
     if not chat_id:
-        chat_id = chatlog.create_chat(profile_id, title=body.message.strip()[:30])["id"]
+        title = guardrails.mask_pii(body.message).strip()[:30]
+        chat_id = chatlog.create_chat(profile_id, title=title)["id"]
     chatlog.append_message(chat_id, "user", guardrails.mask_pii(body.message))
-    reply_text, chips, action, llm_used = _build_chat_reply(body.message)
+    reply_text, chips, action, llm_used = _build_chat_reply(body.message, base_params=base_params)
     chatlog.append_message(chat_id, "reply", reply_text, llm_used=llm_used, action=action,
                            chips=[c.model_dump(mode="json") for c in chips])
     return ChatReply(reply_text=reply_text, chips=chips, action=action, llm_used=llm_used, chat_id=chat_id)

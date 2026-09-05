@@ -238,13 +238,19 @@ def _build_index(docs: list[KbDoc]) -> tuple[dict[str, Counter], dict[str, float
 
 
 def _keyword_score(query_norm: str, query_grams: set[str], keywords: list[str]) -> float:
-    """키워드 완전/부분 포함은 높은 고정 가중치, 부분 겹침은 비례 가중치를 준다."""
+    """키워드가 질의에 (완전히) 포함되면 높은 고정 가중치, 부분 겹침은 비례 가중치를 준다.
+
+    방향은 "키워드가 질의 안에 있는가"(kw_norm in query_norm)만 본다. 반대 방향
+    (query_norm in kw_norm, 질의가 키워드의 부분 문자열인가)까지 인정하면 "금"처럼
+    아주 짧은 질의가 "예금", "국민연금" 같은 무관한 키워드에도 전부 걸려 부당하게 높은
+    점수를 받는다(2026-09-06 리뷰: `answer("금")`이 답을 만들어내던 원인).
+    """
     score = 0.0
     for kw in keywords:
         kw_norm = _normalize(kw)
         if not kw_norm:
             continue
-        if kw_norm in query_norm or query_norm in kw_norm:
+        if kw_norm in query_norm:
             score += 8.0
             continue
         kw_grams = set(_bigrams(kw))
@@ -286,7 +292,16 @@ def _best_snippet(query_grams: set[str], doc: KbDoc, max_len: int = 400) -> str:
 
     text = text.strip()
     if len(text) > max_len:
-        text = text[:max_len].rstrip() + "..."
+        # max_len 안에서 마지막 문장 경계(., ?, !) 뒤에서 자른다. 단어나 문장 중간에서
+        # 뚝 끊기면 어색하므로, 경계가 있으면 그 문장까지만 남기고 "..."를 붙이지
+        # 않는다(2026-09-06 리뷰). 경계를 못 찾으면(문장부호가 전혀 없는 예외적인 텍스트)
+        # 기존처럼 글자 수로 자르고 "..."를 붙인다.
+        cut = text[:max_len]
+        boundary = max(cut.rfind("."), cut.rfind("?"), cut.rfind("!"))
+        if boundary >= 0:
+            text = cut[: boundary + 1].strip()
+        else:
+            text = cut.rstrip() + "..."
     return text
 
 
@@ -296,10 +311,15 @@ def search(query: str, k: int = 3, docs: Optional[list[KbDoc]] = None) -> list[K
     점수 = (한글 문자 바이그램 TF-IDF 본문 점수) + (키워드 일치 가중치) + (제목 일치 가중치).
     동점이면 slug 오름차순으로 정렬한다. docs를 넘기면 그 목록만 대상으로 검색하고,
     생략하면 `load_docs()`로 얻은 캐시된 전체 문서를 대상으로 한다.
+
+    질의가 2자 미만이면(예: "금") 어떤 문서와도 의미 있게 구분되지 않으므로 빈 결과를
+    돌려준다. `ANSWER_THRESHOLD`를 여기서도 적용해, 점수가 낮아 사실상 무관한 문서까지
+    "상위 k개"라는 이유만으로 끼워 넣지 않는다(2026-09-06 리뷰: 관계없는 영어 질의에도
+    항상 문서 k개가 반환되던 문제).
     """
     if docs is None:
         docs = load_docs()
-    if not docs or not query or not query.strip():
+    if not docs or not query or len(query.strip()) < 2:
         return []
 
     doc_grams, idf = _build_index(docs)
@@ -330,10 +350,11 @@ def search(query: str, k: int = 3, docs: Optional[list[KbDoc]] = None) -> list[K
         scored.append((total, doc.slug, doc))
 
     scored.sort(key=lambda t: (-t[0], t[1]))
+    qualified = [row for row in scored if row[0] > ANSWER_THRESHOLD]
 
     k = max(k, 0)
     hits: list[KbHit] = []
-    for score, _slug, doc in scored[:k]:
+    for score, _slug, doc in qualified[:k]:
         hits.append(
             KbHit(
                 slug=doc.slug,

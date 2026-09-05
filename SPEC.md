@@ -409,3 +409,41 @@ python run.py            # 사용자 3666
 python run.py 3676       # Claude Code 테스트용
 .venv\Scripts\python -m pytest -q
 ```
+
+## 6. 2026-09-06 릴리스 리뷰 보정 (계약이 바뀐 항목만 기록)
+
+- `app/core/retirement.py::retirement_gap_projection`: 모든 금액(생활비·확정소득·월
+  부족액·필요자금·적립 예상액)을 오늘 기준 실질 금액으로 통일했다(이전에는 생활비만
+  물가상승률로 은퇴시점 명목값으로 부풀려 확정소득과 단위가 섞였다). `retirement_age`가
+  policy `national_pension_start_age`(신규)보다 빠르면 브릿지 구간(국민연금 개시 전)을
+  필요자금(PV)에 더한다: `annuity_pv(생활비, r, 브릿지연수) +
+  pv_lump(annuity_pv(월부족액, r, 잔여연수), r, 브릿지연수)`. 단위 고지와 브릿지 가정은
+  `assumptions`에 문장으로 남는다. 1.6/3.7~3.13절 원시 함수(fv_lump, annuity_pv 등) 자체의
+  골든 벡터는 바꾸지 않았다.
+- `config/policy_params.yaml`에 `national_pension_start_age`(65세, 국민연금 수급개시연령,
+  needs_verification: true)를 추가했다.
+- `app/models.py::CashflowPoint`에 `goal_outflow: int = 0`을 추가했다
+  (`net = income - debt_payment - expenses - goal_outflow`). `GET /api/scenarios`는 이제
+  `today=date.today()`와 `goals=profile.goals`를 함께 넘겨 목표(Goal)의 목표 시점을
+  현금흐름에 반영한다.
+- `app/models.py::CompareContext`: `amount`는 `Field(gt=0)`, `term_months`는
+  `Field(ge=1, le=600)`로 범위를 제한했다(위반 시 422). `GET /api/scenarios`의 `horizon`
+  쿼리는 `ge=1, le=360`, `GET /api/loans/{id}/schedule`의 `extra` 쿼리는 `ge=0`(모두 위반 시
+  422).
+- `app/services/compare.py::run_compare`(결정 D5): `category`가 `deposit`/`saving`이면
+  `ValueError`("예·적금은 순위 비교 대상이 아닙니다. 공시 열람만 제공합니다.") → HTTP 422.
+  `prepare_context`는 이 두 카테고리에는 프로필의 `credit_band`를 추정해 넣지 않는다.
+  채팅 `compare` 의도도 예금/적금 카테고리면 이 문구로만 답하고 `prepare_compare` 액션을
+  만들지 않는다.
+- `app/api/routes.py`의 채팅 응답은 이제 KB(`kb/*.md`) 답변도 예외 없이
+  `guardrails.check_text` 금칙어 검사를 통과해야 한다(기존 우회 제거). 이에 맞춰
+  `kb/*.md`는 상호금융권 등 개별 금융기관 실명과 "대출비교 플랫폼" 안내 문구를 쓰지
+  않는다(공공기관·정책상품명·금융결제원·금감원 파인·금융회사 앱/창구 안내만 허용, 원칙 3).
+- `app/data/datago.py`의 정책 데이터셋 `disclosure_url`이 data.go.kr 개발자 문서 대신
+  공공기관 이용자 안내 페이지를 가리킨다: 디딤돌 → `https://www.hf.go.kr`, 서민금융
+  상품 기본정보·대출상품한눈에 → `https://www.kinfa.or.kr`.
+- `app/services/actions.py::list_actions`는 이제 생애 단계 임계값(`config/thresholds.yaml`)을
+  로드해 `evaluate_rules`에 넘긴다. 그 결과 R8(저축률 미달)·R9(원리금상환비율 초과)·
+  R10(노후소득 충당률 미달)이 `GET /api/actions`·`GET /api/home`에도 나타날 수 있다.
+- `app/core/loan.py::prepay_fee`에 선택 인자 `params: PolicyParams | None = None`을
+  추가했다(있으면 `prepay_fee_period_months`를 분모로 쓰고, 없으면 기존처럼 36).

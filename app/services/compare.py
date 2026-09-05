@@ -51,6 +51,13 @@ LOAN_TYPE_TO_CATEGORY: dict[LoanType, ProductCategory] = {
 _CREDIT_LIKE_TYPES = (LoanType.CREDIT, LoanType.CARD_LOAN, LoanType.OVERDRAFT, LoanType.STUDENT)
 _DEFAULT_LENDER_GROUPS = [LenderGroup.BANK.value, LenderGroup.SAVINGS_BANK.value]
 
+# 결정 D5: 예·적금은 "더 나은 상품 순위"라는 개념 자체가 성립하지 않는 상품(금리가 곧
+# 원금 손실 위험과 직결되지 않고, 예금자보호 한도·중도해지 조건 등 순위화로 단순화하면
+# 안 되는 요소가 많다)이라 M0 순위 비교 대상에서 제외한다. 공시 열람(금감원 금융상품
+# 한눈에 링크)만 제공한다.
+_NO_RANKING_CATEGORIES = (ProductCategory.DEPOSIT, ProductCategory.SAVING)
+NO_RANKING_CATEGORY_MESSAGE = "예·적금은 순위 비교 대상이 아닙니다. 공시 열람만 제공합니다."
+
 
 def _pick_target_loan(
     profile: Optional[UserProfile], target_loan_id: Optional[str]
@@ -117,7 +124,15 @@ def prepare_context(profile: Optional[UserProfile], intent_params: dict[str, Any
     term_months = max(int(term_months), 1)
 
     credit_band = params.get("credit_band")
-    if credit_band is None and profile is not None and profile.credit_band:
+    if (
+        credit_band is None
+        and profile is not None
+        and profile.credit_band
+        and category not in _NO_RANKING_CATEGORIES
+    ):
+        # 예·적금(DEPOSIT/SAVING)은 신용점수 구간별 금리 차등이 없는 상품이라(D5,
+        # run_compare가 애초에 순위 비교 자체를 거부한다) 프로필의 credit_band를
+        # 추정해 끼워 넣지 않는다.
         credit_band = profile.credit_band
         estimated.append("credit_band")
 
@@ -173,7 +188,13 @@ def prepare_context(profile: Optional[UserProfile], intent_params: dict[str, Any
 
 def run_compare(ctx: CompareContext, profile: Optional[UserProfile], *, today: date) -> CompareResult:
     """SPEC 2.3: user_confirmed가 False면 ValueError(호출부가 HTTP 422로 변환).
-    products.query -> ranking.eligible/rank -> result_hash -> decisions.save."""
+    products.query -> ranking.eligible/rank -> result_hash -> decisions.save.
+
+    결정 D5: category가 예금/적금이면 순위 비교 자체를 거부한다(호출부가 마찬가지로
+    422로 변환, 2026-09-06 리뷰).
+    """
+    if ctx.category in _NO_RANKING_CATEGORIES:
+        raise ValueError(NO_RANKING_CATEGORY_MESSAGE)
     if not ctx.user_confirmed:
         raise ValueError("조건 확인(user_confirmed=true) 후에만 비교를 실행할 수 있습니다.")
 

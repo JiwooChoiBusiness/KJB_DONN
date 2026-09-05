@@ -17,15 +17,40 @@ def compute_capacity(profile: UserProfile, schedules: list[LoanSchedule]) -> Cap
     `ratio = debt_service / income`.
     band: net < 0 → NEGATIVE; ratio ≥ 0.5 또는 net < 0.05*income → TIGHT;
     net ≥ 0.2*income → COMFORTABLE; 그 외 OK.
+
+    소득이 0 이하(온보딩 전 게스트 프로필 등)면 소득 대비 비율 계산 자체가 의미가 없어
+    (0으로 나누기 회피용 근사가 오히려 "COMFORTABLE"처럼 잘못된 판정을 낼 수 있다,
+    2026-09-06 리뷰 지적) 위 일반 규칙을 적용하지 않는다. 대신 부채 상환액이 있으면
+    NEGATIVE(상환할 소득 자체가 없음), 없으면 TIGHT(정보 부족으로 여유가 있다고 볼 수
+    없음)로 보수적으로 판정하고, 설명 문장에 소득 정보가 없다는 사실을 명시한다.
     """
     debt_service = sum(s.first_payment for s in schedules)
     income = profile.monthly_income
     net = income - profile.fixed_expenses - profile.variable_expenses - debt_service
 
-    if income > 0:
-        ratio = debt_service / income
-    else:
+    if income <= 0:
         ratio = 1.0 if debt_service > 0 else 0.0
+        band = CapacityBand.NEGATIVE if debt_service > 0 else CapacityBand.TIGHT
+        if debt_service > 0:
+            explanation = (
+                f"소득 정보가 없거나 0원인데 월 부채 상환액은 {debt_service:,}원이라 "
+                "상환 여력을 확인할 수 없습니다."
+            )
+        else:
+            explanation = "소득 정보가 없어 가용 여력을 계산할 수 없습니다. 월소득을 입력하면 정확히 계산해드려요."
+        assumptions = [
+            "월소득 정보가 없거나 0원이라 소득 대비 비율 대신 보수적인 기본값(정보 부족)으로 판정했습니다.",
+        ]
+        return Capacity(
+            band=band,
+            net_monthly=net,
+            debt_service=debt_service,
+            debt_service_ratio=ratio,
+            explanation=explanation,
+            assumptions=assumptions,
+        )
+
+    ratio = debt_service / income
 
     if net < 0:
         band = CapacityBand.NEGATIVE

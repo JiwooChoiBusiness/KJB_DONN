@@ -12,10 +12,12 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from app.core import lifecycle as lifecycle_core
 from app.core.capacity import compute_capacity
 from app.core.rules import evaluate_rules
 from app.core.schedule import build_schedule
 from app.models import ActionCard, PolicyParams, UserProfile
+from app.services import lifecycle as lifecycle_service
 
 # app/core/rules.py의 R0~R6 numbers 키를 모두 다룬다. 새 규칙이 새 키를 추가하면
 # format_action_numbers의 else 분기가 방어적으로 처리한다(라벨 없이 원시값 노출).
@@ -32,6 +34,8 @@ _WON_LABELS: dict[str, str] = {
     "cost": "신청 비용",
     "monthly_interest_saving": "월 이자 절감",
     "prepay_fee": "중도상환수수료",
+    "guaranteed_income": "확정소득",  # R10: 국민연금 등 노후 확정소득 추정액(월)
+    "essential_expense": "필수지출",  # R10: 노후 필수지출(월)
 }
 _PCT_LABELS: dict[str, str] = {
     "target_rate": "대상 금리",
@@ -46,7 +50,13 @@ _MONTHS_LABELS: dict[str, str] = {
     "new_months": "변경 후 개월",
     "breakeven_months": "손익분기 개월",
 }
-_RATIO_PCT_LABELS: dict[str, str] = {"debt_service_ratio": "상환 비율"}
+_RATIO_PCT_LABELS: dict[str, str] = {
+    "debt_service_ratio": "상환 비율",
+    "saving_rate": "저축률",              # R8
+    "min_saving_rate": "최소 저축률 기준",  # R8
+    "coverage_ratio": "노후소득 충당률",    # R10
+    "min_coverage_ratio": "최소 충당률 기준",  # R10
+}
 
 
 def format_action_numbers(numbers: dict[str, Any]) -> dict[str, str]:
@@ -73,9 +83,18 @@ def format_action_numbers(numbers: dict[str, Any]) -> dict[str, str]:
 
 
 def list_actions(profile: UserProfile, params: PolicyParams, *, today: date) -> list[ActionCard]:
-    """프로필의 대출 스케줄과 여력을 계산해 R0~R6 규칙을 평가하고, numbers를
-    화면 표시용 한국어 라벨로 포맷해 돌려준다(priority 오름차순, evaluate_rules 유지)."""
+    """프로필의 대출 스케줄과 여력을 계산해 R0~R10 규칙을 평가하고, numbers를
+    화면 표시용 한국어 라벨로 포맷해 돌려준다(priority 오름차순, evaluate_rules 유지).
+
+    R8(저축률 미달)·R9(원리금상환비율 초과)·R10(노후소득 충당률 미달)은 생애 단계별
+    임계값(`config/thresholds.yaml`)이 있어야 평가되므로(SPEC 2.7), 여기서 단계를
+    판정하고 임계값을 로드해 `evaluate_rules`에 넘긴다. 이전에는 `thresholds`를 넘기지
+    않아 `/api/actions`·`/api/home`에 R8~R10이 전혀 나타나지 않았다(2026-09-06 리뷰 지적).
+    """
     schedules = [build_schedule(loan) for loan in profile.loans]
     capacity = compute_capacity(profile, schedules)
-    cards = evaluate_rules(profile, schedules, capacity, params, today=today)
+    all_thresholds = lifecycle_service.load_thresholds()
+    stage_result = lifecycle_core.classify_stage(profile, today=today)
+    thresholds = lifecycle_core.thresholds_for_stage(all_thresholds, stage_result.stage)
+    cards = evaluate_rules(profile, schedules, capacity, params, today=today, thresholds=thresholds)
     return [card.model_copy(update={"numbers": format_action_numbers(card.numbers)}) for card in cards]

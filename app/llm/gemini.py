@@ -119,10 +119,10 @@ class GeminiProvider:
         self._model_cooldown_until[model] = time.monotonic() + self.model_cooldown_seconds
         logger.warning("gemini model cooldown model=%s seconds=%s", model, self.model_cooldown_seconds)
 
-    def _post(self, model: str, key_index: int, body: dict) -> requests.Response:
+    def _post(self, model: str, key_index: int, body: dict, timeout: float) -> requests.Response:
         url = f"{self.endpoint}/models/{model}:generateContent"
         headers = {"x-goog-api-key": self.keys[key_index], "Content-Type": "application/json"}
-        return requests.post(url, headers=headers, json=body, timeout=self.timeout_seconds)
+        return requests.post(url, headers=headers, json=body, timeout=timeout)
 
     def _run_chain(self, body: dict) -> tuple[dict, str, int, int]:
         """(응답 JSON, 모델명, 키 인덱스, 지연ms)를 반환한다. 모두 실패하면 LLMUnavailable."""
@@ -138,14 +138,22 @@ class GeminiProvider:
             for key_index in range(len(self.keys)):
                 if self._is_cooling_down(key_index):
                     continue
-                if time.monotonic() - chain_started > self.total_deadline_seconds:
+                elapsed = time.monotonic() - chain_started
+                if elapsed > self.total_deadline_seconds:
                     raise LLMUnavailable(
                         f"체인 전체 시간 상한({self.total_deadline_seconds}s) 초과(last_status={last_status})."
                     )
+                # 요청별 타임아웃은 설정값(timeout_seconds)과 "남은 전체 예산"의 최솟값으로
+                # 줄인다. 그렇지 않으면 느린 요청 하나가 timeout_seconds(예: 20s)까지 그대로
+                # 붙잡고 있어, 체인 전체가 total_deadline_seconds를 크게 넘겨버릴 수 있다
+                # (2026-09-06 리뷰 지적). 이렇게 하면 초과분은 마지막 한 번의 "짧은" 요청
+                # 정도로 제한된다.
+                deadline_remaining = self.total_deadline_seconds - elapsed
+                request_timeout = max(min(self.timeout_seconds, deadline_remaining), 0.001)
 
                 started = time.monotonic()
                 try:
-                    resp = self._post(model, key_index, body)
+                    resp = self._post(model, key_index, body, request_timeout)
                 except requests.RequestException as exc:
                     latency_ms = int((time.monotonic() - started) * 1000)
                     last_status = "network_error"

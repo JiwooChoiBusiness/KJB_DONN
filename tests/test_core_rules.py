@@ -98,6 +98,24 @@ def test_capacity_comfortable_band():
     assert "상품" not in cap.explanation  # 상품명 없이 숫자만 담긴 문장
 
 
+def test_capacity_guest_profile_no_income_no_debt_is_tight():
+    """SEV3 #17: 소득 0원(온보딩 전 게스트)이고 부채도 없으면 TIGHT(정보 부족)이어야
+    하며, 이전처럼 net>=0.2*income(=0)이 참이 되어 COMFORTABLE로 잘못 판정되면 안 된다."""
+    profile = make_profile([], monthly_income=0, fixed_expenses=0, variable_expenses=0)
+    cap = compute_capacity(profile, [])
+    assert cap.band == CapacityBand.TIGHT
+    assert "소득" in cap.explanation
+
+
+def test_capacity_guest_profile_no_income_with_debt_is_negative():
+    """SEV3 #17: 소득 0원인데 상환할 대출이 있으면 NEGATIVE로 판정해야 한다."""
+    loans = [make_loan(annual_rate=6.0, remaining_months=12, balance=5_000_000)]
+    profile = make_profile(loans, monthly_income=0, fixed_expenses=0, variable_expenses=0)
+    cap = compute_capacity(profile, build_schedules(loans))
+    assert cap.band == CapacityBand.NEGATIVE
+    assert "소득" in cap.explanation
+
+
 def test_capacity_ok_band_between_tight_and_comfortable():
     loans = [make_loan(annual_rate=5.0, remaining_months=24, balance=15_000_000, principal=15_000_000)]
     profile = make_profile(loans, monthly_income=3_500_000, fixed_expenses=1_500_000, variable_expenses=900_000)

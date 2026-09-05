@@ -145,6 +145,7 @@ class CashflowPoint(BaseModel):
     income: int
     debt_payment: int
     expenses: int
+    goal_outflow: int = 0  # 그 달에 목표(Goal) 시점이 걸려 있으면 목표금액-저축분 일시 지출
     net: int
     total_balance: int
     cumulative_net: int
@@ -270,8 +271,8 @@ class SortKey(str, Enum):
 
 class CompareContext(BaseModel):
     category: ProductCategory
-    amount: int
-    term_months: int
+    amount: int = Field(gt=0)
+    term_months: int = Field(ge=1, le=600)
     sort_key: SortKey = SortKey.TOTAL_COST
     repay_method: RepayMethod = RepayMethod.EQUAL_PAYMENT
     rate_type: Optional[RateType] = None
@@ -534,7 +535,13 @@ class LifeStageResult(BaseModel):
 
 
 class RetirementProjection(BaseModel):
-    """시나리오(낙관/기준/비관) 1건의 노후자금 격차 시뮬레이션 결과(문서 3.7~3.11)."""
+    """시나리오(낙관/기준/비관) 1건의 노후자금 격차 시뮬레이션 결과(문서 3.7~3.11).
+
+    금액 단위: retirement_living_cost/guaranteed_income_monthly/monthly_gap/
+    required_fund_pv/projected_fund_fv/shortfall/required_monthly_saving은 전부
+    "오늘 기준 실질 금액"(물가상승률로 부풀리지 않은 구매력 기준)이다. real_return이
+    이미 물가효과를 제거한 실질수익률이므로 실질 금액을 그대로 실질수익률로 할인·적립한다.
+    """
 
     scenario: str
     real_return: float

@@ -98,15 +98,30 @@ def _find_family_goal(profile: UserProfile, today: date) -> Optional[str]:
     return best[1] if best else None
 
 
+def _floor_stage(current: LifeStage, candidate: LifeStage) -> LifeStage:
+    """current와 candidate 중 stage 순서상 더 나중(later) 단계를 돌려준다.
+
+    신호 보정(부양가족, 목표, 무소득 등)은 단계를 "앞으로만"(사회초년기 -> 후기은퇴기
+    방향) 당길 수 있고, 이미 더 나중 단계로 판정된 것을 뒤로 되돌리면 안 된다(SEV3 #16:
+    예를 들어 40대에 결혼 목표가 있다고 20대 단계로 되돌리거나, 70대가 무소득이라고
+    은퇴전환기로 되돌리면 안 된다). `life_stage_override`는 사용자 지정이 최우선이라
+    이 규칙과 무관하게 예외적으로 적용한다.
+    """
+    if _STAGE_ORDER.index(candidate) > _STAGE_ORDER.index(current):
+        return candidate
+    return current
+
+
 def classify_stage(profile: UserProfile, *, today: date) -> LifeStageResult:
     """나이 구간을 기본값으로 삼고 문서 2.1절 신호로 보정해 생애주기 7단계 중 하나를 정한다.
 
-    적용 순서(뒤에 적용되는 신호가 필요하면 앞선 판정을 덮어쓴다):
+    적용 순서(뒤에 적용되는 신호가 필요하면 앞선 판정을 덮어쓴다). 2~5번 신호 보정은
+    모두 `_floor_stage`로 단계를 "앞으로만" 당기며, 이미 더 나중 단계면 그대로 둔다:
     1. 나이 구간(정보 없으면 사회초년기 기본값)
     2. 부양가족이 있는 사회초년기 -> 가족형성기로 보정
-    3. 2년 이내 결혼·출산 목표 -> 가족형성기로 보정
+    3. 2년 이내 결혼·출산 목표 -> 가족형성기로 보정(이미 그 이후 단계면 유지)
     4. `retirement_near` 플래그 -> 최소 은퇴준비기로 상향(이미 그 이후 단계면 유지)
-    5. 무소득 + 55세 이상 -> 은퇴전환기
+    5. 무소득 + 55세 이상 -> 최소 은퇴전환기로 상향(이미 그 이후 단계면 유지)
     6. `life_stage_override`가 있으면 위 판정과 무관하게 그 값을 최종 채택(사용자 지정이 최우선)
     """
     stage, reason = _age_band_stage(profile.age)
@@ -118,16 +133,15 @@ def classify_stage(profile: UserProfile, *, today: date) -> LifeStageResult:
 
     family_goal_reason = _find_family_goal(profile, today)
     if family_goal_reason is not None:
-        stage = LifeStage.FAMILY_FORMATION
+        stage = _floor_stage(stage, LifeStage.FAMILY_FORMATION)
         reasons.append(family_goal_reason)
 
     if "retirement_near" in profile.flags:
-        if _STAGE_ORDER.index(stage) < _STAGE_ORDER.index(LifeStage.PRE_RETIREMENT):
-            stage = LifeStage.PRE_RETIREMENT
+        stage = _floor_stage(stage, LifeStage.PRE_RETIREMENT)
         reasons.append("은퇴가 가깝다는 신호(retirement_near)가 있어 은퇴준비기 우선순위를 반영합니다.")
 
     if profile.income_type == "none" and profile.age is not None and profile.age >= 55:
-        stage = LifeStage.RETIREMENT_TRANSITION
+        stage = _floor_stage(stage, LifeStage.RETIREMENT_TRANSITION)
         reasons.append("55세 이상이며 현재 소득이 없어 은퇴전환기로 판단했습니다.")
 
     if profile.life_stage_override:
