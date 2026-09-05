@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 from app.core.capacity import compute_capacity
 from app.core.schedule import build_schedule, monthly_payment_equal
+from app.core import spending as spending_core
 from app.data import products
 from app.llm import guardrails
 from app.models import (
@@ -24,6 +25,7 @@ from app.models import (
 )
 from app.services.actions import list_actions
 from app.services.compare import LOAN_TYPE_TO_CATEGORY
+from app.services import spending as spending_service
 
 _LOAN_TYPE_LABELS_KR: dict[str, str] = {
     "credit": "신용대출",
@@ -305,8 +307,28 @@ def build_home(
             explain="부정적인 톤의 카드만 있을 때 균형을 맞추기 위해 추가된 안내입니다.",
         ))
 
+    # P5: 저장된 소비 패턴 분석이 있으면 최대 2장을 더한다. 홈 카드는 최대 3장(SPEC 3장)
+    # 이므로 자리가 모자라면 progress 카드부터 빼서 자리를 만든다.
+    spending_loaded = spending_service.load(profile.id)
+    spending_cards: list[InsightCard] = []
+    if spending_loaded is not None:
+        s_summary, s_features = spending_loaded
+        spending_cards = spending_core.build_spending_cards(s_features, s_summary, profile)[:2]
+
+    if spending_cards:
+        room = 3 - len(cards)
+        if room < len(spending_cards):
+            cards = [c for c in cards if c.kind != "progress"]
+            room = 3 - len(cards)
+        if room > 0:
+            cards.extend(spending_cards[:room])
+
     cards = [_guard_card(c, banned) for c in cards]
     chips = _derive_tier1_chips(profile, top_action)
+    if spending_loaded is not None:
+        spending_chip = Chip(id="chip-tier1-spending", text="소비 패턴 보기", tier=1, intent="spending", params={})
+        if spending_chip.id not in {c.id for c in chips}:
+            chips = chips[:4] + [spending_chip]
 
     return HomePayload(
         profile_id=profile.id, cards=cards, chips=chips,

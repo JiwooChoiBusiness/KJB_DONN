@@ -83,6 +83,13 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id, id);
+
+CREATE TABLE IF NOT EXISTS spending_features (
+    profile_id     TEXT PRIMARY KEY,
+    features_json  TEXT NOT NULL,
+    summary_json   TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
 """
 
 

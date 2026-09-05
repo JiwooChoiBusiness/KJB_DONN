@@ -7,16 +7,19 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Response
 
-from app.api.schemas import (ChatCreateRequest, 
+from app.api.schemas import (ChatCreateRequest,
     ChatRequest,
     ComparePrepareRequest,
     MetaResponse,
     OkResponse,
     PersonaSummary,
     ReplayResponse,
+    SpendingAnalyzeRequest,
+    SpendingAnalyzeSyntheticRequest,
 )
 from app.core.schedule import build_schedule
 from app.core.scenarios import run_scenarios
+from app.core import spending as spending_core
 from app.data import policy, products, synthetic
 from app.data.finlife import CRDT_GRADE_LABELS
 from app.llm import guardrails
@@ -46,6 +49,7 @@ from app.services import compare as compare_service
 from app.services import decisions as decisions_service
 from app.services import insights as insights_service
 from app.services import session as session_service
+from app.services import spending as spending_service
 
 router = APIRouter()
 
@@ -251,6 +255,78 @@ def get_synthetic_csv(persona_id: str) -> Response:
     csv_text = synthetic.transactions_to_csv(rows)
     headers = {"Content-Disposition": f'attachment; filename="{persona_id}_transactions.csv"'}
     return Response(content=csv_text, media_type="text/csv", headers=headers)
+
+
+def _profile_or_guest() -> UserProfile:
+    """세션 프로필이 없으면 게스트 프로필(소득 0)로 분석한다(SPEC 2.6: 소비 패턴은
+    프로필 없이도 체험할 수 있어야 하므로 404 대신 게스트로 계산한다)."""
+    profile = session_service.get_profile()
+    if profile is not None:
+        return profile
+    return UserProfile(
+        id=chatlog.GUEST_PROFILE_ID, display_name="게스트",
+        monthly_income=0, fixed_expenses=0, variable_expenses=0,
+    )
+
+
+def _spending_payload(summary, features, profile: UserProfile) -> dict[str, Any]:
+    cards = spending_core.build_spending_cards(features, summary, profile)
+    return {
+        "summary": summary.model_dump(mode="json"),
+        "features": features.model_dump(mode="json"),
+        "cards": [c.model_dump(mode="json") for c in cards],
+    }
+
+
+@router.post("/spending/analyze")
+def post_spending_analyze(body: SpendingAnalyzeRequest) -> dict[str, Any]:
+    """브라우저가 파싱·정규화한 거래내역을 받아 그 자리에서 분석하고 요약/피처만
+    저장한다(원본 거래내역은 응답 후 버려지며 서버에 저장하지 않는다, SPEC 2.6 D3/D4)."""
+    profile = _profile_or_guest()
+    months = body.months or 3
+    summary, features = spending_service.analyze(
+        body.transactions, profile, end=date.today(), months=months,
+    )
+    spending_service.save(profile.id, summary, features)
+    return _spending_payload(summary, features, profile)
+
+
+@router.post("/spending/analyze-synthetic")
+def post_spending_analyze_synthetic(body: SpendingAnalyzeSyntheticRequest) -> dict[str, Any]:
+    profile = _profile_or_guest()
+    persona_id = body.persona_id or profile.id
+    months = body.months or 3
+    seed = body.seed if body.seed is not None else 42
+    try:
+        transactions = spending_service.load_synthetic(persona_id, months=months, seed=seed, end=date.today())
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"알 수 없는 페르소나입니다: {persona_id}")
+    summary, features = spending_service.analyze(transactions, profile, end=date.today(), months=months)
+    spending_service.save(profile.id, summary, features)
+    return _spending_payload(summary, features, profile)
+
+
+@router.get("/spending")
+def get_spending() -> dict[str, Any]:
+    profile = _profile_or_guest()
+    loaded = spending_service.load(profile.id)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail="저장된 소비 패턴 분석이 없습니다.")
+    summary, features = loaded
+    return _spending_payload(summary, features, profile)
+
+
+@router.delete("/spending", response_model=OkResponse)
+def delete_spending() -> OkResponse:
+    profile = _profile_or_guest()
+    spending_service.clear(profile.id)
+    return OkResponse(ok=True)
+
+
+@router.get("/spending/taxonomy")
+def get_spending_taxonomy() -> dict[str, Any]:
+    """카테고리 목록과 키워드 규칙(화면이 "어떻게 분류되는지" 보여줄 때 쓴다)."""
+    return spending_core.taxonomy_info()
 
 
 # ---------------------------------------------------------------------------

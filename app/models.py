@@ -357,3 +357,95 @@ class ChatReply(BaseModel):
     llm_used: bool = False
     ai_notice: str = AI_NOTICE
     chat_id: Optional[str] = None  # 프로필(페르소나)별 대화 로그 식별자
+
+
+# ---------- 소비 패턴 (P5, SPEC 2.6) ----------
+class SpendingCategory(str, Enum):
+    FOOD = "식비"
+    CAFE = "카페간식"
+    TRANSPORT = "교통"
+    HOUSING = "주거"
+    TELECOM = "통신"
+    SUBSCRIPTION = "구독"
+    MEDICAL = "의료"
+    SHOPPING = "쇼핑"
+    LEISURE = "여가"
+    EDUCATION = "교육"
+    INSURANCE = "보험"
+    TRANSFER = "이체"
+    DEBT_REPAYMENT = "대출상환"
+    CASH_ADVANCE = "현금서비스"
+    SALARY = "급여"
+    OTHER = "기타"
+
+
+class CategoryTotal(BaseModel):
+    category: SpendingCategory
+    amount: int             # 집계 기간(months) 전체 합계
+    count: int               # 집계 기간 전체 건수
+    share: float = 0.0       # amount / total_spend (0~1), total_spend가 0이면 0.0
+    prev_amount: int = 0     # 집계 기간 내 마지막 달의 "그 이전 달" 금액(윈도우가 1개월이면 0)
+    change_pct: Optional[float] = None  # 마지막 달 vs 이전 달 변화율(%). prev_amount가 0이면 None(비교 불가)
+
+
+class SubscriptionItem(BaseModel):
+    merchant: str  # 마스킹된 표시명(앞 2자 + "**")
+    amount: int    # 관측된 월 금액 평균(반올림)
+    months_seen: int
+    category: SpendingCategory
+
+
+class AnomalyItem(BaseModel):
+    category: SpendingCategory
+    month: str  # "YYYY-MM"
+    amount: int
+    prev_amount: int
+    change_pct: float
+    note: str
+
+
+class LifeEventSignal(BaseModel):
+    kind: Literal["wedding", "childbirth", "job_change", "retirement_near", "refinance_window", "income_drop"]
+    confidence: float
+    evidence: list[str] = []  # 가맹점 원문 대신 마스킹/범주 수준 설명 문자열만 담는다
+
+
+class SpendingSummary(BaseModel):
+    profile_id: str
+    period_start: date
+    period_end: date
+    months: int
+    total_spend: int
+    avg_monthly_spend: int
+    fixed_spend: int
+    variable_spend: int
+    discretionary_spend: int
+    income_deposits: int
+    categories: list[CategoryTotal] = []
+    subscriptions: list[SubscriptionItem] = []
+    anomalies: list[AnomalyItem] = []
+    life_events: list[LifeEventSignal] = []
+    top_merchants_masked: list[str] = []
+
+
+class SpendingFeatures(BaseModel):
+    profile_id: str
+    computed_at: date  # 재현성을 위해 실행 시각이 아니라 summary.period_end를 쓴다
+    months: int
+    avg_monthly_spend: int
+    fixed_ratio: float
+    discretionary_ratio: float
+    subscription_total: int
+    subscription_count: int
+    top_categories: list[str] = []
+    spend_trend_pct: Optional[float] = None
+    anomaly_count: int = 0
+    income_regularity: float = 0.0
+    savings_capacity: int = 0
+    life_event_kinds: list[str] = []
+    spending_consent_at: Optional[datetime] = None  # D8: 명시적 분석 실행 시각(서비스 레이어가 채움)
+    # addendum 2.7 MVP 피처 중 이번 스코프(summary+profile만으로 계산 가능한 것)를 추가한다.
+    income_monthly_est: int = 0
+    net_cash_flow_monthly: int = 0
+    data_coverage_days: int = 0
+    classification_quality: float = 1.0

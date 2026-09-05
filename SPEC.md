@@ -179,6 +179,86 @@ schemas.py: `ComparePrepareRequest{intent: str, params: dict}`, `ChatRequest{mes
 
 main.py: `FastAPI(title="DONN PoC")`, `GET /` → `web/index.html`, `/static` → `web/`. 시작 시 `init_db()`.
 
+### 2.6 소비 패턴 (P5)
+
+배경: `docs/DONN_ADDENDUM_v0.1.md` 2.6~2.9절(기간별 자동 분석, MVP 피처, 카드·칩 생성 규칙)과
+`docs/reference/lifecycle_domain_v1.txt` 4.3~4.4절(재무비율 위험신호, 생애주기 이벤트 감지). 모델은
+`app/models.py`가 단일 진실이다: `SpendingCategory`(식비·카페간식·교통·주거·통신·구독·의료·쇼핑·여가·
+교육·보험·이체·대출상환·현금서비스·급여·기타 16종), `CategoryTotal`, `SubscriptionItem`, `AnomalyItem`,
+`LifeEventSignal`, `SpendingSummary`, `SpendingFeatures`.
+
+**프라이버시(D3/D4)와 동의(D8)**: addendum 2.2절 P-A(온디바이스)/P-C(수기·요약만) 절충을 PoC 규모로
+구현한다.
+- 서버는 원본 거래내역을 저장하지 않는다. 브라우저가 파일을 파싱·정규화해 `Transaction` 목록을 만들어
+  `POST /api/spending/analyze`로 보내면, 서버는 그 요청을 처리하는 동안만 메모리에서 집계하고 계산된
+  `SpendingSummary`/`SpendingFeatures`만 DB에 남긴다(원문 거래는 응답 후 폐기, 어떤 테이블에도 없음).
+- 분석은 사용자가 파일을 업로드하거나(`/api/spending/analyze`) 합성 데이터를 명시적으로 선택했을 때만
+  (`/api/spending/analyze-synthetic`) 실행된다(자동 실행 없음, 기본 OFF). 이 실행 시각을
+  `SpendingFeatures.spending_consent_at`에 기록한다.
+- 세션 프로필이 없으면(온보딩 전) 소득 0인 게스트 프로필로 계산한다(404 대신 체험 허용).
+
+app/core/spending.py (순수 함수, I/O 없음, 택소노미는 코드 내장 - config 파일 없음)
+- `categorize(merchant: str, amount: int, kind: str) -> SpendingCategory`
+  가맹점명 키워드 규칙. 빈 문자열/None은 예외 없이 `기타`. `Transaction.category` 값은 신뢰하지 않고
+  merchant 문자열에서 항상 다시 계산한다(업로드마다 원본 표기가 다를 수 있어 규칙을 통일한다).
+- `aggregate(transactions, *, end, months=3) -> SpendingSummary`
+  `end` 기준 최근 `months`개월을 월별로 버킷팅한다. 이체·급여는 소비 집계에서 제외한다(addendum 2.6:
+  TRANSFER_INTERNAL 제외, INCOME 별도 집계). 나머지 14개 카테고리 합이 `total_spend`와 정확히 같다.
+  고정(주거·통신·구독·보험·대출상환)/변동(식비·교통·의료·교육·현금서비스)/재량(카페간식·쇼핑·여가·기타)
+  세 집합의 합도 `total_spend`와 같다(세 집합이 14개 카테고리를 정확히 분할). 대출상환·현금서비스는
+  addendum 원안의 DEBT_SERVICE 분리 원칙을 PoC 범위에서 단순화해 "고정" 소비로 함께 집계한다(상환
+  여력 자체는 `app.core.capacity`가 이미 별도로 계산). 구독 = 같은 가맹점이 인접한 두 달 이상 월합계
+  ±10% 이내로 반복(건당 단가가 아니라 월 합계를 비교 - 고빈도 변동 가맹점 오탐 방지). 이상치 = 카테고리
+  월 지출이 전월 대비 +30% 이상이며 절대 증가액 5만원 이상 동시 충족. 상위 가맹점/구독 표시명은 앞 2자
+  + "**"로 마스킹한다. 이 함수는 프로필을 받지 않으므로 `profile_id`(빈 문자열)와 `life_events`(빈
+  목록)는 채우지 않는다 - 서비스 레이어가 `detect_life_events` 결과와 함께 채운다.
+- `detect_life_events(transactions, profile) -> list[LifeEventSignal]`
+  lifecycle_domain_v1.txt 4.4절 프록시. `wedding`(예식장·웨딩·스튜디오·혼수 키워드),
+  `childbirth`(산부인과·유아·기저귀·분유), `job_change`/`income_drop`(거래가 있는 마지막 두 달을 비교해
+  급여 입금이 0으로 중단되었거나 30% 이상 줄었을 때), `retirement_near`(나이 55세 이상 그리고 소득 변화
+  신호 또는 프로필 `retirement_near` 플래그), `refinance_window`(잔여 6개월 이하 대출이 있거나,
+  `income_up` 플래그와 함께 금리 연 7% 이상인 신용성 대출이 있을 때). `evidence`는 가맹점 원문 대신
+  범주 수준 설명 문자열만 담는다(SPEC D3/D4, 개인신용정보 원문 비노출).
+- `compute_features(summary, profile) -> SpendingFeatures`
+  결정론(시계 미사용, 같은 입력이면 같은 JSON). `computed_at`은 `summary.period_end`를 쓴다(실행
+  시각을 쓰면 재현성이 깨진다). `spending_consent_at`은 이 함수에서는 항상 None(서비스 레이어가 분석
+  실행 시각으로 채운다 - D8). addendum 2.7 MVP 피처 중 요약만으로 계산 가능한 `income_monthly_est`,
+  `net_cash_flow_monthly`, `data_coverage_days`, `classification_quality`를 추가로 포함한다.
+- `build_spending_cards(features, summary, profile) -> list[InsightCard]`
+  addendum 2.9 카드 규칙 중 이번 스코프가 지원하는 6개: `IC01` 소비 급증 카테고리, `IC02` 구독 합계,
+  `IC03` 고정지출 비율, `IC04` 저축 여력(수입 - 지출 - 상환), `IC05` 생애 이벤트 신호(질문형 카드, 상품
+  언급 금지), `IC06` 소득 불규칙(급여 입금이 전혀 관측되지 않으면 "불규칙"과 혼동되지 않도록 억제). 이
+  IC01~IC06 번호는 이번 기능 전용 로컬 번호이며 addendum 2.9의 전역 IC01~IC13 카탈로그 번호와는
+  다르다. 금칙어(비난·낙인·공포 표현, "~하세요"류 권유형 어미, "추천", em dash) 없음, 상품·회사명 없음.
+  각 카드는 `explain`과 chip(intent `spending`/`scenario`, params 포함)을 가진다.
+- `taxonomy_info() -> dict` : `GET /api/spending/taxonomy` 응답 본문(카테고리 목록 + 키워드 규칙).
+
+app/services/spending.py
+- `analyze(transactions, profile, *, end, months=3, consent_at=None) -> (SpendingSummary, SpendingFeatures)`
+  `aggregate` → `detect_life_events` 결과와 `profile.id`를 병합 → `compute_features` → `consent_at`
+  (생략 시 호출 시각)을 `spending_consent_at`에 채운다.
+- `save(profile_id, summary, features)` / `load(profile_id) -> (summary, features) | None` / `clear(profile_id)`
+  `db.spending_features` 테이블에 프로필당 최신 1건만 upsert로 유지한다.
+- `load_synthetic(profile_id, months=3, seed=42, end=None) -> list[Transaction]`
+  `app.data.synthetic.generate_transactions`에 위임(알 수 없는 페르소나면 `ValueError`, 라우트가 404로 변환).
+
+db.py: 테이블 `spending_features(profile_id PK, features_json, summary_json, updated_at)`.
+
+엔드포인트
+
+| 메서드 | 경로 | 응답 | 비고 |
+|---|---|---|---|
+| POST | /api/spending/analyze | `{summary, features, cards}` | body `{transactions: list[Transaction], months?: int}`. 원본 거래내역 미저장(D3/D4) |
+| POST | /api/spending/analyze-synthetic | `{summary, features, cards}` | body `{persona_id?, months?, seed?}`. persona_id 생략 시 현재 세션 프로필 id 사용 |
+| GET | /api/spending | `{summary, features, cards}` 또는 404 | 저장된 최신 분석 결과 |
+| DELETE | /api/spending | `{ok}` | 저장된 분석 결과 삭제 |
+| GET | /api/spending/taxonomy | `{categories: list[str], rules: dict[str, list[str]]}` | 화면이 분류 기준을 보여줄 때 사용 |
+
+`insights.build_home` 연동: 저장된 소비 패턴 분석이 있으면 `build_spending_cards` 결과 중 최대 2장을
+홈 카드에 더한다. 홈 카드는 최대 3장(SPEC 3장)이므로 자리가 모자라면 progress 카드부터 제거해 자리를
+만든다. Tier 1 칩 "소비 패턴 보기"(intent=spending)를 추가한다(칩은 기존과 같이 최대 5개 유지).
+`llm_calls`는 항상 0(이 절 전체가 LLM을 호출하지 않는다).
+
 ## 3. 화면 규격 (web/)
 
 - 단일 페이지, 빌드 없음. `index.html`, `app.js`, `styles.css`. 글꼴은 Pretendard(jsdelivr CDN, 오프라인이면 system-ui·"Malgun Gothic" 폴백). 그 외 외부 CDN 의존 없음.

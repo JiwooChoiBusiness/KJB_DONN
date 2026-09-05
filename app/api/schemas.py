@@ -5,6 +5,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
+from app.models import Transaction
+
 
 class ComparePrepareRequest(BaseModel):
     intent: str = "compare"
@@ -47,3 +49,20 @@ class MetaResponse(BaseModel):
 
 class OkResponse(BaseModel):
     ok: bool = True
+
+
+class SpendingAnalyzeRequest(BaseModel):
+    """POST /api/spending/analyze 본문. 브라우저가 파싱·정규화한 거래내역만 받는다
+    (SPEC 2.6 D3/D4: 서버는 이 요청 처리 중에만 메모리에서 계산하고 원본을 저장하지 않는다)."""
+
+    transactions: list[Transaction]
+    months: Optional[int] = 3
+
+
+class SpendingAnalyzeSyntheticRequest(BaseModel):
+    """POST /api/spending/analyze-synthetic 본문. persona_id를 생략하면 현재 세션
+    프로필의 id(페르소나로 로드된 경우)를 쓴다."""
+
+    persona_id: Optional[str] = None
+    months: Optional[int] = 3
+    seed: Optional[int] = 42
