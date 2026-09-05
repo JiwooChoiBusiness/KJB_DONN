@@ -48,6 +48,20 @@ const RATE_KIND_LABELS = {
   base: '기준금리', avg: '평균금리', min: '최저금리', max: '최고금리', preferential: '우대금리',
 };
 const CAPACITY_BAND_LABELS = { negative: '위험', tight: '빠듯', ok: '양호', comfortable: '여유' };
+/* 생애 이벤트 신호(app/models.py LifeEventSignal.kind)의 화면 라벨.
+   상품·회사 표현 없이 중립적인 질문으로만 보여준다(SPEC 2.6 IC05). */
+const LIFE_EVENT_LABELS = {
+  wedding: '결혼 준비', childbirth: '출산·육아', job_change: '소득 변화',
+  income_drop: '소득 변화', retirement_near: '은퇴 준비', refinance_window: '대출 조건 재점검',
+};
+const LIFE_EVENT_QUESTIONS = {
+  wedding: '결혼 준비와 관련된 지출 흐름이 보여요. 지금 계획과 맞는지 살펴볼까요?',
+  childbirth: '육아와 관련된 지출 흐름이 보여요. 앞으로의 지출 계획을 살펴볼까요?',
+  job_change: '소득 흐름이 달라진 신호가 있어요. 상환 계획을 다시 살펴볼까요?',
+  income_drop: '소득이 줄어든 신호가 있어요. 상환 계획을 다시 살펴볼까요?',
+  retirement_near: '은퇴 시점이 가까워진 신호가 있어요. 남은 상환 계획을 살펴볼까요?',
+  refinance_window: '지금 대출 조건을 다시 확인할 시점일 수 있어요. 공시 조건과 비교해볼까요?',
+};
 const FLAG_LABELS = {
   delinquency_signal: '연체 신호 있음', income_up: '소득 증가', job_changed: '이직/전직',
   self_employed: '자영업자', retirement_near: '은퇴 임박',
@@ -73,6 +87,7 @@ const ICONS = {
   chevronDown: [['polyline', { points: '6 9 12 15 18 9' }]],
   chevronLeft: [['polyline', { points: '15 6 9 12 15 18' }]],
   download: [['path', { d: 'M12 3v11' }], ['polyline', { points: '7 10 12 15 17 10' }], ['path', { d: 'M4 19h16' }]],
+  upload: [['path', { d: 'M12 20V9' }], ['polyline', { points: '7 13 12 8 17 13' }], ['path', { d: 'M4 4h16' }]],
 };
 
 /* ---------- 1. DOM 헬퍼 ---------- */
@@ -194,6 +209,25 @@ function fmtMonths(n) {
   if (n === null || n === undefined) return '-';
   return `${n}개월`;
 }
+/* 비율 표기는 소수점 1자리로 통일한다. fmtPct1 은 이미 퍼센트인 수,
+   fmtRatioPct1 은 0~1 비율을 받는다. */
+function fmtPct1(n) {
+  if (n === null || n === undefined || Number.isNaN(Number(n))) return '-';
+  return `${Number(n).toFixed(1)}%`;
+}
+function fmtPctSigned1(n) {
+  if (n === null || n === undefined || Number.isNaN(Number(n))) return '-';
+  const v = Number(n);
+  return `${v > 0 ? '+' : ''}${v.toFixed(1)}%`;
+}
+function fmtRatioPct1(r) {
+  if (r === null || r === undefined || Number.isNaN(Number(r))) return '-';
+  return `${(Number(r) * 100).toFixed(1)}%`;
+}
+function fmtCount(n) {
+  if (n === null || n === undefined || Number.isNaN(Number(n))) return '-';
+  return `${Math.round(Number(n)).toLocaleString('ko-KR')}건`;
+}
 function fmtDateTime(iso) {
   if (!iso) return '-';
   try { return new Date(iso).toLocaleString('ko-KR'); } catch (_) { return String(iso); }
@@ -298,6 +332,11 @@ const Api = {
   deleteChat: (chatId) => apiSend('DELETE', `/chats/${encodeURIComponent(chatId)}`),
   kbDoc: (slug) => apiGet(`/kb/${encodeURIComponent(slug)}`),
   syntheticCsvUrl: (personaId) => `${API_BASE}/synthetic/${encodeURIComponent(personaId)}/transactions.csv`,
+  getSpending: () => apiGet('/spending'),
+  analyzeSpending: (transactions, months) => apiSend('POST', '/spending/analyze', { transactions, months }),
+  analyzeSpendingSynthetic: (personaId, months) =>
+    apiSend('POST', '/spending/analyze-synthetic', { persona_id: personaId || null, months }),
+  deleteSpending: () => apiSend('DELETE', '/spending'),
 };
 
 /* ---------- 4. 상태 ---------- */
@@ -318,6 +357,9 @@ const state = {
   chat: { messages: [], pending: false, chatId: null },
   compare: { context: null, result: null, step: 1, queuedPrepareParams: null },
   debts: { selectedLoanId: null, editingLoanId: null, schedule: null, pendingFocusLoanId: null },
+  /* 소비 패턴: data 는 서버 응답 {summary, features, cards},
+     upload 는 브라우저에서 읽은 파일의 파싱 상태(서버로 보내지 않는다). */
+  spending: { data: null, loaded: false, upload: null, lastSyntheticMonths: null, busy: false },
   nav: { depth: 0 },
 };
 
@@ -1345,36 +1387,922 @@ function buildCompareStep2(result) {
 }
 
 /* ---------- 10. 화면: 소비 패턴 ---------- */
+/* 이 화면은 파일을 서버로 올리지 않는다(SPEC 2.6 D3/D4). 브라우저가 CSV/XLSX 를 읽어
+   거래 행으로 정규화한 뒤 그 행만 POST /api/spending/analyze 로 보내고, 서버는 집계된
+   summary/features 만 저장한다. 분석은 사용자가 버튼을 눌렀을 때만 실행한다(D8). */
+
+const SHEETJS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+const SPENDING_MAX_BYTES = 8 * 1024 * 1024;
+const SPENDING_MAX_ROWS = 10000;
+const SPENDING_PREVIEW_ROWS = 5;
+const SPENDING_PRIVACY_NOTE =
+  '파일은 서버로 보내지 않습니다. 위 표에서 확인한 거래 행만 보내고, 서버는 집계 결과만 저장합니다.';
+
+/* app/core/spending.py 의 급여·이체 키워드와 같은 목록을 쓴다. 입금 행은 이 키워드에
+   걸릴 때만 보낸다(그 외 입금은 서버에서 소비로 잘못 잡히므로 보내지 않는다). */
+const SALARY_TOKENS = ['급여', '월급', '상여'];
+const TRANSFER_TOKENS = ['이체', '송금', '경조사'];
+
+/* 은행·카드사마다 열 이름이 달라 동의어로 자동 매칭한다(사용자가 고칠 수 있다). */
+const SPENDING_HEADER_SYNONYMS = {
+  date: ['날짜', '거래일', '거래일자', '거래일시', '거래날짜', '승인일', '승인일자', '이용일', '이용일자',
+    '매출일자', '결제일', '사용일', 'date', 'trans_date', 'transactiondate'],
+  amount: ['금액', '거래금액', '이용금액', '승인금액', '결제금액', '사용금액', '출금', '출금액', '출금금액',
+    '지출', '출금액원', 'amount', 'withdrawal', 'debit', 'spend'],
+  deposit: ['입금', '입금액', '입금금액', '수입', 'deposit', 'credit'],
+  merchant: ['가맹점', '가맹점명', '거래처', '내용', '적요', '내역', '거래내용', '사용처', '상호', '상호명',
+    'merchant', 'description', 'store', 'payee'],
+  memo: ['메모', '비고', '참고', '메모내용', 'memo', 'note', 'remark'],
+  kind: ['kind', '구분', '거래구분', '유형', '거래유형', '결제수단', 'type'],
+};
+const SPENDING_ROLE_LABELS = {
+  date: '날짜', amount: '금액(지출)', deposit: '입금(선택)', merchant: '가맹점', memo: '메모(선택)',
+};
+
+/* ---- 10-1. 파일 읽기(브라우저 안에서만) ---- */
+
+/* 한국 은행·카드사 CSV 는 EUC-KR 로 내려오는 경우가 많다. UTF-8 로 먼저 엄격하게
+   읽어보고 실패하면 EUC-KR 로 다시 읽는다. */
+function decodeTextBytes(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let text = null;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch (_) {
+    try { text = new TextDecoder('euc-kr').decode(bytes); } catch (_2) { text = null; }
+  }
+  if (text === null) text = new TextDecoder('utf-8').decode(bytes);
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  return text;
+}
+
+/* 안내 문구가 앞에 붙은 파일도 있으므로 앞쪽 여러 줄을 함께 보고 구분자를 고른다. */
+function sniffDelimiter(text) {
+  const lines = String(text).split(/\r?\n/).filter((l) => l.trim()).slice(0, 10);
+  const candidates = [',', ';', '\t', '|'];
+  let best = ',';
+  let bestCount = 0;
+  candidates.forEach((d) => {
+    let count = 0;
+    lines.forEach((line) => { count += line.split(d).length - 1; });
+    if (count > bestCount) { bestCount = count; best = d; }
+  });
+  return best;
+}
+
+/* 따옴표 안의 구분자·줄바꿈까지 처리하는 최소 CSV 파서(직접 구현). */
+function parseCsvText(text, delimiter) {
+  const delim = delimiter || ',';
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+  let touched = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 1; } else { inQuotes = false; }
+      } else {
+        field += ch;
+      }
+      continue;
+    }
+    if (ch === '"' && field === '') { inQuotes = true; touched = true; continue; }
+    if (ch === delim) { row.push(field); field = ''; touched = true; continue; }
+    if (ch === '\r') continue;
+    if (ch === '\n') { row.push(field); rows.push(row); row = []; field = ''; touched = false; continue; }
+    field += ch;
+    touched = true;
+  }
+  if (touched || field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+function loadSheetJs() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  if (!loadSheetJs.pending) {
+    loadSheetJs.pending = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = SHEETJS_URL;
+      script.async = true;
+      script.onload = () => (window.XLSX ? resolve(window.XLSX) : reject(new Error('xlsx-missing')));
+      script.onerror = () => reject(new Error('xlsx-load-failed'));
+      document.head.appendChild(script);
+    }).catch((e) => { loadSheetJs.pending = null; throw e; });
+  }
+  return loadSheetJs.pending;
+}
+
+function readFileAsArrayBuffer(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('read-failed'));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+/* ---- 10-2. 열 매칭과 값 정규화 ---- */
+
+function normHeaderText(s) {
+  return String(s === null || s === undefined ? '' : s)
+    .replace(/\s+/g, '')
+    .replace(/[()[\]{}._-]/g, '')
+    .toLowerCase();
+}
+
+function detectColumn(headerCells, role) {
+  const syns = SPENDING_HEADER_SYNONYMS[role] || [];
+  const norm = (headerCells || []).map(normHeaderText);
+  for (let s = 0; s < syns.length; s += 1) {
+    const idx = norm.indexOf(normHeaderText(syns[s]));
+    if (idx >= 0) return idx;
+  }
+  for (let s = 0; s < syns.length; s += 1) {
+    const needle = normHeaderText(syns[s]);
+    if (needle.length < 2) continue;
+    for (let i = 0; i < norm.length; i += 1) {
+      const cell = norm[i];
+      if (!cell || cell.indexOf(needle) < 0) continue;
+      if (role === 'amount' && cell.indexOf('입금') >= 0) continue;
+      if (role === 'deposit' && cell.indexOf('출금') >= 0) continue;
+      return i;
+    }
+  }
+  return -1;
+}
+
+/* 조회기간 안내 같은 머리글 앞 줄이 있어도 실제 헤더 줄을 찾아낸다. */
+function findHeaderRowIndex(rows) {
+  const limit = Math.min(rows.length, 15);
+  let bestIdx = -1;
+  let bestScore = 0;
+  for (let i = 0; i < limit; i += 1) {
+    const cells = rows[i] || [];
+    if (!cells.some((c) => String(c === null || c === undefined ? '' : c).trim())) continue;
+    let score = 0;
+    ['date', 'amount', 'deposit', 'merchant'].forEach((role) => { if (detectColumn(cells, role) >= 0) score += 2; });
+    ['memo', 'kind'].forEach((role) => { if (detectColumn(cells, role) >= 0) score += 1; });
+    if (score > bestScore) { bestScore = score; bestIdx = i; }
+  }
+  if (bestIdx >= 0) return bestIdx;
+  for (let i = 0; i < rows.length; i += 1) {
+    if ((rows[i] || []).some((c) => String(c === null || c === undefined ? '' : c).trim())) return i;
+  }
+  return 0;
+}
+
+function pad2(n) { return n < 10 ? `0${n}` : String(n); }
+
+function isoFromParts(y, m, d) {
+  const year = Number(y);
+  const month = Number(m);
+  const day = Number(d);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
+  if (year < 1990 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) return null;
+  return `${year}-${pad2(month)}-${pad2(day)}`;
+}
+
+/* 2026-08-01, 2026.8.1, 2026/08/01, 20260801, 26.08.01, "2026-08-01 13:22:11",
+   엑셀 날짜 일련번호까지 받아 YYYY-MM-DD 로 만든다. */
+function parseDateCell(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (raw instanceof Date && !Number.isNaN(raw.getTime())) {
+    return isoFromParts(raw.getFullYear(), raw.getMonth() + 1, raw.getDate());
+  }
+  if (typeof raw === 'number') {
+    if (raw > 20000 && raw < 80000) {
+      const ms = Date.UTC(1899, 11, 30) + Math.round(raw) * 86400000;
+      const dt = new Date(ms);
+      return isoFromParts(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
+    }
+    raw = String(raw);
+  }
+  const s = String(raw).trim();
+  if (!s) return null;
+  let m = /(\d{4})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})/.exec(s);
+  if (m) return isoFromParts(m[1], m[2], m[3]);
+  m = /^(\d{2})\s*[-./]\s*(\d{1,2})\s*[-./]\s*(\d{1,2})/.exec(s);
+  if (m) return isoFromParts(2000 + Number(m[1]), m[2], m[3]);
+  const digits = s.replace(/[^0-9]/g, '');
+  if (digits.length >= 8) return isoFromParts(digits.slice(0, 4), digits.slice(4, 6), digits.slice(6, 8));
+  return null;
+}
+
+/* "1,234원", "₩1,234", "-1,234", "(1,234)", "1234.00" 을 정수 원으로 만든다. */
+function parseAmountCell(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === 'number') return Number.isFinite(raw) ? Math.round(raw) : null;
+  let s = String(raw).trim();
+  if (!s) return null;
+  let negative = false;
+  if (/^\(.*\)$/.test(s)) { negative = true; s = s.slice(1, -1); }
+  if (/^\s*-/.test(s) || /-\s*$/.test(s)) negative = true;
+  s = s.replace(/[^0-9.]/g, '');
+  if (!s || s === '.') return null;
+  const n = Number(s);
+  if (!Number.isFinite(n)) return null;
+  const v = Math.round(n);
+  return negative ? -v : v;
+}
+
+function containsToken(text, tokens) {
+  const t = String(text || '');
+  return tokens.some((tok) => t.indexOf(tok) >= 0);
+}
+
+function normalizeKindCell(raw, fallback) {
+  const t = String(raw === null || raw === undefined ? '' : raw).trim().toLowerCase();
+  if (!t) return fallback;
+  if (t === 'card' || t.indexOf('카드') >= 0 || t.indexOf('체크') >= 0 || t.indexOf('신용') >= 0) return 'card';
+  if (t === 'bank' || t.indexOf('계좌') >= 0 || t.indexOf('은행') >= 0 || t.indexOf('이체') >= 0
+      || t.indexOf('입금') >= 0 || t.indexOf('출금') >= 0) return 'bank';
+  return fallback;
+}
+
+function cellAt(cells, idx) {
+  if (idx === null || idx === undefined || idx < 0) return '';
+  const v = cells[idx];
+  return v === null || v === undefined ? '' : v;
+}
+
+/* 매핑 상태(upload.map, upload.signMode)로 데이터 행을 Transaction 목록으로 만든다.
+   결과는 화면 미리보기와 전송에 함께 쓴다. */
+function normalizeUploadRows(upload) {
+  const map = upload.map;
+  /* 입금 열이 있거나 금액에 부호가 섞여 있으면 계좌 내역으로 보고 기본 구분을 계좌로 둔다. */
+  const defaultKind = (map.deposit >= 0 || upload.signMode === 'negative') ? 'bank' : 'card';
+  const rows = [];
+  const stats = { read: 0, sent: 0, noDate: 0, noAmount: 0, deposit: 0, capped: 0 };
+  (upload.dataRows || []).forEach((cells, idx) => {
+    if (!cells || !cells.some((c) => String(c === null || c === undefined ? '' : c).trim())) return;
+    stats.read += 1;
+    if (rows.length >= SPENDING_MAX_ROWS) { stats.capped += 1; return; }
+
+    const iso = parseDateCell(cellAt(cells, map.date));
+    if (!iso) { stats.noDate += 1; return; }
+
+    const rawAmount = parseAmountCell(cellAt(cells, map.amount));
+    const rawDeposit = map.deposit >= 0 ? parseAmountCell(cellAt(cells, map.deposit)) : null;
+    let isDeposit = false;
+    let value = 0;
+    if (rawDeposit !== null && Math.abs(rawDeposit) > 0 && (rawAmount === null || Math.abs(rawAmount) === 0)) {
+      isDeposit = true;
+      value = Math.abs(rawDeposit);
+    } else if (rawAmount !== null && Math.abs(rawAmount) !== 0) {
+      if (upload.signMode === 'negative') {
+        if (rawAmount < 0) value = -rawAmount; else { isDeposit = true; value = rawAmount; }
+      } else if (rawAmount > 0) {
+        value = rawAmount;
+      } else {
+        isDeposit = true;
+        value = -rawAmount;
+      }
+    }
+    if (!value) { stats.noAmount += 1; return; }
+
+    const merchant = String(cellAt(cells, map.merchant) || '').trim();
+    if (isDeposit && !containsToken(merchant, SALARY_TOKENS) && !containsToken(merchant, TRANSFER_TOKENS)) {
+      stats.deposit += 1;
+      return;
+    }
+    const memo = String(cellAt(cells, map.memo) || '').trim();
+    const kind = isDeposit ? 'bank' : normalizeKindCell(cellAt(cells, map.kind), defaultKind);
+    rows.push({
+      id: `up-${idx + 1}`, date: iso, amount: value, merchant, category: null, kind, memo,
+    });
+  });
+  stats.sent = rows.length;
+  return { rows, stats };
+}
+
+/* 금액 열에 음수가 많으면 "음수가 지출"인 계좌 내역으로 보고 기본값을 바꾼다. */
+function guessSignMode(dataRows, amountIdx) {
+  if (amountIdx < 0) return 'positive';
+  let neg = 0;
+  let pos = 0;
+  dataRows.slice(0, 300).forEach((cells) => {
+    const v = parseAmountCell(cellAt(cells, amountIdx));
+    if (v === null || v === 0) return;
+    if (v < 0) neg += 1; else pos += 1;
+  });
+  if (neg + pos === 0) return 'positive';
+  return neg / (neg + pos) >= 0.3 ? 'negative' : 'positive';
+}
+
+function buildUploadState(fileName, matrix) {
+  const headerIdx = findHeaderRowIndex(matrix);
+  const headers = (matrix[headerIdx] || []).map((c) => String(c === null || c === undefined ? '' : c).trim());
+  const dataRows = matrix.slice(headerIdx + 1);
+  const map = {
+    date: detectColumn(headers, 'date'),
+    amount: detectColumn(headers, 'amount'),
+    deposit: detectColumn(headers, 'deposit'),
+    merchant: detectColumn(headers, 'merchant'),
+    memo: detectColumn(headers, 'memo'),
+    kind: detectColumn(headers, 'kind'),
+  };
+  if (map.amount >= 0 && map.amount === map.deposit) map.deposit = -1;
+  return {
+    fileName, headers, dataRows, map,
+    signMode: guessSignMode(dataRows, map.amount),
+    months: 3,
+    notice: null,
+    noticeError: false,
+  };
+}
+
+/* ---- 10-3. 화면 ---- */
+
+function currentPersonaId() {
+  return (state.profile && state.profile.id) || state.lastPersonaId || null;
+}
+
+function spendingMonthsSelect(id, value) {
+  const sel = h('select', { id, name: id, 'aria-label': '분석 기간(개월)' });
+  for (let m = 1; m <= 6; m += 1) {
+    sel.appendChild(h('option', { value: String(m), selected: m === (value || 3) }, `${m}개월`));
+  }
+  return sel;
+}
 
 async function renderSpending() {
-  const { root } = mountView('spending');
+  const { root, isStale } = mountView('spending');
   focusMainAfterRender();
-  appendViewHeader(root, '소비 패턴', '카드·계좌 합성 거래내역으로 데이터 형태를 미리 확인할 수 있어요.');
+  appendViewHeader(root, '소비 패턴',
+    '거래내역을 브라우저에서 읽어 집계만 서버에 보냅니다. 원본 거래는 저장하지 않습니다.');
 
+  root.appendChild(h('div', { class: 'consent-line', id: 'spendingConsent' }));
+  root.appendChild(h('div', { id: 'spendingSource' }, buildSpendingSourcePanel()));
+  root.appendChild(h('div', { id: 'spendingResult' }));
+  updateSpendingConsent();
+
+  if (state.spending.loaded) { renderSpendingResults(); return; }
+
+  const slot = document.getElementById('spendingResult');
+  slot.appendChild(h('p', { class: 'loading-text' }, '저장된 분석 결과를 확인하는 중...'));
+  const res = await Api.getSpending();
+  if (isStale()) return;
+  state.spending.loaded = true;
+  if (res.ok) {
+    state.spending.data = res.data;
+  } else if (res.status !== 404) {
+    clearNode(slot);
+    slot.appendChild(noticeBox('저장된 분석 결과를 불러오지 못했습니다.', { error: true, onRetry: renderSpending }));
+    return;
+  }
+  updateSpendingConsent();
+  renderSpendingResults();
+}
+
+function updateSpendingConsent() {
+  const el = document.getElementById('spendingConsent');
+  if (!el) return;
+  clearNode(el);
+  el.appendChild(h('span', {}, '분석은 아래 버튼을 눌렀을 때만 실행됩니다. 자동으로 실행되지 않습니다.'));
+  const at = state.spending.data && state.spending.data.features
+    ? state.spending.data.features.spending_consent_at : null;
+  if (at) el.appendChild(h('span', { class: 'consent-time' }, `마지막 실행 ${fmtDateTime(at)}`));
+}
+
+function buildSpendingSourcePanel() {
   const card = h('div', { class: 'panel-card' });
   const head = h('div', { class: 'panel-card-head' });
-  head.appendChild(h('h2', {}, '준비 중'));
-  head.appendChild(badge('P5 단계', ''));
+  const headLeft = h('div', {});
+  headLeft.appendChild(h('h2', {}, '분석 실행'));
+  headLeft.appendChild(h('p', { class: 'panel-card-sub' },
+    '합성 거래내역으로 바로 보거나, 내 거래내역 파일을 브라우저에서 읽어 분석할 수 있어요.'));
+  head.appendChild(headLeft);
   card.appendChild(head);
-  card.appendChild(h('p', { class: 'panel-card-sub' },
-    '소비 패턴 분석은 아직 준비 중입니다. 아래에서 합성 거래내역을 내려받아 데이터 형태를 확인해보세요.'));
 
-  const personaId = state.lastPersonaId || (state.profile ? state.profile.id : null);
-  const actions = h('div', { class: 'form-actions' });
-  if (personaId) {
-    actions.appendChild(h('a', {
-      href: Api.syntheticCsvUrl(personaId), download: `${personaId}_transactions.csv`,
-      class: 'btn btn-primary', 'aria-label': '합성 거래내역 CSV 다운로드',
-    }, icon('download', 16), ' 합성 거래내역 내려받기'));
-    card.appendChild(actions);
-  } else {
-    card.appendChild(noticeBox('페르소나를 먼저 선택하면 합성 거래내역을 내려받을 수 있어요.'));
-    actions.appendChild(h('button', {
+  card.appendChild(buildSyntheticPath());
+  card.appendChild(buildUploadPath());
+  return card;
+}
+
+function buildSyntheticPath() {
+  const wrap = h('div', { class: 'source-path' });
+  wrap.appendChild(h('h3', { class: 'source-path-title' }, '합성 거래내역으로 분석'));
+  wrap.appendChild(h('p', { class: 'source-path-sub' },
+    '데모용으로 만든 카드·계좌 거래내역을 서버가 생성해 그 자리에서 집계합니다.'));
+
+  const personaId = currentPersonaId();
+  const msgSlot = h('div', { id: 'spendingSyntheticMsg' });
+
+  if (!personaId) {
+    wrap.appendChild(noticeBox('계정을 먼저 선택하면 합성 거래내역으로 분석할 수 있어요.'));
+    wrap.appendChild(h('div', { class: 'form-actions' }, h('button', {
       type: 'button', class: 'btn btn-secondary', onClick: () => navigateTo('personas'),
-    }, '페르소나 선택하러 가기'));
-    card.appendChild(actions);
+    }, '계정 선택하러 가기')));
+    return wrap;
   }
-  root.appendChild(card);
+
+  const monthsSel = spendingMonthsSelect('spendingSyntheticMonths', state.spending.lastSyntheticMonths || 3);
+  const monthsField = h('div', { class: 'form-field inline-field' },
+    h('label', { for: 'spendingSyntheticMonths' }, '분석 기간'), monthsSel);
+
+  const runBtn = h('button', { type: 'button', class: 'btn btn-primary' }, '합성 거래내역으로 분석');
+  runBtn.addEventListener('click', () => {
+    runSyntheticAnalysis(toInt(monthsSel.value) || 3, runBtn, msgSlot);
+  });
+
+  const csvLink = h('a', {
+    href: Api.syntheticCsvUrl(personaId), download: `${personaId}_transactions.csv`,
+    class: 'inline-link', 'aria-label': '합성 거래내역 CSV 내려받기',
+  }, icon('download', 14), h('span', {}, '합성 CSV 내려받기'));
+
+  wrap.appendChild(h('div', { class: 'source-row' }, monthsField, runBtn, csvLink));
+  wrap.appendChild(h('p', { class: 'source-hint' },
+    '내려받은 CSV 를 아래 업로드 영역에 올리면 파일로 분석하는 흐름도 그대로 확인할 수 있어요.'));
+  wrap.appendChild(msgSlot);
+  return wrap;
+}
+
+async function runSyntheticAnalysis(months, btn, msgSlot) {
+  if (state.spending.busy) return;
+  state.spending.busy = true;
+  const label = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '분석하는 중...'; }
+  if (msgSlot) clearNode(msgSlot);
+
+  const res = await Api.analyzeSpendingSynthetic(currentPersonaId(), months);
+  state.spending.busy = false;
+  if (btn) { btn.disabled = false; btn.textContent = label; }
+
+  if (!res.ok) {
+    if (msgSlot) msgSlot.appendChild(noticeBox(`분석하지 못했습니다. ${res.error || ''}`, { error: true }));
+    return;
+  }
+  state.spending.data = res.data;
+  state.spending.loaded = true;
+  state.spending.lastSyntheticMonths = months;
+  updateSpendingConsent();
+  renderSpendingResults();
+  await loadAndSetHome();
+}
+
+function buildUploadPath() {
+  const wrap = h('div', { class: 'source-path' });
+  wrap.appendChild(h('h3', { class: 'source-path-title' }, '내 거래내역 파일로 분석'));
+  wrap.appendChild(h('p', { class: 'source-path-sub' },
+    'CSV 또는 XLSX 파일을 브라우저에서 직접 읽습니다. 파일은 서버로 올라가지 않습니다.'));
+
+  const fileInput = h('input', {
+    type: 'file', id: 'spendingFileInput', accept: '.csv,.xlsx', class: 'visually-hidden',
+    'aria-label': '거래내역 파일 선택 (CSV 또는 XLSX)',
+  });
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files && fileInput.files[0];
+    if (file) handleSpendingFile(file);
+    fileInput.value = '';
+  });
+
+  const drop = h('div', {
+    class: 'drop-zone', id: 'spendingDrop', role: 'group', 'aria-label': '거래내역 파일 올리기',
+  });
+  drop.appendChild(h('span', { class: 'drop-icon', 'aria-hidden': 'true' }, icon('upload', 20)));
+  drop.appendChild(h('p', { class: 'drop-text' }, '여기에 파일을 끌어다 놓거나 아래 버튼으로 고르세요'));
+  drop.appendChild(h('p', { class: 'drop-sub' }, 'CSV, XLSX (최대 8MB)'));
+  drop.appendChild(h('button', {
+    type: 'button', class: 'btn btn-secondary', onClick: () => fileInput.click(),
+  }, '파일 고르기'));
+  drop.appendChild(fileInput);
+
+  ['dragenter', 'dragover'].forEach((evt) => {
+    drop.addEventListener(evt, (e) => { e.preventDefault(); drop.classList.add('is-over'); });
+  });
+  ['dragleave', 'dragend'].forEach((evt) => {
+    drop.addEventListener(evt, () => drop.classList.remove('is-over'));
+  });
+  drop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    drop.classList.remove('is-over');
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) handleSpendingFile(file);
+  });
+
+  wrap.appendChild(drop);
+  wrap.appendChild(h('div', { id: 'spendingMapping' }));
+  return wrap;
+}
+
+function setUploadNotice(message, isError) {
+  if (!state.spending.upload) {
+    const slot = document.getElementById('spendingMapping');
+    if (slot) {
+      clearNode(slot);
+      slot.appendChild(noticeBox(message, { error: !!isError }));
+    }
+    return;
+  }
+  state.spending.upload.notice = message;
+  state.spending.upload.noticeError = !!isError;
+  renderSpendingMapping();
+}
+
+async function handleSpendingFile(file) {
+  const name = String(file.name || '');
+  const lower = name.toLowerCase();
+  const isCsv = /\.csv$/.test(lower) || /\.txt$/.test(lower);
+  const isXlsx = /\.xlsx$/.test(lower);
+  state.spending.upload = null;
+
+  if (!isCsv && !isXlsx) {
+    setUploadNotice('CSV 또는 XLSX 파일만 읽을 수 있습니다.', true);
+    return;
+  }
+  if (file.size > SPENDING_MAX_BYTES) {
+    setUploadNotice('파일이 너무 큽니다. 8MB 이하 파일로 다시 시도해주세요.', true);
+    return;
+  }
+
+  const slot = document.getElementById('spendingMapping');
+  if (slot) {
+    clearNode(slot);
+    slot.appendChild(h('p', { class: 'loading-text' }, '파일을 읽는 중...'));
+  }
+
+  let matrix = null;
+  try {
+    const buffer = await readFileAsArrayBuffer(file);
+    if (isXlsx) {
+      let XLSXlib = null;
+      try {
+        XLSXlib = await loadSheetJs();
+      } catch (_) {
+        setUploadNotice('XLSX 읽기 도구를 불러오지 못했습니다. 파일을 CSV 로 저장해서 올려주세요.', true);
+        return;
+      }
+      const book = XLSXlib.read(new Uint8Array(buffer), { type: 'array' });
+      const sheetName = book.SheetNames && book.SheetNames[0];
+      const sheet = sheetName ? book.Sheets[sheetName] : null;
+      if (!sheet) { setUploadNotice('시트를 찾지 못했습니다. 다른 파일로 시도해주세요.', true); return; }
+      matrix = XLSXlib.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '', blankrows: false });
+    } else {
+      const text = decodeTextBytes(buffer);
+      matrix = parseCsvText(text, sniffDelimiter(text));
+    }
+  } catch (_) {
+    setUploadNotice('파일을 읽지 못했습니다. 다른 파일로 시도해주세요.', true);
+    return;
+  }
+
+  if (!matrix || matrix.length < 2) {
+    setUploadNotice('읽을 수 있는 거래 행이 없습니다. 머리글과 거래 행이 있는 파일인지 확인해주세요.', true);
+    return;
+  }
+
+  const upload = buildUploadState(name, matrix);
+  if (upload.map.date < 0 || (upload.map.amount < 0 && upload.map.deposit < 0)) {
+    upload.notice = '날짜와 금액 열을 자동으로 찾지 못했습니다. 아래에서 열을 직접 지정해주세요.';
+    upload.noticeError = false;
+  }
+  state.spending.upload = upload;
+  renderSpendingMapping();
+}
+
+function columnSelect(role, upload) {
+  const id = `spendingCol_${role}`;
+  const sel = h('select', { id, name: id, 'aria-label': `${SPENDING_ROLE_LABELS[role]} 열 선택` });
+  const optional = role === 'deposit' || role === 'memo';
+  sel.appendChild(h('option', { value: '-1', selected: upload.map[role] < 0 }, optional ? '사용 안 함' : '열 선택'));
+  upload.headers.forEach((hd, i) => {
+    const text = hd ? `${i + 1}. ${hd}` : `${i + 1}. (이름 없음)`;
+    sel.appendChild(h('option', { value: String(i), selected: upload.map[role] === i }, text));
+  });
+  sel.addEventListener('change', () => {
+    upload.map[role] = parseInt(sel.value, 10);
+    if (role === 'amount') upload.signMode = guessSignMode(upload.dataRows, upload.map.amount);
+    upload.notice = null;
+    renderSpendingMapping();
+  });
+  return h('div', { class: 'form-field' }, h('label', { for: id }, SPENDING_ROLE_LABELS[role]), sel);
+}
+
+function renderSpendingMapping() {
+  const slot = document.getElementById('spendingMapping');
+  if (!slot) return;
+  clearNode(slot);
+  const upload = state.spending.upload;
+  if (!upload) return;
+
+  const panel = h('div', { class: 'mapping-panel' });
+  const head = h('div', { class: 'mapping-head' });
+  head.appendChild(h('span', { class: 'mapping-file' }, upload.fileName));
+  head.appendChild(h('button', {
+    type: 'button', class: 'btn btn-secondary btn-sm',
+    onClick: () => { state.spending.upload = null; renderSpendingMapping(); },
+  }, '파일 지우기'));
+  panel.appendChild(head);
+
+  if (upload.notice) panel.appendChild(noticeBox(upload.notice, { error: upload.noticeError }));
+
+  const grid = h('div', { class: 'form-grid mapping-grid' });
+  ['date', 'amount', 'deposit', 'merchant', 'memo'].forEach((role) => grid.appendChild(columnSelect(role, upload)));
+
+  const signId = 'spendingSignMode';
+  const signSel = h('select', { id: signId, name: signId, 'aria-label': '금액 부호 기준' });
+  signSel.appendChild(h('option', { value: 'positive', selected: upload.signMode !== 'negative' }, '양수를 지출로'));
+  signSel.appendChild(h('option', { value: 'negative', selected: upload.signMode === 'negative' }, '음수를 지출로'));
+  signSel.addEventListener('change', () => { upload.signMode = signSel.value; renderSpendingMapping(); });
+  grid.appendChild(h('div', { class: 'form-field' }, h('label', { for: signId }, '금액 부호'), signSel));
+  panel.appendChild(grid);
+
+  const { rows, stats } = normalizeUploadRows(upload);
+
+  const tableWrap = h('div', { class: 'table-wrap' });
+  const table = h('table', { class: 'data-table stackable' });
+  table.appendChild(h('thead', {}, h('tr', {},
+    h('th', { class: 'text-left' }, '날짜'), h('th', {}, '금액'),
+    h('th', { class: 'text-left' }, '가맹점'), h('th', {}, '구분'), h('th', { class: 'text-left' }, '메모'),
+  )));
+  const tbody = h('tbody', {});
+  rows.slice(0, SPENDING_PREVIEW_ROWS).forEach((r) => {
+    tbody.appendChild(h('tr', {},
+      h('td', { class: 'text-left', 'data-label': '날짜' }, r.date),
+      h('td', { 'data-label': '금액' }, fmtWon(r.amount)),
+      h('td', { class: 'text-left', 'data-label': '가맹점' }, r.merchant || '(없음)'),
+      h('td', { 'data-label': '구분' }, r.kind === 'bank' ? '계좌' : '카드'),
+      h('td', { class: 'text-left', 'data-label': '메모' }, r.memo || ''),
+    ));
+  });
+  table.appendChild(tbody);
+  tableWrap.appendChild(table);
+  if (rows.length) {
+    panel.appendChild(h('p', { class: 'mapping-caption' }, `보낼 내용 미리보기 (앞 ${Math.min(rows.length, SPENDING_PREVIEW_ROWS)}행)`));
+    panel.appendChild(tableWrap);
+  }
+
+  const skipped = stats.noDate + stats.noAmount + stats.deposit + stats.capped;
+  const counts = h('div', { class: 'mapping-counts' });
+  counts.appendChild(h('span', {}, `읽은 행 ${fmtCount(stats.read)}`));
+  counts.appendChild(h('span', {}, `보낼 행 ${fmtCount(stats.sent)}`));
+  counts.appendChild(h('span', { class: skipped ? 'value-neutral' : '' }, `건너뛴 행 ${fmtCount(skipped)}`));
+  panel.appendChild(counts);
+
+  const reasons = [];
+  if (stats.noDate) reasons.push(`날짜를 읽지 못한 행 ${fmtCount(stats.noDate)}`);
+  if (stats.noAmount) reasons.push(`금액이 없거나 0인 행 ${fmtCount(stats.noAmount)}`);
+  if (stats.deposit) reasons.push(`급여·이체로 보이지 않는 입금 행 ${fmtCount(stats.deposit)}`);
+  if (stats.capped) reasons.push(`한 번에 보낼 수 있는 ${SPENDING_MAX_ROWS.toLocaleString('ko-KR')}행을 넘은 행 ${fmtCount(stats.capped)}`);
+  if (reasons.length) panel.appendChild(h('p', { class: 'mapping-skip' }, `건너뛴 이유: ${reasons.join(' · ')}`));
+
+  const monthsSel = spendingMonthsSelect('spendingUploadMonths', upload.months);
+  monthsSel.addEventListener('change', () => { upload.months = toInt(monthsSel.value) || 3; });
+  const monthsField = h('div', { class: 'form-field inline-field' },
+    h('label', { for: 'spendingUploadMonths' }, '분석 기간'), monthsSel);
+
+  const msgSlot = h('div', {});
+  const sendBtn = h('button', { type: 'button', class: 'btn btn-primary' }, '이 내용으로 분석');
+  if (!rows.length) sendBtn.disabled = true;
+  sendBtn.addEventListener('click', () => runUploadAnalysis(sendBtn, msgSlot));
+
+  panel.appendChild(h('div', { class: 'source-row send-row' }, monthsField, sendBtn,
+    h('span', { class: 'privacy-note' }, SPENDING_PRIVACY_NOTE)));
+  panel.appendChild(msgSlot);
+  slot.appendChild(panel);
+}
+
+async function runUploadAnalysis(btn, msgSlot) {
+  const upload = state.spending.upload;
+  if (!upload || state.spending.busy) return;
+  const { rows } = normalizeUploadRows(upload);
+  if (!rows.length) return;
+
+  state.spending.busy = true;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '분석하는 중...';
+  clearNode(msgSlot);
+
+  const res = await Api.analyzeSpending(rows, upload.months || 3);
+  state.spending.busy = false;
+  btn.disabled = false;
+  btn.textContent = label;
+
+  if (!res.ok) {
+    msgSlot.appendChild(noticeBox(`분석하지 못했습니다. ${res.error || ''}`, { error: true }));
+    return;
+  }
+  state.spending.data = res.data;
+  state.spending.loaded = true;
+  state.spending.lastSyntheticMonths = null;
+  msgSlot.appendChild(noticeBox(`거래 ${fmtCount(rows.length)}을 분석했습니다. 아래에서 결과를 확인하세요.`));
+  updateSpendingConsent();
+  renderSpendingResults();
+  await loadAndSetHome();
+}
+
+/* ---- 10-4. 결과 ---- */
+
+function statTile(label, value, sub, valueClass) {
+  const tile = h('div', { class: 'stat-tile' });
+  tile.appendChild(h('div', { class: 'stat-label' }, label));
+  tile.appendChild(h('div', { class: `stat-value${valueClass ? ' ' + valueClass : ''}` }, value));
+  if (sub) tile.appendChild(h('div', { class: 'stat-sub' }, sub));
+  return tile;
+}
+
+function buildSpendingTiles(summary, features) {
+  const wrap = h('div', {});
+  const tiles = h('div', { class: 'stat-tiles' });
+  tiles.appendChild(statTile('월평균 지출', fmtWon(features.avg_monthly_spend), `최근 ${summary.months}개월 기준`));
+  tiles.appendChild(statTile('고정지출 비율', fmtRatioPct1(features.fixed_ratio),
+    `고정 ${fmtWon(summary.fixed_spend)}`));
+  tiles.appendChild(statTile('구독 합계', fmtWon(features.subscription_total),
+    `${fmtCount(features.subscription_count)} 관측`));
+  const net = features.net_cash_flow_monthly;
+  tiles.appendChild(statTile('저축 여력', fmtWon(net), '월 순현금흐름',
+    net > 0 ? 'value-positive' : net < 0 ? 'value-negative' : 'value-neutral'));
+  wrap.appendChild(tiles);
+  wrap.appendChild(h('p', { class: 'period-caption' },
+    `${summary.period_start} ~ ${summary.period_end} · ${summary.months}개월 · 데이터 ${summary.months ? features.data_coverage_days : 0}일 · 자동 분류율 ${fmtRatioPct1(features.classification_quality)}`));
+  return wrap;
+}
+
+function changeBadge(changePct) {
+  if (changePct === null || changePct === undefined) return badge('전월 대비 확인 불가', '');
+  const v = Number(changePct);
+  const cls = v < 0 ? 'badge-positive' : v > 0 ? 'badge-negative' : '';
+  return badge(`전월 대비 ${fmtPctSigned1(v)}`, cls);
+}
+
+function buildCategoryBars(summary) {
+  const list = h('ul', { class: 'cat-bars' });
+  (summary.categories || []).forEach((c) => {
+    const share = Math.max(0, Math.min(1, toFloat(c.share)));
+    const li = h('li', { class: 'cat-bar' });
+    li.appendChild(h('div', { class: 'cat-bar-top' },
+      h('span', { class: 'cat-name' }, c.category),
+      h('span', { class: 'cat-amount' }, fmtWon(c.amount))));
+    li.appendChild(h('div', { class: 'cat-track' },
+      h('span', { class: 'cat-fill', style: `width:${(share * 100).toFixed(1)}%` })));
+    li.appendChild(h('div', { class: 'cat-bar-bottom' },
+      h('span', { class: 'cat-share' }, `${fmtPct1(share * 100)} · ${fmtCount(c.count)}`),
+      changeBadge(c.change_pct)));
+    list.appendChild(li);
+  });
+  return list;
+}
+
+function buildAnomalyList(summary) {
+  const list = h('ul', { class: 'anomaly-list' });
+  (summary.anomalies || []).forEach((a) => {
+    const li = h('li', { class: 'anomaly-item' });
+    const head = h('div', { class: 'anomaly-head' });
+    head.appendChild(h('span', { class: 'anomaly-cat' }, a.category));
+    head.appendChild(h('span', { class: 'anomaly-month' }, a.month));
+    head.appendChild(badge(fmtPctSigned1(a.change_pct), 'badge-negative'));
+    li.appendChild(head);
+    li.appendChild(h('p', { class: 'anomaly-note' }, a.note || ''));
+    li.appendChild(h('div', { class: 'evidence-row' },
+      h('span', { class: 'evidence-pill' }, `이번 달 ${fmtWon(a.amount)}`),
+      h('span', { class: 'evidence-pill' }, `이전 달 ${fmtWon(a.prev_amount)}`)));
+    list.appendChild(li);
+  });
+  return list;
+}
+
+function buildSubscriptionTable(summary) {
+  const wrap = h('div', { class: 'table-wrap' });
+  const table = h('table', { class: 'data-table stackable' });
+  table.appendChild(h('thead', {}, h('tr', {},
+    h('th', { class: 'text-left' }, '가맹점'), h('th', {}, '월 금액'),
+    h('th', {}, '관측 개월'), h('th', {}, '분류'),
+  )));
+  const tbody = h('tbody', {});
+  (summary.subscriptions || []).forEach((s) => {
+    tbody.appendChild(h('tr', {},
+      h('td', { class: 'text-left', 'data-label': '가맹점' }, s.merchant),
+      h('td', { 'data-label': '월 금액' }, fmtWon(s.amount)),
+      h('td', { 'data-label': '관측 개월' }, fmtMonths(s.months_seen)),
+      h('td', { 'data-label': '분류' }, s.category),
+    ));
+  });
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+function buildLifeEventCard(signal) {
+  const kind = signal.kind;
+  const card = h('div', { class: 'signal-card' });
+  const head = h('div', { class: 'signal-head' });
+  head.appendChild(h('span', { class: 'signal-kicker' }, LIFE_EVENT_LABELS[kind] || '변화 신호'));
+  head.appendChild(badge(`신호 확신도 ${fmtRatioPct1(signal.confidence)}`, ''));
+  card.appendChild(head);
+  card.appendChild(h('p', { class: 'signal-q' },
+    LIFE_EVENT_QUESTIONS[kind] || '생활에 변화가 있었는지 살펴볼까요?'));
+
+  const evidence = plainList(signal.evidence, 'plain-list');
+  if (evidence) card.appendChild(evidence);
+
+  const isRefi = kind === 'refinance_window';
+  const row = h('div', { class: 'chip-row' });
+  row.appendChild(h('button', {
+    type: 'button', class: 'chip',
+    onClick: () => { if (isRefi) goToCompareWithPrepare({}); else navigateTo('debts'); },
+  }, isRefi ? '공시 조건 비교해보기' : '내 부채 살펴보기'));
+  card.appendChild(row);
+  return card;
+}
+
+function spendingSectionTitle(text, countText) {
+  const title = h('h2', { class: 'section-title' }, text);
+  if (countText) title.appendChild(h('span', { class: 'section-count' }, countText));
+  return title;
+}
+
+function renderSpendingResults() {
+  const slot = document.getElementById('spendingResult');
+  if (!slot) return;
+  clearNode(slot);
+
+  const data = state.spending.data;
+  if (!data || !data.summary || !data.features) {
+    slot.appendChild(h('h2', { class: 'section-title' }, '분석 결과'));
+    slot.appendChild(h('p', { class: 'empty-text' },
+      '아직 분석 결과가 없습니다. 위에서 합성 거래내역으로 분석하거나 거래내역 파일을 올리면 월평균 지출, 고정지출 비율, 구독, 급증 항목을 함께 보여드려요.'));
+    return;
+  }
+
+  const summary = data.summary;
+  const features = data.features;
+
+  slot.appendChild(h('h2', { class: 'section-title' }, '분석 결과'));
+  slot.appendChild(buildSpendingTiles(summary, features));
+
+  slot.appendChild(spendingSectionTitle('카테고리별 지출', fmtCount((summary.categories || []).length)));
+  if ((summary.categories || []).length) slot.appendChild(buildCategoryBars(summary));
+  else slot.appendChild(h('p', { class: 'empty-text' }, '집계된 카테고리가 없습니다.'));
+
+  slot.appendChild(spendingSectionTitle('전월 대비 급증', fmtCount((summary.anomalies || []).length)));
+  if ((summary.anomalies || []).length) slot.appendChild(buildAnomalyList(summary));
+  else slot.appendChild(h('p', { class: 'empty-text' }, '전월 대비 크게 늘어난 카테고리가 없습니다.'));
+
+  slot.appendChild(spendingSectionTitle('정기 결제로 보이는 항목', fmtCount((summary.subscriptions || []).length)));
+  if ((summary.subscriptions || []).length) {
+    slot.appendChild(buildSubscriptionTable(summary));
+    slot.appendChild(h('p', { class: 'table-note' }, '가맹점 표시는 앞 두 글자만 남기고 가립니다.'));
+  } else {
+    slot.appendChild(h('p', { class: 'empty-text' }, '반복 결제로 보이는 항목이 없습니다.'));
+  }
+
+  const signals = summary.life_events || [];
+  if (signals.length) {
+    slot.appendChild(spendingSectionTitle('변화 신호', fmtCount(signals.length)));
+    slot.appendChild(h('p', { class: 'section-lead' },
+      '거래 흐름에서 보이는 신호일 뿐이라 실제와 다를 수 있어요. 맞는지 확인하는 질문으로만 보여드립니다.'));
+    const wrap = h('div', { class: 'signal-list' });
+    signals.forEach((s) => wrap.appendChild(buildLifeEventCard(s)));
+    slot.appendChild(wrap);
+  }
+
+  const cards = data.cards || [];
+  if (cards.length) {
+    slot.appendChild(h('h2', { class: 'section-title' }, '이 분석에서 나온 카드'));
+    const wrap = h('div', { class: 'insight-cards-wrap' });
+    cards.forEach((c) => wrap.appendChild(buildInsightCard(c)));
+    slot.appendChild(wrap);
+  }
+
+  const msgSlot = h('div', {});
+  const actions = h('div', { class: 'form-actions' });
+  const againBtn = h('button', { type: 'button', class: 'btn btn-secondary' }, '다시 분석');
+  againBtn.addEventListener('click', () => {
+    const months = state.spending.lastSyntheticMonths;
+    if (months) {
+      runSyntheticAnalysis(months, againBtn, msgSlot);
+      return;
+    }
+    const source = document.getElementById('spendingSource');
+    if (source && source.scrollIntoView) {
+      try { source.scrollIntoView({ block: 'start' }); } catch (_) { /* noop */ }
+    }
+    const fileBtn = document.querySelector('#spendingDrop .btn');
+    if (fileBtn) fileBtn.focus();
+  });
+  const clearBtn = h('button', { type: 'button', class: 'btn btn-danger' }, '이 결과 지우기');
+  clearBtn.addEventListener('click', async () => {
+    if (!confirm('저장된 소비 패턴 분석 결과를 지울까요?')) return;
+    clearBtn.disabled = true;
+    const res = await Api.deleteSpending();
+    clearBtn.disabled = false;
+    if (!res.ok) {
+      msgSlot.appendChild(noticeBox('결과를 지우지 못했습니다.', { error: true }));
+      return;
+    }
+    state.spending.data = null;
+    state.spending.lastSyntheticMonths = null;
+    updateSpendingConsent();
+    renderSpendingResults();
+    await loadAndSetHome();
+  });
+  actions.appendChild(againBtn);
+  actions.appendChild(clearBtn);
+  slot.appendChild(actions);
+  slot.appendChild(msgSlot);
 }
 
 /* ---------- 11. 화면: 페르소나 ---------- */
@@ -1386,6 +2314,15 @@ function resetChatForProfileChange() {
   state.chat.pending = false;
 }
 
+/* 소비 패턴 분석 결과도 계정별이므로 계정이 바뀌면 다시 불러온다. */
+function resetSpendingForProfileChange() {
+  state.spending.data = null;
+  state.spending.loaded = false;
+  state.spending.upload = null;
+  state.spending.lastSyntheticMonths = null;
+  state.spending.busy = false;
+}
+
 async function loadPersonaAndGoHome(personaId) {
   const res = await Api.loadPersona(personaId);
   if (!res.ok) return { ok: false, error: res.error };
@@ -1393,6 +2330,7 @@ async function loadPersonaAndGoHome(personaId) {
   state.lastPersonaId = personaId;
   lsSetStr('donn.lastPersonaId', personaId);
   resetChatForProfileChange();
+  resetSpendingForProfileChange();
   await refreshSidebarData();
   navigateTo('home');
   return { ok: true };
@@ -1405,6 +2343,7 @@ async function clearSessionProfile() {
   state.lastPersonaId = null;
   lsSetStr('donn.lastPersonaId', null);
   resetChatForProfileChange();
+  resetSpendingForProfileChange();
   await refreshSidebarData();
   return { ok: true };
 }
@@ -1721,6 +2660,9 @@ async function handleChipClick(chip) {
     case 'scenario':
       state.debts.pendingFocusLoanId = (chip.params && (chip.params.target_loan_id || chip.params.loan_id)) || null;
       navigateTo('debts');
+      break;
+    case 'spending':
+      navigateTo('spending');
       break;
     case 'onboarding':
       navigateTo(state.profile ? 'debts' : 'personas');
