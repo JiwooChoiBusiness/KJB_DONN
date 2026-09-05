@@ -18,6 +18,8 @@ const FALLBACK_DISCLAIMER =
   '최종 결정은 이용자 본인의 판단으로 하며, 상품 가입은 각 금융회사 공식 채널에서 진행하세요.';
 const FALLBACK_AI_NOTICE =
   '이 화면의 설명 문장 일부는 생성형 AI가 작성합니다. 수치는 AI가 아닌 계산 엔진이 산출합니다.';
+/* app/kb/search.py 의 DISCLAIMER 와 동일하게 유지한다. */
+const KB_DISCLAIMER = '제도 설명은 참고용이며 최신 내용은 관련 기관 안내를 확인하세요.';
 
 const ROUTES = ['home', 'debts', 'compare', 'spending', 'personas', 'decisions'];
 
@@ -114,6 +116,29 @@ function svgEl(tag, attrs, ...children) {
   const node = document.createElementNS(SVG_NS, tag);
   applyAttrs(node, attrs);
   appendChildren(node, children);
+  return node;
+}
+
+/* DONN 마크: 인디고 라운드 스퀘어(반경 7/32 = 21.9%) 안에 흰 막대 3개.
+   막대의 왼쪽 끝은 각지게 붙여 D의 기둥을 만들고, 오른쪽 끝은 반원으로 굴려
+   위에서 아래로 짧아진다(부채가 줄어드는 계단). 16px에서도 뭉개지지 않도록
+   좌표를 32단위 격자의 0.5 배수에만 둔다. index.html 의 favicon 데이터 URI와 같은 도형. */
+const DONN_LOGO_BARS = [
+  'M8 3.5H20.5a3.5 3.5 0 0 1 0 7H8Z',
+  'M8 12.5H18a3.5 3.5 0 0 1 0 7H8Z',
+  'M8 21.5H15.5a3.5 3.5 0 0 1 0 7H8Z',
+];
+
+function donnLogo(size) {
+  size = size || 28;
+  const node = svgEl('svg', {
+    viewBox: '0 0 32 32', width: size, height: size,
+    'aria-hidden': 'true', focusable: 'false', class: 'donn-logo',
+  });
+  node.appendChild(svgEl('rect', { width: 32, height: 32, rx: 7, fill: '#4F46E5' }));
+  const bars = svgEl('g', { fill: '#ffffff' });
+  DONN_LOGO_BARS.forEach((d) => bars.appendChild(svgEl('path', { d })));
+  node.appendChild(bars);
   return node;
 }
 
@@ -267,7 +292,11 @@ const Api = {
   getDecisions: (limit) => apiGet(`/decisions${limit ? `?limit=${encodeURIComponent(limit)}` : ''}`),
   getDecision: (id) => apiGet(`/decisions/${encodeURIComponent(id)}`),
   replayDecision: (id) => apiSend('POST', `/decisions/${encodeURIComponent(id)}/replay`),
-  chat: (message) => apiSend('POST', '/chat', { message }),
+  chat: (message, chatId) => apiSend('POST', '/chat', { message, chat_id: chatId || null }),
+  listChats: () => apiGet('/chats'),
+  chatMessages: (chatId) => apiGet(`/chats/${encodeURIComponent(chatId)}/messages`),
+  deleteChat: (chatId) => apiSend('DELETE', `/chats/${encodeURIComponent(chatId)}`),
+  kbDoc: (slug) => apiGet(`/kb/${encodeURIComponent(slug)}`),
   syntheticCsvUrl: (personaId) => `${API_BASE}/synthetic/${encodeURIComponent(personaId)}/transactions.csv`,
 };
 
@@ -279,14 +308,17 @@ const state = {
   profile: null,
   home: null,
   health: null,
-  decisionsRecent: [],
+  recentChats: [],
   currentView: 'home',
   sidebarCollapsed: lsGetBool('donn.sidebarCollapsed', false),
   mobileSidebarOpen: false,
   lastPersonaId: lsGetStr('donn.lastPersonaId', null),
-  chat: { messages: [], pending: false },
+  personaNotice: null,
+  kbOpener: null,
+  chat: { messages: [], pending: false, chatId: null },
   compare: { context: null, result: null, step: 1, queuedPrepareParams: null },
   debts: { selectedLoanId: null, editingLoanId: null, schedule: null, pendingFocusLoanId: null },
+  nav: { depth: 0 },
 };
 
 /* ---------- 5. 라우터 ---------- */
@@ -294,6 +326,34 @@ const state = {
 function currentRouteFromHash() {
   const r = (location.hash || '#home').replace('#', '');
   return ROUTES.includes(r) ? r : 'home';
+}
+
+/* 앱이 직접 쌓은 히스토리 항목에만 depth 를 표시한다.
+   depth > 0 이면 뒤로 가기가 앱 안의 이전 화면으로 돌아간다는 뜻이다. */
+function syncNavDepth() {
+  let st = null;
+  try { st = history.state; } catch (_) { st = null; }
+  if (st && typeof st.donnDepth === 'number') {
+    state.nav.depth = st.donnDepth;
+    return;
+  }
+  state.nav.depth = (state.nav.depth || 0) + 1;
+  try { history.replaceState({ donnDepth: state.nav.depth }, ''); } catch (_) { /* noop */ }
+}
+
+function initNavDepth() {
+  let st = null;
+  try { st = history.state; } catch (_) { st = null; }
+  state.nav.depth = st && typeof st.donnDepth === 'number' ? st.donnDepth : 0;
+  try { history.replaceState({ donnDepth: state.nav.depth }, ''); } catch (_) { /* noop */ }
+}
+
+function goBack() {
+  if (state.nav.depth > 0) {
+    history.back();
+    return;
+  }
+  navigateTo('home');
 }
 
 function navigateTo(view) {
@@ -333,6 +393,23 @@ function noticeBox(message, opts) {
 
 function badge(text, cls) {
   return h('span', { class: 'badge' + (cls ? ' ' + cls : '') }, text);
+}
+
+/* 홈이 아닌 모든 화면의 헤더 왼쪽 위에 붙는 "뒤로" 버튼 */
+function backButton(onBack) {
+  const btn = h('button', {
+    type: 'button', class: 'back-btn', 'aria-label': '뒤로 가기',
+    onClick: onBack || goBack,
+  });
+  btn.appendChild(icon('chevronLeft', 16));
+  btn.appendChild(h('span', {}, '뒤로'));
+  return h('div', { class: 'view-topline' }, btn);
+}
+
+function appendViewHeader(root, title, lead, onBack) {
+  root.appendChild(backButton(onBack));
+  root.appendChild(h('h1', { class: 'view-header' }, title));
+  if (lead) root.appendChild(h('p', { class: 'view-lead' }, lead));
 }
 
 function chipButton(chip) {
@@ -538,7 +615,7 @@ async function renderHome() {
 
   const hero = h('div', { class: 'home-hero' });
   hero.appendChild(h('h1', { class: 'home-title' }, 'DONN'));
-  hero.appendChild(h('p', { class: 'home-subtitle' }, '빚의 다음 한 걸음을 숫자로'));
+  hero.appendChild(h('p', { class: 'home-subtitle' }, '빚 걱정을 계산으로 바꿉니다'));
   root.appendChild(hero);
 
   const cardsWrap = h('div', { class: 'insight-cards-wrap' });
@@ -553,8 +630,6 @@ async function renderHome() {
 
   const homeChipsWrap = h('div', { class: 'chip-row', id: 'homeChipsWrap' });
   root.appendChild(homeChipsWrap);
-
-  root.appendChild(buildShortcutRow());
 
   renderChatTranscript();
 
@@ -606,23 +681,6 @@ function onChatSubmit(e) {
   sendChatMessage(text);
 }
 
-function buildShortcutRow() {
-  const row = h('div', { class: 'shortcut-row' });
-  const items = [
-    { view: 'debts', label: '내 부채', iconName: 'wallet' },
-    { view: 'compare', label: '공시 비교', iconName: 'bars' },
-    { view: 'spending', label: '소비 패턴', iconName: 'receipt' },
-    { view: 'personas', label: '페르소나', iconName: 'user' },
-  ];
-  items.forEach((it) => {
-    const btn = h('button', { type: 'button', class: 'shortcut', 'aria-label': it.label, onClick: () => navigateTo(it.view) });
-    btn.appendChild(h('span', { class: 'icon-circle-lg' }, icon(it.iconName, 24)));
-    btn.appendChild(h('span', {}, it.label));
-    row.appendChild(btn);
-  });
-  return row;
-}
-
 /* ---------- 8. 화면: 내 부채 ---------- */
 
 function emptyProfileSkeleton() {
@@ -636,14 +694,13 @@ function emptyProfileSkeleton() {
 async function renderDebts() {
   const { root, isStale } = mountView('debts');
   focusMainAfterRender();
-  root.appendChild(h('h1', { class: 'view-header' }, '내 부채'));
+  appendViewHeader(root, '내 부채');
   root.appendChild(h('p', { class: 'loading-text' }, '불러오는 중...'));
 
   const res = await Api.getProfile();
   if (isStale()) return;
   clearNode(root);
-  root.appendChild(h('h1', { class: 'view-header' }, '내 부채'));
-  root.appendChild(h('p', { class: 'view-lead' }, '프로필과 대출을 입력하면 상환표와 시나리오를 계산합니다.'));
+  appendViewHeader(root, '내 부채', '프로필과 대출을 입력하면 상환표와 시나리오를 계산합니다.');
 
   if (!res.ok && res.status !== 404) {
     root.appendChild(noticeBox('서버에 연결되지 않았습니다.', { error: true, onRetry: renderDebts }));
@@ -1029,8 +1086,12 @@ function defaultCompareContext() {
 async function renderCompare() {
   const { root, isStale } = mountView('compare');
   focusMainAfterRender();
-  root.appendChild(h('h1', { class: 'view-header' }, '공시 비교'));
-  root.appendChild(h('p', { class: 'view-lead' }, '금융감독원 공시 자료를 같은 조건으로 계산해 나란히 보여줍니다. 상품 실명은 표시하지 않습니다.'));
+  const atStep2 = !!(state.compare.result && state.compare.step === 2);
+  appendViewHeader(
+    root, '공시 비교',
+    '금융감독원 공시 자료를 같은 조건으로 계산해 나란히 보여줍니다. 상품 실명은 표시하지 않습니다.',
+    atStep2 ? backToCompareStep1 : null,
+  );
 
   const body = h('div', { id: 'compareBody' });
   root.appendChild(body);
@@ -1064,6 +1125,13 @@ async function renderCompare() {
     state.compare.context = ctx;
   }
   body.appendChild(buildCompareStep1(state.compare.context));
+}
+
+/* 2단계에서 1단계로: 조건(context)은 그대로 두고 결과만 지운다. */
+function backToCompareStep1() {
+  state.compare.step = 1;
+  state.compare.result = null;
+  renderCompare();
 }
 
 function compareStepIndicator(step) {
@@ -1180,7 +1248,6 @@ function buildCompareStep1(ctx) {
     }
     state.compare.result = res.data;
     state.compare.step = 2;
-    refreshRecentDecisions();
     renderCompare();
   });
 
@@ -1271,10 +1338,7 @@ function buildCompareStep2(result) {
     `decision_id ${result.decision_id} · result_hash ${result.result_hash} · snapshot ${result.snapshot_id} · engine ${result.engine_version} · ${fmtDateTime(result.created_at)}`));
 
   wrap.appendChild(h('div', { class: 'form-actions' },
-    h('button', {
-      type: 'button', class: 'btn btn-secondary',
-      onClick: () => { state.compare.step = 1; state.compare.result = null; renderCompare(); },
-    }, '조건 바꿔서 다시 보기'),
+    h('button', { type: 'button', class: 'btn btn-secondary', onClick: backToCompareStep1 }, '조건 바꿔서 다시 보기'),
   ));
 
   return wrap;
@@ -1285,8 +1349,7 @@ function buildCompareStep2(result) {
 async function renderSpending() {
   const { root } = mountView('spending');
   focusMainAfterRender();
-  root.appendChild(h('h1', { class: 'view-header' }, '소비 패턴'));
-  root.appendChild(h('p', { class: 'view-lead' }, '카드·계좌 합성 거래내역으로 데이터 형태를 미리 확인할 수 있어요.'));
+  appendViewHeader(root, '소비 패턴', '카드·계좌 합성 거래내역으로 데이터 형태를 미리 확인할 수 있어요.');
 
   const card = h('div', { class: 'panel-card' });
   const head = h('div', { class: 'panel-card-head' });
@@ -1316,12 +1379,20 @@ async function renderSpending() {
 
 /* ---------- 11. 화면: 페르소나 ---------- */
 
+/* 계정(페르소나)이 바뀌면 대화는 그 계정의 것이므로 화면에서 비운다. */
+function resetChatForProfileChange() {
+  state.chat.messages = [];
+  state.chat.chatId = null;
+  state.chat.pending = false;
+}
+
 async function loadPersonaAndGoHome(personaId) {
   const res = await Api.loadPersona(personaId);
   if (!res.ok) return { ok: false, error: res.error };
   state.profile = res.data;
   state.lastPersonaId = personaId;
   lsSetStr('donn.lastPersonaId', personaId);
+  resetChatForProfileChange();
   await refreshSidebarData();
   navigateTo('home');
   return { ok: true };
@@ -1333,6 +1404,7 @@ async function clearSessionProfile() {
   state.profile = null;
   state.lastPersonaId = null;
   lsSetStr('donn.lastPersonaId', null);
+  resetChatForProfileChange();
   await refreshSidebarData();
   return { ok: true };
 }
@@ -1340,10 +1412,13 @@ async function clearSessionProfile() {
 async function renderPersonas() {
   const { root, isStale } = mountView('personas');
   focusMainAfterRender();
-  root.appendChild(h('h1', { class: 'view-header' }, '페르소나 테스트'));
-  root.appendChild(h('p', { class: 'view-lead' }, '데모 페르소나를 선택하면 해당 프로필로 화면을 체험할 수 있어요.'));
+  appendViewHeader(root, '계정 선택 (PoC)', '로그인 대신 페르소나를 골라 그 사람으로 앱을 봅니다');
 
   const msgSlot = h('div', {});
+  if (state.personaNotice) {
+    msgSlot.appendChild(noticeBox(state.personaNotice));
+    state.personaNotice = null;
+  }
   root.appendChild(msgSlot);
 
   const resetRow = h('div', { class: 'form-actions', style: 'margin:0 0 16px;' });
@@ -1352,8 +1427,9 @@ async function renderPersonas() {
     onClick: async () => {
       clearNode(msgSlot);
       const r = await clearSessionProfile();
-      if (r.ok) msgSlot.appendChild(noticeBox('프로필이 초기화되었습니다.'));
-      else msgSlot.appendChild(noticeBox('초기화하지 못했습니다. ' + (r.error || ''), { error: true }));
+      if (!r.ok) { msgSlot.appendChild(noticeBox('초기화하지 못했습니다. ' + (r.error || ''), { error: true })); return; }
+      state.personaNotice = '프로필이 초기화되었습니다.';
+      renderPersonas();
     },
   }, '프로필 초기화'));
   root.appendChild(resetRow);
@@ -1374,9 +1450,14 @@ async function renderPersonas() {
     grid.appendChild(h('p', { class: 'empty-text' }, '표시할 페르소나가 없습니다.'));
     return;
   }
+  const currentId = state.profile ? state.profile.id : null;
   personas.forEach((p) => {
-    const card = h('div', { class: 'persona-card' });
-    card.appendChild(h('div', { class: 'persona-name' }, p.display_name || p.id));
+    const isCurrent = !!currentId && currentId === p.id;
+    const card = h('div', { class: 'persona-card' + (isCurrent ? ' is-current' : '') });
+    const nameRow = h('div', { class: 'persona-name-row' });
+    nameRow.appendChild(h('div', { class: 'persona-name' }, p.display_name || p.id));
+    if (isCurrent) nameRow.appendChild(badge('사용 중', 'badge-accent'));
+    card.appendChild(nameRow);
     card.appendChild(h('div', { class: 'persona-oneliner' }, p.one_liner || ''));
     const stats = h('div', { class: 'persona-stats' });
     stats.appendChild(h('span', {}, `대출 ${p.loans_count ?? '-'}건`));
@@ -1384,13 +1465,14 @@ async function renderPersonas() {
     card.appendChild(stats);
     const cardMsg = h('div', {});
     card.appendChild(h('button', {
-      type: 'button', class: 'btn btn-primary', 'aria-label': `${p.display_name || p.id} 페르소나로 보기`,
+      type: 'button', class: 'btn ' + (isCurrent ? 'btn-secondary' : 'btn-primary'),
+      'aria-label': `${p.display_name || p.id} 계정으로 보기`,
       onClick: async () => {
         clearNode(cardMsg);
         const r = await loadPersonaAndGoHome(p.id);
-        if (!r.ok) cardMsg.appendChild(noticeBox('페르소나를 불러오지 못했습니다.', { error: true }));
+        if (!r.ok) cardMsg.appendChild(noticeBox('계정을 불러오지 못했습니다.', { error: true }));
       },
-    }, '이 페르소나로 보기'));
+    }, '이 계정으로 보기'));
     card.appendChild(cardMsg);
     grid.appendChild(card);
   });
@@ -1447,8 +1529,7 @@ function buildDecisionRow(rec) {
 async function renderDecisions() {
   const { root, isStale } = mountView('decisions');
   focusMainAfterRender();
-  root.appendChild(h('h1', { class: 'view-header' }, '결정 기록'));
-  root.appendChild(h('p', { class: 'view-lead' }, '같은 조건으로 다시 계산했을 때 결과가 일치하는지 확인할 수 있어요.'));
+  appendViewHeader(root, '결정 기록', '같은 조건으로 다시 계산했을 때 결과가 일치하는지 확인할 수 있어요.');
 
   const listWrap = h('div', {});
   listWrap.appendChild(h('p', { class: 'loading-text' }, '불러오는 중...'));
@@ -1477,6 +1558,47 @@ function buildPendingRow() {
   return h('div', { class: 'chat-bubble-row from-reply' }, box);
 }
 
+function kbSourceList(sources, cls) {
+  const list = Array.isArray(sources) ? sources.filter(Boolean) : [];
+  if (!list.length) return null;
+  const ul = h('ul', { class: cls || 'kb-source-list' });
+  list.forEach((s) => {
+    const li = h('li', {});
+    const title = s.title || s.url || '출처';
+    if (s.url && /^https?:\/\//i.test(s.url)) {
+      li.appendChild(h('a', { href: s.url, target: '_blank', rel: 'noopener noreferrer' }, title));
+    } else {
+      li.appendChild(h('span', {}, title));
+    }
+    if (s.accessed) li.appendChild(h('span', { class: 'kb-source-date' }, `확인 ${s.accessed}`));
+    ul.appendChild(li);
+  });
+  return ul;
+}
+
+/* open_kb 응답은 말풍선 대신 "제도 안내" 카드로 보여준다(화면 이동은 하지 않는다). */
+function buildKbReplyCard(msg) {
+  const payload = (msg.action && msg.action.payload) || {};
+  const card = h('div', { class: 'kb-card' });
+  const head = h('div', { class: 'kb-card-head' });
+  head.appendChild(h('span', { class: 'kb-card-kicker' }, '제도 안내'));
+  head.appendChild(h('span', { class: 'kb-card-title' }, payload.title || ''));
+  card.appendChild(head);
+  card.appendChild(h('p', { class: 'kb-card-body' }, msg.text || ''));
+
+  const sources = kbSourceList(payload.sources);
+  if (sources) card.appendChild(sources);
+
+  if (payload.slug) {
+    card.appendChild(h('div', { class: 'kb-card-actions' }, h('button', {
+      type: 'button', class: 'btn btn-secondary btn-sm',
+      'aria-label': `${payload.title || '제도 안내'} 자세히 보기`,
+      onClick: () => openKbPanel(payload.slug, payload.title),
+    }, '자세히 보기')));
+  }
+  return card;
+}
+
 function renderChatTranscript(scrollToEnd) {
   const wrap = document.getElementById('chatTranscriptWrap');
   if (!wrap) return;
@@ -1488,7 +1610,8 @@ function renderChatTranscript(scrollToEnd) {
       const row = h('div', { class: 'chat-bubble-row from-reply' });
       row.appendChild(h('div', { class: 'chat-reply-meta' },
         msg.llm_used ? badge('AI 응답', 'badge-accent') : badge('규칙 기반 응답', 'badge-rule')));
-      row.appendChild(h('div', { class: 'chat-bubble reply' }, msg.text));
+      const isKb = !!(msg.action && msg.action.type === 'open_kb');
+      row.appendChild(isKb ? buildKbReplyCard(msg) : h('div', { class: 'chat-bubble reply' }, msg.text));
       if (msg.chips && msg.chips.length) row.appendChild(renderChipRow(msg.chips));
       wrap.appendChild(row);
     } else {
@@ -1520,7 +1643,7 @@ async function sendChatMessage(rawText) {
   state.chat.messages.push({ role: 'user', text });
   setChatPending(true);
 
-  const res = await Api.chat(text);
+  const res = await Api.chat(text, state.chat.chatId);
 
   if (!res.ok) {
     state.chat.messages.push({ role: 'error', text: '응답을 받지 못했습니다. 잠시 후 다시 시도해주세요.' });
@@ -1528,24 +1651,52 @@ async function sendChatMessage(rawText) {
     return;
   }
   const reply = res.data || {};
+  if (reply.chat_id) state.chat.chatId = reply.chat_id;
   state.chat.messages.push({
-    role: 'reply', text: reply.reply_text || '', llm_used: !!reply.llm_used, chips: reply.chips || [],
+    role: 'reply', text: reply.reply_text || '', llm_used: !!reply.llm_used,
+    chips: reply.chips || [], action: reply.action || null,
   });
   setChatPending(false);
-  refreshRecentDecisions();
+  refreshRecentChats();
   if (reply.action) handleChatAction(reply.action);
+}
+
+/* 사이드바 "최근"에서 고른 대화를 홈 화면 대화 영역으로 불러온다. */
+async function openChat(chatId) {
+  if (!chatId) return;
+  const res = await Api.chatMessages(chatId);
+  if (!res.ok) {
+    state.chat.chatId = null;
+    state.chat.messages = [{ role: 'error', text: '대화를 불러오지 못했습니다.' }];
+  } else {
+    state.chat.chatId = chatId;
+    state.chat.messages = (Array.isArray(res.data) ? res.data : []).map((m) => ({
+      role: m.role === 'user' ? 'user' : 'reply',
+      text: m.text || '',
+      llm_used: !!m.llm_used,
+      chips: m.chips || [],
+      action: m.action || null,
+    }));
+  }
+  state.chat.pending = false;
+  navigateTo('home');
+  renderChatTranscript(true);
+  renderRecentList();
 }
 
 function startNewChat() {
   state.chat.messages = [];
   state.chat.pending = false;
+  state.chat.chatId = null;  // 서버가 첫 메시지에서 새 대화를 만든다
   navigateTo('home');
   renderChatTranscript();
+  renderRecentList();
   setTimeout(() => { const el = document.getElementById('chatInput'); if (el) el.focus(); }, 0);
 }
 
 function handleChatAction(action) {
   if (!action || !action.type) return;
+  if (action.type === 'open_kb') return;  // 제도 안내는 카드로만 보여주고 화면을 옮기지 않는다
   const payload = action.payload || {};
   if (action.type === 'open_view') {
     const view = payload.view || payload.name || payload.target || (typeof payload === 'string' ? payload : null);
@@ -1558,6 +1709,10 @@ function handleChatAction(action) {
 
 async function handleChipClick(chip) {
   if (!chip) return;
+  if (chip.intent === 'faq' && chip.params && chip.params.slug) {
+    openKbPanel(chip.params.slug, chip.params.title || chip.text);
+    return;
+  }
   switch (chip.intent) {
     case 'compare':
       goToCompareWithPrepare(chip.params || {});
@@ -1582,6 +1737,92 @@ function goToCompareWithPrepare(params) {
   state.compare.result = null;
   state.compare.step = 1;
   navigateTo('compare');
+}
+
+/* ---------- 13-2. 제도 안내 패널 (KB) ---------- */
+
+/* 섹션 본문: "- "로 시작하는 줄은 목록으로, 나머지는 문단으로 그린다. */
+function buildKbSectionBody(text) {
+  const nodes = [];
+  const lines = String(text || '').split('\n');
+  let bullets = null;
+  const flush = () => { if (bullets) { nodes.push(bullets); bullets = null; } };
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (!line) { flush(); return; }
+    if (line.startsWith('- ')) {
+      if (!bullets) bullets = h('ul', { class: 'kb-bullets' });
+      bullets.appendChild(h('li', {}, line.slice(2).trim()));
+      return;
+    }
+    flush();
+    nodes.push(h('p', { class: 'kb-para' }, line));
+  });
+  flush();
+  return nodes;
+}
+
+function onKbPanelKeydown(e) {
+  if (e.key === 'Escape') closeKbPanel();
+}
+
+function closeKbPanel() {
+  const panel = document.getElementById('kbPanel');
+  if (!panel) return;
+  panel.classList.add('is-hidden');
+  panel.setAttribute('aria-hidden', 'true');
+  document.removeEventListener('keydown', onKbPanelKeydown);
+  const opener = state.kbOpener;
+  state.kbOpener = null;
+  if (opener && document.contains(opener)) { try { opener.focus(); } catch (_) { /* noop */ } }
+}
+
+async function openKbPanel(slug, title) {
+  const panel = document.getElementById('kbPanel');
+  const body = document.getElementById('kbPanelBody');
+  const titleEl = document.getElementById('kbPanelTitle');
+  if (!panel || !body) return;
+
+  state.kbOpener = document.activeElement && document.activeElement.focus ? document.activeElement : null;
+  panel.classList.remove('is-hidden');
+  panel.setAttribute('aria-hidden', 'false');
+  document.addEventListener('keydown', onKbPanelKeydown);
+  if (titleEl) titleEl.textContent = title || '제도 안내';
+  clearNode(body);
+  body.appendChild(h('p', { class: 'loading-text' }, '불러오는 중...'));
+  const closeBtn = document.getElementById('kbPanelCloseBtn');
+  if (closeBtn) closeBtn.focus();
+
+  const res = await Api.kbDoc(slug);
+  if (panel.classList.contains('is-hidden')) return;
+  clearNode(body);
+  if (!res.ok) {
+    body.appendChild(noticeBox('제도 안내를 불러오지 못했습니다.', { error: true, onRetry: () => openKbPanel(slug, title) }));
+    return;
+  }
+  const doc = res.data || {};
+  if (titleEl) titleEl.textContent = doc.title || title || '제도 안내';
+
+  const metaRow = h('div', { class: 'kb-meta-row' });
+  if (doc.needs_verification) metaRow.appendChild(badge('(확인 필요)', 'badge-estimated'));
+  if (doc.verified_at) metaRow.appendChild(h('span', { class: 'kb-meta-date' }, `확인일 ${doc.verified_at}`));
+  if (metaRow.childNodes.length) body.appendChild(metaRow);
+
+  const sections = doc.sections && typeof doc.sections === 'object' ? doc.sections : {};
+  Object.keys(sections).forEach((heading) => {
+    body.appendChild(h('h3', { class: 'kb-section-title' }, heading));
+    buildKbSectionBody(sections[heading]).forEach((n) => body.appendChild(n));
+  });
+  if (!Object.keys(sections).length) {
+    body.appendChild(h('p', { class: 'empty-text' }, '표시할 내용이 없습니다.'));
+  }
+
+  const sources = kbSourceList(doc.sources, 'kb-source-list kb-source-list-panel');
+  if (sources) {
+    body.appendChild(h('h3', { class: 'kb-section-title' }, '출처'));
+    body.appendChild(sources);
+  }
+  body.appendChild(h('p', { class: 'kb-disclaimer' }, KB_DISCLAIMER));
 }
 
 /* ---------- 14. 사이드바 & 설정 ---------- */
@@ -1621,24 +1862,76 @@ function renderPinnedAction() {
   };
 }
 
+function profileInitial() {
+  const name = state.profile && state.profile.display_name ? String(state.profile.display_name).trim() : '';
+  return name ? Array.from(name)[0] : '?';
+}
+
+/* 상단 바 아바타와 사이드바 계정 카드는 항상 현재 페르소나를 그대로 비춘다. */
+function renderAccountUi() {
+  const name = state.profile && state.profile.display_name ? String(state.profile.display_name) : '';
+  const initial = profileInitial();
+
+  const avatarBtn = document.getElementById('avatarBtn');
+  if (avatarBtn) {
+    avatarBtn.textContent = initial;
+    avatarBtn.setAttribute('title', name || '계정을 선택하세요');
+    avatarBtn.setAttribute('aria-label', name ? `${name} 계정, 계정 선택 열기` : '계정 선택 열기');
+  }
+
+  const accAvatar = document.getElementById('accountAvatar');
+  const accName = document.getElementById('accountName');
+  const accSub = document.getElementById('accountSub');
+  if (accAvatar) accAvatar.textContent = initial;
+  if (accName) accName.textContent = name || '계정을 선택하세요';
+  if (accSub) {
+    accSub.textContent = name ? '이 계정으로 보는 중' : '';
+    accSub.classList.toggle('is-hidden', !name);
+  }
+  const card = document.getElementById('accountCard');
+  if (card) card.classList.toggle('is-empty', !name);
+}
+
+function buildRecentChatItem(chat) {
+  const title = chat.title || '새 대화';
+  const li = h('li', { class: state.chat.chatId === chat.id ? 'is-current' : '' });
+  const btn = h('button', {
+    type: 'button', class: 'recent-open', 'aria-label': `${title} 대화 열기`,
+    onClick: () => openChat(chat.id),
+  });
+  btn.appendChild(h('span', { class: 'recent-label' }, title));
+  const meta = [timeAgo(chat.updated_at || chat.created_at)];
+  if (chat.message_count !== undefined && chat.message_count !== null) meta.push(`${chat.message_count}개`);
+  btn.appendChild(h('span', { class: 'recent-time' }, meta.filter(Boolean).join(' · ')));
+  li.appendChild(btn);
+  li.appendChild(h('button', {
+    type: 'button', class: 'recent-del', 'aria-label': `${title} 대화 삭제`, title: '대화 삭제',
+    onClick: async (e) => {
+      e.stopPropagation();
+      if (!confirm('이 대화를 삭제할까요?')) return;
+      const r = await Api.deleteChat(chat.id);
+      if (!r.ok) return;
+      if (state.chat.chatId === chat.id) {
+        state.chat.chatId = null;
+        state.chat.messages = [];
+        renderChatTranscript();
+      }
+      refreshRecentChats();
+    },
+  }, '×'));
+  return li;
+}
+
 function renderRecentList() {
   const list = document.getElementById('recentList');
   if (!list) return;
   clearNode(list);
-  const items = (state.decisionsRecent || []).slice(0, 5);
+  const items = (state.recentChats || []).slice(0, 8);
   if (!items.length) {
-    list.appendChild(h('li', { class: 'sidebar-recent-empty' }, '결정 기록이 없어요'));
+    list.appendChild(h('li', { class: 'sidebar-recent-empty' }, '대화 기록이 없어요'));
     return;
   }
-  items.forEach((rec) => {
-    const label = DECISION_KIND_LABELS[rec.kind] || rec.kind || '결정';
-    const li = h('li', {});
-    const btn = h('button', { type: 'button', 'aria-label': `${label} 기록 보기`, onClick: () => navigateTo('decisions') });
-    btn.appendChild(h('span', { class: 'recent-label' }, label));
-    btn.appendChild(h('span', { class: 'recent-time' }, timeAgo(rec.created_at)));
-    li.appendChild(btn);
-    list.appendChild(li);
-  });
+  items.forEach((chat) => list.appendChild(buildRecentChatItem(chat)));
 }
 
 async function loadAndSetHome() {
@@ -1648,13 +1941,14 @@ async function loadAndSetHome() {
   setFooterTexts(state.home);
   return res;
 }
-async function refreshRecentDecisions() {
-  const res = await Api.getDecisions(5);
-  state.decisionsRecent = res.ok && Array.isArray(res.data) ? res.data : [];
+async function refreshRecentChats() {
+  const res = await Api.listChats();
+  state.recentChats = res.ok && Array.isArray(res.data) ? res.data : [];
   renderRecentList();
 }
 async function refreshSidebarData() {
-  await Promise.all([loadAndSetHome(), refreshRecentDecisions()]);
+  renderAccountUi();
+  await Promise.all([loadAndSetHome(), refreshRecentChats()]);
 }
 
 function applySidebarCollapsedState() {
@@ -1746,6 +2040,8 @@ async function loadSettingsBody() {
 
 function mountStaticIcons() {
   document.querySelectorAll('[data-icon]').forEach((el) => el.appendChild(icon(el.dataset.icon, 16)));
+  const logoMark = document.getElementById('logoMark');
+  if (logoMark) logoMark.appendChild(donnLogo(28));
   const newChatIcon = document.getElementById('newChatIcon');
   if (newChatIcon) newChatIcon.appendChild(icon('plus', 14));
   const hamburgerBtn = document.getElementById('hamburgerBtn');
@@ -1754,6 +2050,8 @@ function mountStaticIcons() {
   if (collapseBtn) collapseBtn.appendChild(icon('chevronLeft', 18));
   const settingsCloseBtn = document.getElementById('settingsCloseBtn');
   if (settingsCloseBtn) settingsCloseBtn.appendChild(icon('close', 18));
+  const kbCloseBtn = document.getElementById('kbPanelCloseBtn');
+  if (kbCloseBtn) kbCloseBtn.appendChild(icon('close', 18));
 }
 
 function wireGlobalEvents() {
@@ -1766,20 +2064,32 @@ function wireGlobalEvents() {
   document.getElementById('settingsModal').addEventListener('click', (e) => {
     if (e.target.id === 'settingsModal') closeSettingsModal();
   });
+  document.getElementById('kbPanelCloseBtn').addEventListener('click', closeKbPanel);
+  document.getElementById('kbPanel').addEventListener('click', (e) => {
+    if (e.target.id === 'kbPanel') closeKbPanel();
+  });
+  document.getElementById('avatarBtn').addEventListener('click', () => navigateTo('personas'));
+  document.getElementById('accountCard').addEventListener('click', () => navigateTo('personas'));
+  document.getElementById('accountSwitchBtn').addEventListener('click', () => navigateTo('personas'));
   document.getElementById('resourceNav').addEventListener('click', (e) => {
     const a = e.target.closest('a[data-view]');
     if (!a) return;
     e.preventDefault();
     navigateTo(a.getAttribute('data-view'));
   });
-  window.addEventListener('hashchange', renderCurrentView);
+  window.addEventListener('hashchange', () => {
+    syncNavDepth();
+    renderCurrentView();
+  });
 }
 
 async function initApp() {
   mountStaticIcons();
   wireGlobalEvents();
   applySidebarCollapsedState();
+  initNavDepth();
   setFooterTexts(null);
+  renderAccountUi();
 
   renderCurrentView();
 

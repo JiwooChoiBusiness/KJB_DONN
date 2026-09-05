@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DONN 부채 코치</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234F46E5'/%3E%3Cg fill='%23ffffff'%3E%3Cpath d='M8 3.5H20.5a3.5 3.5 0 0 1 0 7H8Z'/%3E%3Cpath d='M8 12.5H18a3.5 3.5 0 0 1 0 7H8Z'/%3E%3Cpath d='M8 21.5H15.5a3.5 3.5 0 0 1 0 7H8Z'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.css">
 <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -15,14 +17,14 @@
     <div class="topbar-left">
       <button type="button" id="hamburgerBtn" class="icon-btn hamburger-btn" aria-label="메뉴 열기" aria-expanded="false" aria-controls="sidebar">
       </button>
-      <span class="logo-mark" aria-hidden="true">D</span>
+      <span class="logo-mark" id="logoMark" aria-hidden="true"></span>
       <div class="wordmark-wrap">
         <span class="wordmark">DONN</span>
         <span class="wordmark-subtitle">부채 코치 PoC</span>
       </div>
     </div>
     <div class="topbar-right">
-      <div class="avatar" aria-hidden="true">나</div>
+      <button type="button" class="avatar" id="avatarBtn" aria-label="계정 선택 열기">?</button>
     </div>
   </header>
 
@@ -30,6 +32,18 @@
     <div id="sidebarBackdrop" class="sidebar-backdrop is-hidden"></div>
 
     <aside class="sidebar" id="sidebar" aria-label="주요 메뉴">
+      <div class="sidebar-account">
+        <div class="sidebar-section-label label">계정 선택 (PoC)</div>
+        <button type="button" class="account-card" id="accountCard" aria-label="계정 선택 화면 열기">
+          <span class="account-avatar" id="accountAvatar" aria-hidden="true">?</span>
+          <span class="account-text">
+            <span class="account-name" id="accountName">계정을 선택하세요</span>
+            <span class="account-sub label" id="accountSub"></span>
+          </span>
+        </button>
+        <button type="button" class="account-switch-btn label" id="accountSwitchBtn">계정 바꾸기</button>
+      </div>
+
       <div class="sidebar-top">
         <button type="button" class="new-chat-btn" id="newChatBtn" aria-label="새 대화 시작">
           <span class="icon-circle icon-circle-accent" id="newChatIcon"></span>
@@ -45,7 +59,6 @@
           <li><a href="#debts" data-view="debts" aria-label="내 부채"><span class="nav-icon" data-icon="wallet"></span><span class="label">내 부채</span></a></li>
           <li><a href="#compare" data-view="compare" aria-label="공시 비교"><span class="nav-icon" data-icon="bars"></span><span class="label">공시 비교</span></a></li>
           <li><a href="#spending" data-view="spending" aria-label="소비 패턴"><span class="nav-icon" data-icon="receipt"></span><span class="label">소비 패턴</span></a></li>
-          <li><a href="#personas" data-view="personas" aria-label="페르소나 테스트"><span class="nav-icon" data-icon="user"></span><span class="label">페르소나 테스트</span></a></li>
           <li><a href="#decisions" data-view="decisions" aria-label="결정 기록"><span class="nav-icon" data-icon="history"></span><span class="label">결정 기록</span></a></li>
         </ul>
 
@@ -86,6 +99,16 @@
     </div>
     <div id="settingsBody" class="modal-body"></div>
   </div>
+</div>
+
+<div id="kbPanel" class="kb-backdrop is-hidden" aria-hidden="true">
+  <aside class="kb-panel" role="dialog" aria-modal="true" aria-labelledby="kbPanelTitle">
+    <div class="kb-panel-header">
+      <h2 id="kbPanelTitle">제도 안내</h2>
+      <button type="button" id="kbPanelCloseBtn" class="icon-btn" aria-label="제도 안내 닫기"></button>
+    </div>
+    <div id="kbPanelBody" class="kb-panel-body"></div>
+  </aside>
 </div>
 
 <noscript>이 페이지는 자바스크립트가 필요합니다.</noscript>

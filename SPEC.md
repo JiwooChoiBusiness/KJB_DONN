@@ -181,7 +181,7 @@ main.py: `FastAPI(title="DONN PoC")`, `GET /` → `web/index.html`, `/static` �
 
 ## 3. 화면 규격 (web/)
 
-- 단일 페이지, 빌드 없음. `index.html`, `app.js`, `styles.css`. 폰트 `system-ui, "Malgun Gothic", sans-serif`. 외부 CDN 의존 없음.
+- 단일 페이지, 빌드 없음. `index.html`, `app.js`, `styles.css`. 글꼴은 Pretendard(jsdelivr CDN, 오프라인이면 system-ui·"Malgun Gothic" 폴백). 그 외 외부 CDN 의존 없음.
 - 레이아웃: 상단 바(좌: 로고 "DONN"과 작은 부제, 우: 원형 아바타 "나"), 좌측 사이드바 250px(배경 #FAFAFA, 우측 1px #E5E7EB, 접기 버튼), 본문 흰색 중앙 정렬 최대 폭 960px.
 - 색: 포인트 #4F46E5, 포인트 연한 배경 #EEF2FF, 텍스트 #111827, 보조 텍스트 #6B7280, 경계 #E5E7EB, 긍정 #059669, 부정 #DC2626, 중립 #6B7280. 카드 radius 16px, 그림자 `0 1px 3px rgba(0,0,0,.06)`. 전송 버튼은 원형 포인트색.
 - 사이드바(2026-09-06 PMO 수정): 맨 위 "계정 선택 (PoC)" 그룹에 현재 페르소나(아바타 이니셜 + 이름 + "이 계정으로 보는 중")와 "계정 바꾸기" 링크(페르소나 화면). 그 아래 `[+ 새 대화]`; "리소스" 그룹: 내 부채, 공시 비교, 소비 패턴, 결정 기록; "고정" 그룹: 이번 달 행동; "최근" 그룹: 현재 페르소나의 대화 목록(`/api/chats`, 클릭 시 대화 로그 로드); 하단: 환경설정. 상단 바 우측 아바타는 현재 페르소나 이름의 첫 글자.
