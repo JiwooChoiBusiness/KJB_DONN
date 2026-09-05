@@ -19,6 +19,9 @@ from app.api.schemas import (ChatCreateRequest,
 )
 from app.core.schedule import build_schedule
 from app.core.scenarios import run_scenarios
+from app.core import lifecycle as lifecycle_core
+from app.core import ratios as ratios_core
+from app.core import retirement as retirement_core
 from app.core import spending as spending_core
 from app.data import policy, products, synthetic
 from app.data.finlife import CRDT_GRADE_LABELS
@@ -37,6 +40,7 @@ from app.models import (
     DecisionRecord,
     HomePayload,
     LenderGroup,
+    LifecycleView,
     LoanSchedule,
     ProductCategory,
     RepayMethod,
@@ -48,6 +52,7 @@ from app.services import actions as actions_service
 from app.services import compare as compare_service
 from app.services import decisions as decisions_service
 from app.services import insights as insights_service
+from app.services import lifecycle as lifecycle_service
 from app.services import session as session_service
 from app.services import spending as spending_service
 
@@ -182,6 +187,21 @@ def get_actions() -> list[ActionCard]:
         raise HTTPException(status_code=404, detail="저장된 프로필이 없습니다.")
     params = policy.load_policy_params()
     return actions_service.list_actions(profile, params, today=date.today())
+
+
+# ---------------------------------------------------------------------------
+# 생애주기 층 (P7)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/lifecycle", response_model=LifecycleView)
+def get_lifecycle() -> LifecycleView:
+    profile = session_service.get_profile()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="저장된 프로필이 없습니다.")
+    params = policy.load_policy_params()
+    thresholds = lifecycle_service.load_thresholds()
+    return lifecycle_service.build_lifecycle_view(profile, params, thresholds, today=date.today())
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +362,10 @@ _CHAT_EXTRACT_SYSTEM = (
 _CHAT_EXTRACT_SCHEMA: dict[str, Any] = {
     "type": "OBJECT",
     "properties": {
-        "intent": {"type": "STRING", "enum": ["compare", "schedule", "scenario", "action", "faq", "spending"]},
+        "intent": {"type": "STRING", "enum": [
+            "compare", "schedule", "scenario", "action", "faq", "spending",
+            "retirement", "saving", "liquidity",
+        ]},
         "category": {"type": "STRING", "enum": ["deposit", "saving", "mortgage", "jeonse", "credit", "policy"]},
         "amount": {"type": "INTEGER"},
         "term_months": {"type": "INTEGER"},
@@ -358,7 +381,10 @@ _CATEGORY_LABELS_KR = {
     "jeonse": "전세자금대출", "credit": "신용대출", "policy": "정책상품",
 }
 
-_VALID_CHAT_INTENTS = {"compare", "schedule", "scenario", "action", "faq", "spending"}
+_VALID_CHAT_INTENTS = {
+    "compare", "schedule", "scenario", "action", "faq", "spending",
+    "retirement", "saving", "liquidity",
+}
 
 
 def _normalize_intent(value: Any) -> str:
@@ -398,6 +424,69 @@ def _ground_numeric_slots(slots: dict[str, Any], text: str) -> dict[str, Any]:
         if literal not in norm_text:
             slots.pop(key, None)
     return slots
+
+
+def _build_lifecycle_chat_reply(
+    intent: str, profile: Optional[UserProfile]
+) -> tuple[str, list[Chip], Optional[dict[str, Any]]]:
+    """P7 생애주기 층: retirement(노후·연금·은퇴)/saving(저축률)/liquidity(비상자금) 의도에
+    코드가 계산한 재무비율·노후자금 격차 수치로 답한다(SPEC 2.7). 문장의 숫자는 전부
+    `app.core.ratios`/`app.core.retirement`가 계산한 값이며 LLM은 관여하지 않는다."""
+    chips = [Chip(id=f"chip-chat-{intent}", text="생애 흐름 보기", tier=1, intent="lifecycle", params={})]
+    action: dict[str, Any] = {"type": "open_view", "payload": {"view": "lifecycle"}}
+
+    if profile is None:
+        reply_text = (
+            "아직 프로필이 없어요. 페르소나를 선택하거나 내 부채 화면에서 정보를 입력하면 "
+            "생애주기 정보를 계산해드릴게요."
+        )
+        return reply_text, [Chip(id="chip-chat-onboarding-lifecycle", text="페르소나 선택하러 가기", tier=1,
+                                  intent="onboarding", params={})], None
+
+    params_policy = policy.load_policy_params()
+
+    if intent == "retirement":
+        projections = retirement_core.retirement_gap_projection(profile, params_policy, today=date.today())
+        base = next((p for p in projections if p.scenario == "기준"), projections[0] if projections else None)
+        if base is None:
+            reply_text = "노후자금 시뮬레이션에 필요한 정보가 부족합니다. 생애 흐름 화면에서 확인해보세요."
+        elif base.shortfall > 0:
+            reply_text = (
+                f"기준 시나리오 기준 은퇴 시점({base.retirement_age}세) 생활비는 월 "
+                f"{base.retirement_living_cost:,}원, 확정소득은 월 {base.guaranteed_income_monthly:,}원으로 "
+                f"월 {base.monthly_gap:,}원이 부족할 것으로 추정됩니다. 필요자금 대비 {base.shortfall:,}원이 "
+                f"모자라 매월 {base.required_monthly_saving:,}원을 추가로 저축하는 방법이 안내됩니다."
+            )
+        else:
+            reply_text = (
+                f"기준 시나리오 기준 은퇴 시점({base.retirement_age}세) 생활비는 월 "
+                f"{base.retirement_living_cost:,}원, 확정소득은 월 {base.guaranteed_income_monthly:,}원으로 "
+                "부족액이 없는 것으로 추정됩니다."
+            )
+        return reply_text, chips, action
+
+    thresholds = lifecycle_service.load_thresholds()
+    schedules = [build_schedule(loan) for loan in profile.loans]
+    stage_result = lifecycle_core.classify_stage(profile, today=date.today())
+    stage_thresholds = lifecycle_core.thresholds_for_stage(thresholds, stage_result.stage)
+    ratios = ratios_core.compute_ratios(profile, schedules, stage_thresholds)
+
+    if intent == "saving":
+        if ratios.saving_rate is None:
+            reply_text = "저축률을 계산할 소득 정보가 없습니다."
+        else:
+            reply_text = ratios.interpretations.get("saving_rate", "")
+            if ratios.flags.get("saving_rate") == "warn":
+                reply_text += " 생애 단계 기준보다 낮아 자동이체 저축 계획을 살펴보는 것이 안내됩니다."
+    else:  # liquidity
+        if ratios.liquidity_months is None:
+            reply_text = "유동성비율을 계산할 자산 정보가 없습니다."
+        else:
+            reply_text = ratios.interpretations.get("liquidity_months", "")
+            if ratios.flags.get("liquidity_months") == "warn":
+                reply_text += " 생애 단계 기준보다 부족해 비상자금을 먼저 채우는 것이 안내됩니다."
+
+    return reply_text, chips, action
 
 
 def _build_chat_reply(message: str) -> tuple[str, list[Chip], Optional[dict[str, Any]], bool]:
@@ -442,6 +531,9 @@ def _build_chat_reply(message: str) -> tuple[str, list[Chip], Optional[dict[str,
     elif intent == "spending":
         reply_text = "소비 패턴 화면에서 합성 거래내역을 확인할 수 있어요."
         action = {"type": "open_view", "payload": {"view": "spending"}}
+
+    elif intent in ("retirement", "saving", "liquidity"):
+        reply_text, chips, action = _build_lifecycle_chat_reply(intent, profile)
 
     elif intent == "action":
         if profile is None:

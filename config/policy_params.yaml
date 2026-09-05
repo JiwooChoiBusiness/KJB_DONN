@@ -141,3 +141,169 @@ params:
     note: >-
       내부 기준. 최소 권장 비상금을 "월 고정지출 x 1개월"로 보는 서비스 내부 휴리스틱(R5 규칙
       참고), 규제 수치가 아니다.
+
+  # -------------------------------------------------------------------------
+  # 생애주기 층(P7): 연금·세제 수치. docs/reference/lifecycle_domain_v1.txt 3.3~3.6절.
+  # 문서 자체가 "교육용 시나리오이며 실제 서비스 적용 시 최신 공식 자료로 재확인해야 한다"고
+  # 명시하므로(문서 0.3절 전제) 전부 needs_verification: true다. app/core/retirement.py의
+  # national_pension_estimate가 national_pension_a_value를 직접 읽어 쓴다. 나머지 항목은
+  # kb/*.md 3개 문서(국민연금·퇴직연금·연금저축/ISA)의 수치와 같은 값을 유지하기 위한
+  # 참고용 단일 출처이며, 화면에서 아직 계산에 직접 쓰지 않는 항목도 이후 확장을 위해 함께 둔다.
+  # -------------------------------------------------------------------------
+  national_pension_a_value:
+    value: 3190000
+    unit: won_per_month
+    valid_from: "2026-01-01"
+    source_url: "https://www.nps.or.kr/comm/quick/getOHAH0011P0.do"
+    source_title: "국민연금공단 예상연금 간단계산(A값 안내, 확인 필요)"
+    verified_at: null
+    needs_verification: true
+    note: >-
+      2026년 A값(수급 전 3년간 전체 가입자 평균소득월액의 평균) 근사치. 문서 3.3절 예시 "약
+      319만원"을 그대로 썼다. 매년 갱신되는 값이라 서비스 시점에 국민연금공단 고시값으로
+      재확인이 필요하다.
+
+  national_pension_premium_rate_pct:
+    value: 9.5
+    unit: pct
+    valid_from: "2026-01-01"
+    source_url: "https://www.nps.or.kr/comm/quick/getOHAH0011P0.do"
+    source_title: "국민연금공단(보험료율 단계적 인상 안내, 확인 필요)"
+    verified_at: null
+    needs_verification: true
+    note: >-
+      2026년 국민연금 보험료율(개인부담 4.75%). 매년 0.5%p씩 올라 2033년 13% 도달 예정(문서
+      3.3절 개발 참고). 계산 엔진은 이 값을 직접 쓰지 않고 화면 안내 문구에만 참고한다.
+
+  national_pension_income_replacement_rate_pct:
+    value: 43
+    unit: pct
+    valid_from: "2026-01-01"
+    source_url: "https://www.nps.or.kr/comm/quick/getOHAH0011P0.do"
+    source_title: "국민연금공단(소득대체율 안내, 확인 필요)"
+    verified_at: null
+    needs_verification: true
+    note: >-
+      2026년 이후 가입기간 소득대체율(문서 3.3절 개발 참고). 가입 연도별로 소득대체율이 달라
+      실제 수급액과 차이가 날 수 있다.
+
+  pension_tax_credit_limit_combined_krw:
+    value: 9000000
+    unit: won_per_year
+    valid_from: "2023-01-01"
+    source_url: "https://www.nts.go.kr/nts/cm/cntnts/cntntsView.do?cntntsId=7875"
+    source_title: "국세청(연금계좌 세액공제 한도 안내, 확인 필요)"
+    verified_at: null
+    needs_verification: true
+    note: >-
+      연금저축계좌+퇴직연금계좌(IRP) 합산 세액공제 한도(연 900만원, 문서 3.5절).
+
+  pension_tax_credit_limit_pension_savings_only_krw:
+    value: 6000000
+    unit: won_per_year
+    valid_from: "2023-01-01"
+    source_url: "https://www.nts.go.kr/nts/cm/cntnts/cntntsView.do?cntntsId=7875"
+    source_title: "국세청(연금계좌 세액공제 한도 안내, 확인 필요)"
+    verified_at: null
+    needs_verification: true
+    note: >-
+      연금저축계좌 단독 세액공제 한도(연 600만원, 문서 3.5절). 이 한도 안의 금액과 퇴직연금
+      납입액을 합해 pension_tax_credit_limit_combined_krw를 넘지 않아야 전액 공제된다.
+
+  pension_tax_credit_rate_standard_pct:
+    value: 16.5
+    unit: pct
+    valid_from: null
+    source_url: "https://www.nts.go.kr/nts/cm/cntnts/cntntsView.do?cntntsId=7875"
+    source_title: "국세청(연금계좌 세액공제율 안내, 확인 필요)"
+    verified_at: null
+    needs_verification: true
+    note: >-
+      총급여 5,500만원(종합소득 4,500만원) 이하 구간의 세액공제율(지방소득세 포함, 문서
+      3.5절). 초과 구간은 pension_tax_credit_rate_high_income_pct(13.2%)를 적용한다.
+
+  pension_tax_credit_rate_high_income_pct:
+    value: 13.2
+    unit: pct
+    valid_from: null
+    source_url: "https://www.nts.go.kr/nts/cm/cntnts/cntntsView.do?cntntsId=7875"
+    source_title: "국세청(연금계좌 세액공제율 안내, 확인 필요)"
+    verified_at: null
+    needs_verification: true
+    note: >-
+      총급여 5,500만원(종합소득 4,500만원) 초과 구간의 세액공제율(지방소득세 포함, 문서 3.5절).
+
+  pension_tax_credit_income_threshold_krw:
+    value: 55000000
+    unit: won_per_year
+    valid_from: null
+    source_url: "https://www.nts.go.kr/nts/cm/cntnts/cntntsView.do?cntntsId=7875"
+    source_title: "국세청(연금계좌 세액공제율 구간 기준, 확인 필요)"
+    verified_at: null
+    needs_verification: true
+    note: >-
+      세액공제율 구간을 가르는 총급여 기준액(종합소득자는 4,500만원, 문서 3.5절).
+
+  isa_annual_limit_krw:
+    value: 20000000
+    unit: won_per_year
+    valid_from: null
+    source_url: "https://www.law.go.kr/LSW/lsLawLinkInfo.do?lsJoLnkSeq=1000928713&chrClsCd=010202"
+    source_title: "국가법령정보센터, 조세특례제한법 제91조의18(ISA 과세특례, 확인 필요)"
+    verified_at: null
+    needs_verification: true
+    note: >-
+      ISA 연간 납입한도(문서 3.6절). 미사용 한도는 다음 해로 이월할 수 있다고 안내된다.
+
+  isa_total_limit_krw:
+    value: 100000000
+    unit: won
+    valid_from: null
+    source_url: "https://www.law.go.kr/LSW/lsLawLinkInfo.do?lsJoLnkSeq=1000928713&chrClsCd=010202"
+    source_title: "국가법령정보센터, 조세특례제한법 제91조의18(ISA 과세특례, 확인 필요)"
+    verified_at: null
+    needs_verification: true
+    note: "ISA 총 납입한도(문서 3.6절)."
+
+  isa_mandatory_years:
+    value: 3
+    unit: years
+    valid_from: null
+    source_url: "https://www.law.go.kr/LSW/lsLawLinkInfo.do?lsJoLnkSeq=1000928713&chrClsCd=010202"
+    source_title: "국가법령정보센터, 조세특례제한법 제91조의18(ISA 과세특례, 확인 필요)"
+    verified_at: null
+    needs_verification: true
+    note: "ISA 의무가입기간(문서 3.6절). 부득이한 사유가 있으면 예외가 있다고 안내된다."
+
+  isa_nontax_limit_general_krw:
+    value: 2000000
+    unit: won
+    valid_from: null
+    source_url: "https://www.nts.go.kr/nts/cm/cntnts/cntntsView.do?cntntsId=7875"
+    source_title: "국세청(ISA 비과세 한도 안내, 확인 필요)"
+    verified_at: null
+    needs_verification: true
+    note: >-
+      ISA 일반형 손익통산 비과세 한도(문서 3.6절). 초과분은
+      isa_separate_tax_rate_pct로 분리과세한다. 2026년 세제개편안은 이 한도 확대를
+      논의 중이나 기준일 현재 확정 법률이 아니다(정부안, 확인 필요).
+
+  isa_nontax_limit_special_krw:
+    value: 4000000
+    unit: won
+    valid_from: null
+    source_url: "https://www.nts.go.kr/nts/cm/cntnts/cntntsView.do?cntntsId=7875"
+    source_title: "국세청(ISA 서민형·농어민형 비과세 한도 안내, 확인 필요)"
+    verified_at: null
+    needs_verification: true
+    note: "ISA 서민형·농어민형 손익통산 비과세 한도(문서 3.6절)."
+
+  isa_separate_tax_rate_pct:
+    value: 9.9
+    unit: pct
+    valid_from: null
+    source_url: "https://www.law.go.kr/LSW/lsLawLinkInfo.do?lsJoLnkSeq=1000928713&chrClsCd=010202"
+    source_title: "국가법령정보센터, 조세특례제한법 제91조의18(ISA 과세특례, 확인 필요)"
+    verified_at: null
+    needs_verification: true
+    note: "ISA 비과세 한도 초과 순이익에 적용하는 분리과세율(지방소득세 포함, 문서 3.6절)."

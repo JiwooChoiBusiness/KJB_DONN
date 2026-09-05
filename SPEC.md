@@ -259,6 +259,117 @@ db.py: 테이블 `spending_features(profile_id PK, features_json, summary_json, 
 만든다. Tier 1 칩 "소비 패턴 보기"(intent=spending)를 추가한다(칩은 기존과 같이 최대 5개 유지).
 `llm_calls`는 항상 0(이 절 전체가 LLM을 호출하지 않는다).
 
+### 2.7 생애주기 층 (P7)
+
+배경: `docs/DONN_LIFECYCLE_PLAN.md`(반영 계획)와 `docs/reference/lifecycle_domain_v1.txt`(PMO
+도메인 지식 문서, 1.5~1.6·2.1~2.5·3.3~3.13·4.3절). 부채 코어 위에 재무비율·생애주기 단계·
+노후자금 시뮬레이션 층을 얹는다. 문서의 "상품 추천"은 전부 "참고 시나리오·행동 카드"로
+바꾼다. 자산·연금 수치는 G3 등급이며 외부 LLM으로 보내지 않는다.
+
+모델(`app/models.py`, append): `PensionAssets{national_pension_months_paid, db_dc_balance,
+irp_pension_savings_balance, isa_balance, expected_national_pension_monthly}`,
+`Assets{liquid, investment, pension: PensionAssets, real_estate}`,
+`Goal{id, kind, label, target_amount, target_date, priority, saved_amount,
+monthly_income_change_pct}`(kind: wedding/childbirth/housing/education/retirement/
+emergency/other), `LifeStage` str-enum 7종(early_career/family_formation/asset_building/
+pre_retirement/retirement_transition/active_retirement/late_retirement, 한글 라벨은
+`LIFE_STAGE_LABELS_KR`), `FinancialRatios{liquidity_months, saving_rate, debt_ratio,
+debt_service_ratio, investment_ratio, total_assets, net_worth, interpretations,
+thresholds, flags}`(flags 값은 ratio별 "ok"|"warn"|"na"), `LifeStageResult{stage, label,
+reasons, priorities, avoid, accounts_note}`, `RetirementProjection{scenario, real_return,
+inflation, years_to_retirement, retirement_age, retirement_living_cost,
+guaranteed_income_monthly, monthly_gap, required_fund_pv, projected_fund_fv, shortfall,
+required_monthly_saving, assumptions}`, `LifecycleView{profile_id, ratios, stage,
+retirement, income_gap_map, net_worth_path, goals, assumptions, disclaimer}`(disclaimer
+기본값은 `LIFECYCLE_DISCLAIMER` = "참고 시나리오이며 특정 상품이나 자산 배분을 권하지
+않습니다."). `UserProfile`에 `assets`, `goals`, `dependents`, `risk_tolerance`,
+`income_type`, `life_stage_override`, `retirement_age`,
+`target_retirement_monthly_expense`(전부 선택, 기본값 있음)를 추가했다.
+
+`config/thresholds.yaml`: 생애 단계 7개 키(LifeStage 값)마다 `min_liquidity_months`,
+`min_saving_rate`, `max_debt_service_ratio`(모든 단계 0.40), `min_coverage_ratio`(50대
+이상 단계만 0.60), `needs_verification`, `note`. 문서 4.3절 예시값이라 전부
+`needs_verification: true`. I/O 리더는 `app.services.lifecycle.load_thresholds()`, 파싱은 순수
+함수 `app.core.lifecycle.parse_thresholds(data)`가 맡는다(SPEC 원칙 7: core는 I/O 금지).
+
+`app/core/ratios.py`: `compute_ratios(profile, schedules, thresholds_for_stage) ->
+FinancialRatios`(문서 1.5/5.2절). 저축률은 `(연소득 - 연지출 - 연원리금상환) / 연소득`으로
+`capacity.py`의 net_monthly 개념과 맞춘다. 분모가 0이거나 `profile.assets`가 없으면 해당
+비율은 None이고 flag는 "na". 임계값이 있고 계산 가능하면 "ok"/"warn", 없으면 "ok".
+
+`app/core/retirement.py`(순수 함수, Decimal 내부 계산 후 정수 원 반올림): `fv_lump`,
+`pv_lump`, `real_rate`, `real_value`, `retirement_living_cost`, `annuity_pv`,
+`fv_monthly_saving`, `required_monthly_saving`, `coverage_ratio`, `withdrawal_rate`,
+`rebalance_amounts(total, target_weights, current_amounts) -> dict[str,int]`(값은
+목표금액-현재금액 이동량), `national_pension_estimate(a_value, b_value, months_paid,
+months_after_2026=None, payout_rate_rule=None) -> int`(문서 3.3절 산식의 교육용 추정,
+연액을 12로 나눠 월액화), `retirement_gap_projection(profile, params, *, today,
+scenarios=None) -> list[RetirementProjection]`(기본 시나리오는
+`DEFAULT_RETIREMENT_SCENARIOS` = 낙관 5%/기준 3%/비관 1% 실질수익률, 물가 2%; 인출 종료
+연령은 `LATE_LIFE_END_AGE`=90 내부 가정; 적립 예상액은 연금성 자산(db_dc+irp+isa)과 현재
+저축여력(capacity.net_monthly)의 은퇴 시점까지 합). 모든 골든 벡터는
+`tests/test_core_retirement.py` 참고(허용 오차 ±0.5%).
+
+`app/core/lifecycle.py`(순수 함수): `parse_thresholds`, `thresholds_for_stage`,
+`classify_stage(profile, *, today) -> LifeStageResult`(나이 구간 기본값을 부양가족·2년 이내
+결혼/출산 목표·`retirement_near` 플래그·무소득+55세 이상·`life_stage_override` 순으로
+보정, 근거 문장을 `reasons`에 누적), `stage_priorities(stage)`(문서 2.3절 표, 계좌 역할은
+제도 일반론 문구만), `glide_path_reference(age)`(문서 2.4절 표를 선형보간한 참고 모델,
+자산배분 권고 아님), `income_gap_map(profile, params, *, today)`(50세 미만이면 None, 이상이면
+문서 2.5절 4구간).
+
+`app/core/rules.py`: R4(비상자금, id 유지)는 `thresholds`가 있으면
+`min_liquidity_months`를, 없으면 기존 `policy.emergency_fund_months`를 쓴다(하위 호환).
+신규 R8(저축률 미달, priority 55), R9(원리금상환비율 초과, priority 25, chip "내 조건으로
+공시 비교" intent compare), R10(50세 이상 노후소득 충당률 미달, priority 35, chip
+"노후자금 시뮬레이션 보기" intent lifecycle)은 `thresholds`가 없으면 평가하지 않는다(하위
+호환). `evaluate_rules`에 키워드 전용 `thresholds: dict | None = None`을 추가했다. R0
+안전모드는 기존처럼 R2·R3를 억제하고, R9도 같은 이유로 억제한다(R4·R8·R10은 정보성 안내라
+안전모드에서도 유지).
+
+`app/core/scenarios.py`: `run_scenarios`에 키워드 전용 `today`, `goals`를 추가했다(둘 다
+없으면 기존과 동일하게 동작, 하위 호환). 목표의 `target_date`가 `today` 기준 시야 안의
+달력월에 들면 그 달에 `target_amount - saved_amount`를 일시 지출로, 그 달부터
+`monthly_income_change_pct`를 소득에 반영한다. `run_lifecycle_projection(profile, params,
+*, today, until_age, scenario_returns) -> list[dict]`는 시나리오별 연 단위
+{scenario, age, year, debt_balance, liquid_assets, investment_assets, pension_assets,
+net_worth} 행을 만든다(자산은 시나리오 실질수익률로 증식, 부채는 현재 연간
+원리금상환액만큼 선형 근사로 감소).
+
+`app/services/lifecycle.py`: `build_lifecycle_view(profile, params, thresholds, *, today)
+-> LifecycleView`가 위 core 함수를 조합한다. `GET /api/lifecycle`(응답
+`LifecycleView`, 프로필 없으면 404)이 이를 호출한다. `assumptions`는 단계 판정 근거,
+사용한 임계값 출처와 확인 필요 여부, 시나리오별 가정, 글라이드패스 고지, 순자산 경로
+근사 설명을 담는다.
+
+`insights.build_home`: 목표가 있으면 목표 진행률 카드(kind="progress", "OO 목표 진행률"
+제목에 "목표 금액의 N% 확보" 프레이밍, chip intent lifecycle)를 만든다. 카드 총량 상한
+3장은 top_action·debt 카드를 우선 채운 뒤 남는 자리에 목표 카드 → 대출 진행 카드 순으로
+채워 지킨다(소비 패턴 카드의 기존 자리 확보 로직과 동일하게 "progress" kind로 취급).
+
+채팅 의도(`app.llm.guardrails.parse_message`와 `app/api/routes.py`의 Gemini 추출
+스키마·정규화 집합에 추가): `retirement`(노후·연금·은퇴 키워드), `saving`(저축률·저축·
+자동이체), `liquidity`(비상금·비상자금). 세 의도 모두 프로필이 있으면
+`app.core.ratios`/`app.core.retirement`가 계산한 실제 수치가 든 문장으로 답하고
+`action: {"type":"open_view","payload":{"view":"lifecycle"}}`을 반환한다.
+
+KB 문서 3편 추가(`kb/national-pension-estimate.md`, `kb/retirement-pension-db-dc-irp.md`,
+`kb/pension-savings-isa-tax.md`, category `pension`/`tax`, 기존 12편과 같은 프런트매터·
+6섹션 형식): 국민연금 예상연금 확인과 산식, 퇴직연금 DB·DC·IRP 개요, 연금저축·ISA 세제
+개요. 수치가 공식 1차 출처로 확인되지 않은 항목은 본문에 "(확인 필요)"를 표시하고 해당
+문서의 `needs_verification: true`를 유지한다. `tests/test_kb.py`의 기대 문서 수는
+12에서 15로 늘었다.
+
+`config/policy_params.yaml`에 연금·세제 수치를 추가했다(전부 `needs_verification: true`,
+출처는 nps.or.kr/nts.go.kr/law.go.kr): `national_pension_a_value`(2026년 A값 근사,
+`national_pension_estimate`가 직접 읽는다), `national_pension_premium_rate_pct`,
+`national_pension_income_replacement_rate_pct`, `pension_tax_credit_limit_combined_krw`,
+`pension_tax_credit_limit_pension_savings_only_krw`, `pension_tax_credit_rate_standard_pct`,
+`pension_tax_credit_rate_high_income_pct`, `pension_tax_credit_income_threshold_krw`,
+`isa_annual_limit_krw`, `isa_total_limit_krw`, `isa_mandatory_years`,
+`isa_nontax_limit_general_krw`, `isa_nontax_limit_special_krw`,
+`isa_separate_tax_rate_pct`.
+
 ## 3. 화면 규격 (web/)
 
 - 단일 페이지, 빌드 없음. `index.html`, `app.js`, `styles.css`. 글꼴은 Pretendard(jsdelivr CDN, 오프라인이면 system-ui·"Malgun Gothic" 폴백). 그 외 외부 CDN 의존 없음.

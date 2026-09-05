@@ -75,11 +75,16 @@ _INTENT_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
     ("schedule", ("상환표", "상환 스케줄", "스케줄", "납입 계획", "납입계획")),
     ("scenario", ("시나리오", "전망")),
     ("spending", ("소비", "지출", "거래내역", "가계부")),
+    ("liquidity", ("비상금", "비상자금")),
+    ("saving", ("저축률", "저축", "자동이체")),
+    ("retirement", ("노후", "연금", "은퇴")),
     ("action", ("무엇부터", "뭐부터", "할 일", "행동 제안", "행동")),
     ("compare", ("비교", "공시", "대환", "갈아타")),
 ]
 
-_VALID_INTENTS = {"compare", "schedule", "scenario", "action", "faq", "spending"}
+# P7 생애주기 층(SPEC 2.7): retirement(노후·연금·은퇴), saving(저축률·자동이체),
+# liquidity(비상금·비상자금)는 app/api/routes.py가 재무비율·노후자금 격차 수치를 채워 답한다.
+_VALID_INTENTS = {"compare", "schedule", "scenario", "action", "faq", "spending", "retirement", "saving", "liquidity"}
 
 # 카테고리 키워드. "신용대출"이 "신용"보다 먼저 오도록(더 구체적인 것을 먼저)
 # 순서를 유지한다.

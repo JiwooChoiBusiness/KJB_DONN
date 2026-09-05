@@ -5,12 +5,16 @@ I/O 없음. app.models와 app.core.schedule(같은 패키지)만 import한다.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Optional
+from typing import Any, Optional
 
-from app.core.schedule import monthly_payment_equal
+from app.core.capacity import compute_capacity
+from app.core.schedule import build_schedule, monthly_payment_equal
 from app.models import (
+    Assets,
     CashflowPoint,
+    Goal,
     Loan,
     PolicyParams,
     RateType,
@@ -138,12 +142,21 @@ def _effective_rate(loan: Loan, scenario: Scenario, stress_add: float) -> float:
     return loan.annual_rate
 
 
+def _goal_month_offset(today: date, target: date) -> int:
+    """today부터 target까지의 개월 수(달력 월 기준, 일자는 무시). target이 today보다 이르면
+    0 이하가 나올 수 있다."""
+    return (target.year - today.year) * 12 + (target.month - today.month)
+
+
 def _run_one(
     scenario: Scenario,
     profile: UserProfile,
     stress_add: float,
     stress_add_needs_verification: bool,
     horizon_months: int,
+    *,
+    today: Optional[date] = None,
+    goals: Optional[list[Goal]] = None,
 ) -> ScenarioResult:
     sims = [
         _LoanSim(loan=loan, rate=_effective_rate(loan, scenario, stress_add), balance=Decimal(loan.balance))
@@ -169,7 +182,22 @@ def _run_one(
         variable_expenses = profile.variable_expenses
 
     expenses = profile.fixed_expenses + variable_expenses
-    income = profile.monthly_income
+    income_base = profile.monthly_income
+    income_multiplier = Decimal(1)
+
+    # 목표(결혼·출산·주택 등)를 월 인덱스로 미리 정리한다. today가 없으면(기존 호출부와의
+    # 하위 호환) 목표를 반영하지 않는다 - 날짜 없이 목표 시점을 계산할 수 없기 때문이다.
+    goal_by_month: dict[int, list[Goal]] = {}
+    if goals and today is not None:
+        for g in goals:
+            idx = _goal_month_offset(today, g.target_date)
+            if 1 <= idx <= horizon_months:
+                goal_by_month.setdefault(idx, []).append(g)
+        if goal_by_month:
+            assumptions.append(
+                "목표(결혼·출산·주택 등)의 목표 금액(저축분 차감)과 목표 시점부터의 소득 변화율을 "
+                "현금흐름에 반영했습니다."
+            )
 
     points: list[CashflowPoint] = []
     cumulative_net = 0
@@ -180,6 +208,12 @@ def _run_one(
         debt_free_month = 1 if horizon_months > 0 else None
 
     for m in range(1, max(horizon_months, 0) + 1):
+        month_goals = goal_by_month.get(m, [])
+        for g in month_goals:
+            income_multiplier *= (Decimal(1) + Decimal(str(g.monthly_income_change_pct)))
+        income = _round_won(Decimal(income_base) * income_multiplier)
+        goal_outflow = sum(max(g.target_amount - g.saved_amount, 0) for g in month_goals)
+
         peeked = [s.peek() for s in sims]  # (interest, scheduled_principal) per loan, extra 제외
 
         required_payment = sum(_round_won(i + p) for (i, p) in peeked)
@@ -202,7 +236,7 @@ def _run_one(
             month_payment += payment
 
         total_balance = sum(_round_won(s.balance) if s.balance > 0 else 0 for s in sims)
-        net = income - month_payment - expenses
+        net = income - month_payment - expenses - goal_outflow
         cumulative_net += net
         total_interest_accum += month_interest
 
@@ -235,9 +269,19 @@ def _run_one(
 
 
 def run_scenarios(
-    profile: UserProfile, params: PolicyParams, *, horizon_months: int = 60
+    profile: UserProfile,
+    params: PolicyParams,
+    *,
+    horizon_months: int = 60,
+    today: Optional[date] = None,
+    goals: Optional[list[Goal]] = None,
 ) -> list[ScenarioResult]:
-    """기준/악화/완화 3개 시나리오의 월별 현금흐름을 계산한다."""
+    """기준/악화/완화 3개 시나리오의 월별 현금흐름을 계산한다.
+
+    `today`와 `goals`는 선택 인자다(기존 호출부와의 하위 호환). 둘 다 넘기면 목표(결혼·출산·
+    주택 등)의 목표일이 시야 안에 들 때 그 달에 (목표금액-저축분)만큼 일시 지출을 반영하고,
+    그 달부터 `monthly_income_change_pct`만큼 소득을 조정한다.
+    """
     stress_param = params.params.get("stress_variable_rate_add_pct")
     if stress_param is None:
         stress_add = 1.0
@@ -247,6 +291,68 @@ def run_scenarios(
         stress_needs_verification = stress_param.needs_verification
 
     return [
-        _run_one(scenario, profile, stress_add, stress_needs_verification, horizon_months)
+        _run_one(
+            scenario, profile, stress_add, stress_needs_verification, horizon_months,
+            today=today, goals=goals,
+        )
         for scenario in (Scenario.BASE, Scenario.ADVERSE, Scenario.FAVORABLE)
     ]
+
+
+def run_lifecycle_projection(
+    profile: UserProfile,
+    params: PolicyParams,
+    *,
+    today: date,
+    until_age: int,
+    scenario_returns: dict[str, float],
+) -> list[dict[str, Any]]:
+    """현재 나이부터 `until_age`까지, 시나리오별 연 단위 순자산 경로를 계산한다.
+
+    자산(유동·투자·연금성 자산)은 시나리오 실질수익률로 증식하고, 매년 저축여력
+    (`capacity.net_monthly` x 12, 음수면 0)을 유동자산에 더한다고 가정한다. 부채 잔액은
+    현재 원리금상환액(`capacity.debt_service` x 12)만큼 매년 선형으로 줄어든다고 근사한다
+    (실제 대출별 상환 스케줄보다 단순화된 참고용 경로 - 이자 감소에 따른 상환 가속을
+    반영하지 않아 실제보다 부채가 더디게 줄어드는 보수적인 근사다).
+
+    결정론: 난수를 쓰지 않고, 날짜는 `today` 인자로만 받는다. 반환값은 시나리오별로 이어붙인
+    평평한 리스트이며 각 행에 "scenario" 키로 어느 시나리오인지 표시한다.
+    """
+    assets = profile.assets or Assets()
+    schedules = [build_schedule(loan) for loan in profile.loans]
+    capacity = compute_capacity(profile, schedules)
+    annual_savings_capacity = max(capacity.net_monthly, 0) * 12
+    annual_debt_service = capacity.debt_service * 12
+
+    age0 = profile.age if profile.age is not None else 40
+    year0 = today.year
+    ages = list(range(age0, until_age + 1))
+
+    rows: list[dict[str, Any]] = []
+    for scenario_name, real_return in scenario_returns.items():
+        liquid = Decimal(assets.liquid)
+        investment = Decimal(assets.investment)
+        pension_fund = Decimal(
+            assets.pension.db_dc_balance + assets.pension.irp_pension_savings_balance + assets.pension.isa_balance
+        )
+        debt_balance = Decimal(sum(l.balance for l in profile.loans))
+        growth = Decimal(1) + Decimal(str(real_return))
+
+        for i, age in enumerate(ages):
+            if i > 0:
+                liquid = liquid * growth + Decimal(annual_savings_capacity)
+                investment = investment * growth
+                pension_fund = pension_fund * growth
+                debt_balance = max(debt_balance - Decimal(annual_debt_service), Decimal(0))
+            net_worth = liquid + investment + pension_fund + Decimal(assets.real_estate) - debt_balance
+            rows.append({
+                "scenario": scenario_name,
+                "age": age,
+                "year": year0 + i,
+                "debt_balance": _round_won(debt_balance),
+                "liquid_assets": _round_won(liquid),
+                "investment_assets": _round_won(investment),
+                "pension_assets": _round_won(pension_fund),
+                "net_worth": _round_won(net_worth),
+            })
+    return rows

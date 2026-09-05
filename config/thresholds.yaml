@@ -1,0 +1,60 @@
+# DONN 생애주기 층(P7) 생애 단계별 재무비율 임계값.
+#
+# 근거: docs/reference/lifecycle_domain_v1.txt 4.3절("재무비율 기반 위험신호 규칙")과
+# 개발 참고("임계값은 페르소나(연령대·소득구간)별로 다르게 설정하는 것을 권장"). 문서는
+# 예시값만 제공하고 공식 출처가 없으므로 모든 항목이 needs_verification: true다(화면에
+# "(확인 필요)" 배지). app/core/lifecycle.py의 parse_thresholds가 이 파일을 파싱한 dict를
+# 순수 함수로 정규화한다(파일 읽기 자체는 app/data/policy.py가 담당).
+#
+# min_liquidity_months: 유동성비율(유동자산/월생활비) 최소 개월. R4(비상자금) 룰이 쓴다.
+# min_saving_rate: 저축률 최소 비율(0~1). R8 룰이 쓴다.
+# max_debt_service_ratio: 원리금상환비율 최대 비율(0~1). 모든 단계 동일(0.40). R9 룰이 쓴다.
+# min_coverage_ratio: 노후소득 충당률 최소 비율(0~1). 50대 이상 단계에만 있다. R10 룰이 쓴다.
+version: "0.1.0"
+stages:
+  early_career:
+    min_liquidity_months: 3
+    min_saving_rate: 0.10
+    max_debt_service_ratio: 0.40
+    needs_verification: true
+    note: "문서 4.3절 예시값(사회초년기)"
+  family_formation:
+    min_liquidity_months: 3
+    min_saving_rate: 0.15
+    max_debt_service_ratio: 0.40
+    needs_verification: true
+    note: "문서 4.3절 예시값(가족형성기)"
+  asset_building:
+    min_liquidity_months: 6
+    min_saving_rate: 0.20
+    max_debt_service_ratio: 0.40
+    needs_verification: true
+    note: "문서 4.3절 예시값(자산축적기)"
+  pre_retirement:
+    min_liquidity_months: 6
+    min_saving_rate: 0.20
+    max_debt_service_ratio: 0.40
+    min_coverage_ratio: 0.60
+    needs_verification: true
+    note: "문서 4.3절 예시값(은퇴준비기, 50대)"
+  retirement_transition:
+    min_liquidity_months: 6
+    min_saving_rate: 0.10
+    max_debt_service_ratio: 0.40
+    min_coverage_ratio: 0.60
+    needs_verification: true
+    note: "문서 4.3절 예시값(은퇴전환기, 55~64세)"
+  active_retirement:
+    min_liquidity_months: 12
+    min_saving_rate: 0
+    max_debt_service_ratio: 0.40
+    min_coverage_ratio: 0.60
+    needs_verification: true
+    note: "문서 4.3절 예시값(활동은퇴기, 65~74세)"
+  late_retirement:
+    min_liquidity_months: 12
+    min_saving_rate: 0
+    max_debt_service_ratio: 0.40
+    min_coverage_ratio: 0.60
+    needs_verification: true
+    note: "문서 4.3절 예시값(후기은퇴기, 75세 이후)"

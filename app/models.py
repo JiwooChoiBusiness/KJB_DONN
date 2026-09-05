@@ -86,6 +86,15 @@ class UserProfile(BaseModel):
     loans: list[Loan] = []
     flags: list[str] = []  # delinquency_signal | income_up | job_changed | self_employed | retirement_near
     notes: Optional[str] = None
+    # ---- 생애주기 층 (P7, SPEC 2.7) ----
+    assets: Optional["Assets"] = None
+    goals: list["Goal"] = []
+    dependents: int = 0
+    risk_tolerance: Optional[Literal["low", "mid", "high"]] = None
+    income_type: Optional[Literal["regular", "variable", "none"]] = None
+    life_stage_override: Optional[str] = None
+    retirement_age: Optional[int] = None
+    target_retirement_monthly_expense: Optional[int] = None
 
 
 # ---------- 계산 결과 ----------
@@ -449,3 +458,112 @@ class SpendingFeatures(BaseModel):
     net_cash_flow_monthly: int = 0
     data_coverage_days: int = 0
     classification_quality: float = 1.0
+
+
+# ---------- 생애주기 층 (P7, SPEC 2.7) ----------
+class PensionAssets(BaseModel):
+    national_pension_months_paid: int = 0
+    db_dc_balance: int = 0
+    irp_pension_savings_balance: int = 0
+    isa_balance: int = 0
+    expected_national_pension_monthly: Optional[int] = None  # 프로필에 직접 입력된 값이 있으면 추정 대신 사용
+
+
+class Assets(BaseModel):
+    liquid: int = 0
+    investment: int = 0
+    pension: PensionAssets = PensionAssets()
+    real_estate: int = 0
+
+
+class Goal(BaseModel):
+    id: str
+    kind: Literal["wedding", "childbirth", "housing", "education", "retirement", "emergency", "other"]
+    label: str
+    target_amount: int
+    target_date: date
+    priority: int = 100
+    saved_amount: int = 0
+    monthly_income_change_pct: float = 0.0  # 목표 시점부터 적용할 월소득 변화율(예: 육아휴직 -0.3)
+
+
+class LifeStage(str, Enum):
+    EARLY_CAREER = "early_career"                    # 사회초년기 (20대)
+    FAMILY_FORMATION = "family_formation"             # 가족형성기 (30대)
+    ASSET_BUILDING = "asset_building"                 # 자산축적기 (40대)
+    PRE_RETIREMENT = "pre_retirement"                 # 은퇴준비기 (50~54세)
+    RETIREMENT_TRANSITION = "retirement_transition"   # 은퇴전환기 (55~64세)
+    ACTIVE_RETIREMENT = "active_retirement"           # 활동은퇴기 (65~74세)
+    LATE_RETIREMENT = "late_retirement"               # 후기은퇴기 (75세 이후)
+
+
+LIFE_STAGE_LABELS_KR: dict[LifeStage, str] = {
+    LifeStage.EARLY_CAREER: "사회초년기",
+    LifeStage.FAMILY_FORMATION: "가족형성기",
+    LifeStage.ASSET_BUILDING: "자산축적기",
+    LifeStage.PRE_RETIREMENT: "은퇴준비기",
+    LifeStage.RETIREMENT_TRANSITION: "은퇴전환기",
+    LifeStage.ACTIVE_RETIREMENT: "활동은퇴기",
+    LifeStage.LATE_RETIREMENT: "후기은퇴기",
+}
+
+
+class FinancialRatios(BaseModel):
+    """문서 1.5/5.2 핵심 재무비율 5종. 분모가 0이거나 자산 정보가 없으면 해당 값은 None이고
+    flags에 "na"가 표시된다(경고 없음, 계산 불가와 경고를 구분)."""
+
+    liquidity_months: Optional[float] = None
+    saving_rate: Optional[float] = None
+    debt_ratio: Optional[float] = None
+    debt_service_ratio: Optional[float] = None
+    investment_ratio: Optional[float] = None
+    total_assets: int = 0
+    net_worth: int = 0
+    interpretations: dict[str, str] = {}
+    thresholds: dict[str, float] = {}
+    flags: dict[str, str] = {}  # "ok" | "warn" | "na" per ratio
+
+
+class LifeStageResult(BaseModel):
+    stage: LifeStage
+    label: str
+    reasons: list[str] = []
+    priorities: list[str] = []
+    avoid: list[str] = []
+    accounts_note: str = ""
+
+
+class RetirementProjection(BaseModel):
+    """시나리오(낙관/기준/비관) 1건의 노후자금 격차 시뮬레이션 결과(문서 3.7~3.11)."""
+
+    scenario: str
+    real_return: float
+    inflation: float
+    years_to_retirement: int
+    retirement_age: int
+    retirement_living_cost: int
+    guaranteed_income_monthly: int
+    monthly_gap: int
+    required_fund_pv: int
+    projected_fund_fv: int
+    shortfall: int  # required_fund_pv - projected_fund_fv. 양수면 부족, 음수면 여유
+    required_monthly_saving: int  # shortfall을 닫기 위한 추가 월 저축액(여유면 0)
+    assumptions: list[str] = []
+
+
+LIFECYCLE_DISCLAIMER = "참고 시나리오이며 특정 상품이나 자산 배분을 권하지 않습니다."
+
+
+class LifecycleView(BaseModel):
+    profile_id: str
+    ratios: FinancialRatios
+    stage: LifeStageResult
+    retirement: list[RetirementProjection]
+    income_gap_map: Optional[list[dict[str, Any]]] = None
+    net_worth_path: list[dict[str, Any]] = []
+    goals: list[dict[str, Any]] = []
+    assumptions: list[str] = []
+    disclaimer: str = LIFECYCLE_DISCLAIMER
+
+
+UserProfile.model_rebuild()

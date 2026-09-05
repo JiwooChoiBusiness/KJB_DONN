@@ -28,9 +28,12 @@ from datetime import date, timedelta
 
 from app.data.finlife import CRDT_GRADE_LABELS
 from app.models import (
+    Assets,
+    Goal,
     LenderGroup,
     Loan,
     LoanType,
+    PensionAssets,
     RateType,
     RepayMethod,
     Transaction,
@@ -57,6 +60,22 @@ PERSONAS: list[UserProfile] = [
             "사회초년생 마케터, 서울 월세(고정지출에 월세 65만원 포함). "
             "신용점수(자가신고) 790, 연체 없음. 비상금 목표 50만원."
         ),
+        assets=Assets(
+            liquid=200_000, investment=800_000,
+            pension=PensionAssets(
+                national_pension_months_paid=60, db_dc_balance=3_000_000,
+                irp_pension_savings_balance=500_000, isa_balance=2_000_000,
+            ),
+        ),
+        goals=[
+            Goal(id="P1-G1", kind="emergency", label="비상자금", target_amount=500_000,
+                 target_date=date(2027, 3, 6), saved_amount=200_000),
+        ],
+        dependents=0,
+        risk_tolerance="mid",
+        income_type="regular",
+        retirement_age=65,
+        target_retirement_monthly_expense=1_600_000,
         loans=[
             Loan(
                 id="P1-L1", name="학자금대출(한국장학재단)", loan_type=LoanType.STUDENT,
@@ -99,6 +118,22 @@ PERSONAS: list[UserProfile] = [
             "맞벌이, 경기 아파트. 배우자 소득 구간 250~300만원(구간값, 개별 저장하지 않음). "
             "최근 승진으로 연봉 12% 상승."
         ),
+        assets=Assets(
+            liquid=8_000_000, investment=20_000_000, real_estate=500_000_000,
+            pension=PensionAssets(
+                national_pension_months_paid=156, db_dc_balance=45_000_000,
+                irp_pension_savings_balance=5_000_000, isa_balance=10_000_000,
+            ),
+        ),
+        goals=[
+            Goal(id="P2-G1", kind="emergency", label="예비 비상자금 확대", target_amount=15_000_000,
+                 target_date=date(2028, 3, 1), saved_amount=8_000_000),
+        ],
+        dependents=0,
+        risk_tolerance="mid",
+        income_type="regular",
+        retirement_age=65,
+        target_retirement_monthly_expense=2_200_000,
         loans=[
             Loan(
                 id="P2-L1", name="주택담보대출(혼합형, 2028-09 변동 전환 예정)",
@@ -137,6 +172,19 @@ PERSONAS: list[UserProfile] = [
             "부산 카페 운영 개인사업자. 월 매출 1,800만원, 순수익 250~400만원 변동(최저 구간을 "
             "monthly_income 기준값으로 사용). 다중채무 돌려막기 중이나 연체는 없음. 불면 호소."
         ),
+        assets=Assets(
+            liquid=0, investment=0,
+            pension=PensionAssets(national_pension_months_paid=150),
+        ),
+        goals=[
+            Goal(id="P3-G1", kind="emergency", label="비상자금", target_amount=3_000_000,
+                 target_date=date(2027, 6, 1), saved_amount=0),
+        ],
+        dependents=0,
+        risk_tolerance="low",
+        income_type="variable",
+        retirement_age=65,
+        target_retirement_monthly_expense=2_300_000,
         loans=[
             Loan(
                 id="P3-L1", name="보증부 사업자대출", loan_type=LoanType.OTHER,
@@ -180,6 +228,24 @@ PERSONAS: list[UserProfile] = [
             "파트너 소득 구간 250~300만원, 파트너 학자금대출 구간 500만~1,000만원은 제3자 정보라 "
             "개별 Loan으로 저장하지 않고 가구 합산 구간으로만 참고한다."
         ),
+        assets=Assets(
+            liquid=5_000_000, investment=10_000_000,
+            pension=PensionAssets(
+                national_pension_months_paid=84, db_dc_balance=25_000_000,
+                irp_pension_savings_balance=3_000_000, isa_balance=5_000_000,
+            ),
+        ),
+        goals=[
+            Goal(id="P4-G1", kind="wedding", label="결혼 비용", target_amount=30_000_000,
+                 target_date=date(2027, 5, 9), saved_amount=10_000_000),
+            Goal(id="P4-G2", kind="housing", label="신혼 전세자금", target_amount=350_000_000,
+                 target_date=date(2027, 5, 9), saved_amount=50_000_000),
+        ],
+        dependents=0,
+        risk_tolerance="mid",
+        income_type="regular",
+        retirement_age=65,
+        target_retirement_monthly_expense=1_900_000,
         loans=[
             Loan(
                 id="P4-L1", name="전세자금대출", loan_type=LoanType.JEONSE,
@@ -210,6 +276,19 @@ PERSONAS: list[UserProfile] = [
             "프리랜서 영상편집, 소득 불규칙(월 80~350만원, 평균 190만원). 카드대금 12일 연체, "
             "추심 연락 시작. 통신비 2개월 미납(Loan으로 저장하지 않음). 안전모드(연체 30일 이하) 대상."
         ),
+        assets=Assets(
+            liquid=0, investment=0,
+            pension=PensionAssets(national_pension_months_paid=18),
+        ),
+        goals=[
+            Goal(id="P5-G1", kind="emergency", label="비상자금", target_amount=1_000_000,
+                 target_date=date(2027, 9, 1), saved_amount=0),
+        ],
+        dependents=0,
+        risk_tolerance="low",
+        income_type="variable",
+        retirement_age=65,
+        target_retirement_monthly_expense=1_200_000,
         loans=[
             Loan(
                 id="P5-L1", name="카드대금(연체)", loan_type=LoanType.CARD_LOAN,
@@ -241,6 +320,22 @@ PERSONAS: list[UserProfile] = [
             "예상 1.8억원, 국민연금 63세 개시 예정. 자녀 등록금 연 900만원 x 2년 잔여(고정지출에 "
             "월 평균으로 반영). \"빚 남기고 은퇴하는 게 창피하다\"는 정서적 부담 호소."
         ),
+        assets=Assets(
+            liquid=10_000_000, investment=15_000_000, real_estate=350_000_000,
+            pension=PensionAssets(
+                national_pension_months_paid=300, db_dc_balance=180_000_000,
+                irp_pension_savings_balance=15_000_000, isa_balance=8_000_000,
+            ),
+        ),
+        goals=[
+            Goal(id="P6-G1", kind="education", label="자녀 등록금", target_amount=18_000_000,
+                 target_date=date(2028, 2, 28), saved_amount=0),
+        ],
+        dependents=1,
+        risk_tolerance="low",
+        income_type="regular",
+        retirement_age=55,
+        target_retirement_monthly_expense=2_800_000,
         loans=[
             Loan(
                 id="P6-L1", name="주택담보대출", loan_type=LoanType.MORTGAGE,
@@ -271,6 +366,19 @@ PERSONAS: list[UserProfile] = [
             "계약직, 연체 45일차. 추심 연락 시작, 불안·불면 호소. 안전모드(연체 31~89일, "
             "사전채무조정 단계) 대상."
         ),
+        assets=Assets(
+            liquid=0, investment=0,
+            pension=PensionAssets(national_pension_months_paid=60),
+        ),
+        goals=[
+            Goal(id="P7-G1", kind="emergency", label="비상자금", target_amount=2_000_000,
+                 target_date=date(2027, 12, 1), saved_amount=0),
+        ],
+        dependents=0,
+        risk_tolerance="low",
+        income_type="regular",
+        retirement_age=65,
+        target_retirement_monthly_expense=1_300_000,
         loans=[
             Loan(
                 id="P7-L1", name="은행 신용대출", loan_type=LoanType.CREDIT,
@@ -307,6 +415,16 @@ PERSONAS: list[UserProfile] = [
             "대학생·아르바이트. 부모님 모르게 해결하고 싶어함. 통신비 2개월 연체(Loan으로 "
             "저장하지 않음). 취약 청년 보호 대상."
         ),
+        assets=Assets(liquid=0, investment=0, pension=PensionAssets(national_pension_months_paid=0)),
+        goals=[
+            Goal(id="P8-G1", kind="emergency", label="비상자금", target_amount=500_000,
+                 target_date=date(2027, 8, 1), saved_amount=0),
+        ],
+        dependents=0,
+        risk_tolerance="low",
+        income_type="variable",
+        retirement_age=65,
+        target_retirement_monthly_expense=700_000,
         loans=[
             Loan(
                 id="P8-L1", name="카드 리볼빙", loan_type=LoanType.CARD_LOAN,

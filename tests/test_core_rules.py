@@ -9,8 +9,10 @@ from app.core.capacity import compute_capacity
 from app.core.rules import evaluate_rules
 from app.core.schedule import build_schedule
 from app.models import (
+    Assets,
     CapacityBand,
     Loan,
+    PensionAssets,
     PolicyParam,
     PolicyParams,
     RepayMethod,
@@ -463,3 +465,151 @@ def test_all_action_card_numbers_are_present_and_no_em_dash():
         assert "—" not in card.summary
         assert "추천" not in card.title
         assert "추천" not in card.summary
+
+
+# ---------------------------------------------------------------------------
+# R7(비상자금, 기존 R4 id 유지)~R10 생애주기 층(P7). thresholds 인자가 없으면(위 테스트들
+# 전부) 하위 호환으로 R8~R10은 평가되지 않고 R4는 policy 기준으로만 동작해야 한다.
+# ---------------------------------------------------------------------------
+
+STAGE_THRESHOLDS = {
+    "min_liquidity_months": 6.0,
+    "min_saving_rate": 0.20,
+    "max_debt_service_ratio": 0.40,
+    "min_coverage_ratio": 0.60,
+    "needs_verification": True,
+    "note": "테스트 임계값",
+}
+
+
+def test_r4_uses_stage_threshold_months_when_thresholds_given():
+    """thresholds가 있으면 emergency_fund_months(policy) 대신 min_liquidity_months(생애
+    단계)를 개월 기준으로 쓴다. 기준이 6개월로 policy 기본값(1개월)보다 커서, policy만 쓸 때는
+    통과했을 비상금이 thresholds를 쓰면 부족으로 판정되어야 한다."""
+    profile = make_profile([], fixed_expenses=1_000_000, emergency_fund=2_000_000)  # policy 1개월(100만원)은 충족
+    params = make_params(emergency_fund_months=1)
+    cap = compute_capacity(profile, [])
+
+    cards_without_thresholds = evaluate_rules(profile, [], cap, params, today=TODAY)
+    assert not any(c.rule_id == "R4" for c in cards_without_thresholds)
+
+    cards_with_thresholds = evaluate_rules(profile, [], cap, params, today=TODAY, thresholds=STAGE_THRESHOLDS)
+    r4 = next(c for c in cards_with_thresholds if c.rule_id == "R4")
+    assert r4.numbers["target_emergency_fund"] == 1_000_000 * 6
+    assert "thresholds" in r4.assumptions[0]
+
+
+def test_r8_fires_when_saving_rate_below_stage_minimum():
+    profile = make_profile(
+        [], monthly_income=3_000_000, fixed_expenses=2_500_000, variable_expenses=400_000,
+    )
+    params = make_params()
+    cap = compute_capacity(profile, [])
+    assert not any(c.rule_id == "R8" for c in evaluate_rules(profile, [], cap, params, today=TODAY))
+
+    cards = evaluate_rules(profile, [], cap, params, today=TODAY, thresholds=STAGE_THRESHOLDS)
+    r8 = next(c for c in cards if c.rule_id == "R8")
+    assert r8.priority == 55
+    assert r8.numbers["saving_rate"] < STAGE_THRESHOLDS["min_saving_rate"]
+    assert r8.chip is None
+
+
+def test_r8_absent_when_saving_rate_meets_minimum():
+    profile = make_profile([], monthly_income=5_000_000, fixed_expenses=1_000_000, variable_expenses=500_000)
+    params = make_params()
+    cap = compute_capacity(profile, [])
+    cards = evaluate_rules(profile, [], cap, params, today=TODAY, thresholds=STAGE_THRESHOLDS)
+    assert not any(c.rule_id == "R8" for c in cards)
+
+
+def test_r9_fires_when_dsr_above_stage_max_and_suppressed_without_thresholds():
+    loans = [make_loan(id="r9-1", annual_rate=9.0, remaining_months=24, balance=27_000_000, principal=27_000_000)]
+    profile = make_profile(
+        loans, monthly_income=3_000_000, fixed_expenses=1_200_000, variable_expenses=300_000,
+        emergency_fund=5_000_000,
+    )
+    params = make_params()
+    cap = compute_capacity(profile, build_schedules(loans))
+    assert cap.debt_service_ratio > 0.40
+    assert cap.band != CapacityBand.NEGATIVE and cap.debt_service_ratio < 0.7  # R0 안전모드는 안 걸림
+
+    cards_without = evaluate_rules(profile, build_schedules(loans), cap, params, today=TODAY)
+    assert not any(c.rule_id == "R9" for c in cards_without)
+
+    cards = evaluate_rules(profile, build_schedules(loans), cap, params, today=TODAY, thresholds=STAGE_THRESHOLDS)
+    r9 = next(c for c in cards if c.rule_id == "R9")
+    assert r9.priority == 25
+    assert r9.chip is not None
+    assert r9.chip.intent == "compare"
+    assert r9.chip.text == "내 조건으로 공시 비교"
+
+
+def test_r9_suppressed_in_safe_mode():
+    loans = [make_loan(id="r9-2", annual_rate=9.0, remaining_months=24, balance=27_000_000, principal=27_000_000)]
+    profile = make_profile(
+        loans, monthly_income=3_000_000, fixed_expenses=1_200_000, variable_expenses=300_000,
+        emergency_fund=5_000_000, flags=["delinquency_signal"],
+    )
+    params = make_params()
+    cap = compute_capacity(profile, build_schedules(loans))
+    cards = evaluate_rules(profile, build_schedules(loans), cap, params, today=TODAY, thresholds=STAGE_THRESHOLDS)
+    assert any(c.rule_id == "R0" for c in cards)
+    assert not any(c.rule_id == "R9" for c in cards)
+
+
+def test_r10_fires_for_age_50plus_below_coverage_minimum():
+    profile = make_profile(
+        [], age=55, monthly_income=4_000_000, fixed_expenses=2_500_000, variable_expenses=500_000,
+        assets=Assets(pension=PensionAssets(national_pension_months_paid=120)),
+    )
+    params = make_params(national_pension_a_value=3_190_000)
+    cap = compute_capacity(profile, [])
+    assert not any(c.rule_id == "R10" for c in evaluate_rules(profile, [], cap, params, today=TODAY))
+
+    cards = evaluate_rules(profile, [], cap, params, today=TODAY, thresholds=STAGE_THRESHOLDS)
+    r10 = next(c for c in cards if c.rule_id == "R10")
+    assert r10.priority == 35
+    assert r10.numbers["coverage_ratio"] < STAGE_THRESHOLDS["min_coverage_ratio"]
+    assert r10.chip.intent == "lifecycle"
+    assert r10.chip.text == "노후자금 시뮬레이션 보기"
+
+
+def test_r10_absent_under_age_50():
+    profile = make_profile(
+        [], age=45, monthly_income=4_000_000, fixed_expenses=2_500_000, variable_expenses=500_000,
+        assets=Assets(pension=PensionAssets(national_pension_months_paid=120)),
+    )
+    params = make_params(national_pension_a_value=3_190_000)
+    cap = compute_capacity(profile, [])
+    cards = evaluate_rules(profile, [], cap, params, today=TODAY, thresholds=STAGE_THRESHOLDS)
+    assert not any(c.rule_id == "R10" for c in cards)
+
+
+def test_r10_absent_when_expected_national_pension_covers_expense():
+    profile = make_profile(
+        [], age=60, monthly_income=4_000_000, fixed_expenses=1_000_000, variable_expenses=500_000,
+        assets=Assets(pension=PensionAssets(expected_national_pension_monthly=2_000_000)),
+    )
+    params = make_params(national_pension_a_value=3_190_000)
+    cap = compute_capacity(profile, [])
+    cards = evaluate_rules(profile, [], cap, params, today=TODAY, thresholds=STAGE_THRESHOLDS)
+    assert not any(c.rule_id == "R10" for c in cards)
+
+
+def test_r0_suppression_of_r2_r3_r9_unchanged_when_thresholds_passed():
+    """R0 안전모드일 때 R2(추가상환)·R3(대환)·R9(원리금상환비율 공시비교)는 thresholds를
+    넘겨도 여전히 생성되지 않아야 한다(기존 R0 억제 규칙은 그대로, R4/R8/R10처럼 정보성
+    안내는 안전모드에서도 계속 보여준다는 설계는 유지). 이 픽스처는 R0 조건(연체 신호)과
+    동시에 R9 조건(DSR > 40%)도 만족하도록 만들어 억제가 실제로 작동하는지 확인한다."""
+    loans = [
+        make_loan(id="a1", annual_rate=9.0, remaining_months=24, balance=27_000_000, principal=27_000_000),
+    ]
+    profile = make_profile(
+        loans, monthly_income=3_000_000, fixed_expenses=1_200_000, variable_expenses=300_000,
+        emergency_fund=5_000_000, flags=["delinquency_signal"],
+    )
+    params = make_params(rate_cut_request_min_rate=6.0, refi_rate_gap_min_pct=1.0, emergency_fund_months=1)
+    cap = compute_capacity(profile, build_schedules(loans))
+    cards = evaluate_rules(profile, build_schedules(loans), cap, params, today=TODAY, thresholds=STAGE_THRESHOLDS)
+    assert any(c.rule_id == "R0" and c.safe_mode for c in cards)
+    assert not any(c.rule_id in ("R2", "R3", "R9") for c in cards)

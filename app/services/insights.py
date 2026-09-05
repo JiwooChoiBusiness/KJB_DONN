@@ -27,6 +27,11 @@ from app.services.actions import list_actions
 from app.services.compare import LOAN_TYPE_TO_CATEGORY
 from app.services import spending as spending_service
 
+_GOAL_KIND_LABELS_KR: dict[str, str] = {
+    "wedding": "결혼 자금", "childbirth": "출산·육아 자금", "housing": "주거 자금",
+    "education": "교육 자금", "retirement": "노후 자금", "emergency": "비상자금", "other": "목표 자금",
+}
+
 _LOAN_TYPE_LABELS_KR: dict[str, str] = {
     "credit": "신용대출",
     "mortgage": "주택담보대출",
@@ -230,6 +235,34 @@ def _progress_card(profile: UserProfile, schedules: list[LoanSchedule]) -> Optio
     )
 
 
+def _goal_progress_card(profile: UserProfile) -> Optional[InsightCard]:
+    """가장 우선순위가 높은(priority 오름차순, 동률이면 target_date, id 순) 목표의 저축
+    진행률을 "목표 금액의 N% 확보" 프레이밍으로 보여준다(문서 4.5절, 손실 경고 대신 진행률).
+    kind="progress"로 둬서 소비 패턴 카드의 자리 확보 로직(진행 카드부터 제거)과 같은
+    방식으로 카드 총량 상한(3장)을 지킨다."""
+    if not profile.goals:
+        return None
+    goal = sorted(profile.goals, key=lambda g: (g.priority, g.target_date, g.id))[0]
+    if goal.target_amount <= 0:
+        return None
+    pct = min(round(goal.saved_amount / goal.target_amount * 100), 100)
+    label = _GOAL_KIND_LABELS_KR.get(goal.kind, "목표 자금")
+    body = (
+        f"목표 {label}의 {pct}% 확보({goal.saved_amount:,}원 / {goal.target_amount:,}원)."
+    )
+    return InsightCard(
+        id=f"card-goal-{goal.id}",
+        kind="progress",
+        tone="positive" if pct >= 50 else "neutral",
+        title=f"{goal.label} 목표 진행률",
+        body=body,
+        evidence={"목표 금액": f"{goal.target_amount:,}원", "모은 금액": f"{goal.saved_amount:,}원", "진행률": f"{pct}%"},
+        chip=Chip(id="chip-goal-lifecycle", text="생애 흐름 보기", tier=1, intent="lifecycle", params={}),
+        source_rule="goal_progress",
+        explain="가장 우선순위가 높은 목표(Goal.priority, target_date 순)의 저축 진행률을 계산했습니다.",
+    )
+
+
 def _derive_tier1_chips(profile: UserProfile, top_action) -> list[Chip]:
     chips: list[Chip] = []
     seen_ids: set[str] = set()
@@ -272,10 +305,10 @@ def build_home(
     action_cards = list_actions(profile, params, today=today)
     top_action = action_cards[0] if action_cards else None
 
-    cards: list[InsightCard] = []
+    base_cards: list[InsightCard] = []
     if top_action is not None:
         tone = "negative" if (top_action.safe_mode or top_action.rule_id in _NEGATIVE_RULES) else "neutral"
-        cards.append(InsightCard(
+        base_cards.append(InsightCard(
             id=f"card-action-{top_action.id}",
             kind="action",
             tone=tone,
@@ -287,11 +320,20 @@ def build_home(
             explain=f"{top_action.rule_id} 규칙이 대출 정보와 이번 달 여력({capacity.band.value})을 근거로 판단했습니다.",
         ))
 
-    cards.append(_debt_summary_card(profile, schedules))
+    base_cards.append(_debt_summary_card(profile, schedules))
 
+    # 목표 진행률 카드(P7)가 대출 진행 카드보다 우선한다: 자리가 하나뿐이면 목표 카드를 먼저
+    # 채운다(둘 다 kind="progress"라 아래 소비 패턴 자리 확보 로직도 그대로 적용된다).
+    optional_cards: list[InsightCard] = []
+    goal_card = _goal_progress_card(profile)
+    if goal_card is not None:
+        optional_cards.append(goal_card)
     progress_card = _progress_card(profile, schedules)
     if progress_card is not None:
-        cards.append(progress_card)
+        optional_cards.append(progress_card)
+
+    room = 3 - len(base_cards)
+    cards: list[InsightCard] = base_cards + optional_cards[: max(room, 0)]
 
     # 균형 규칙: negative 톤만 있으면 neutral/positive 카드 1장을 추가한다.
     if cards and all(c.tone == "negative" for c in cards):

@@ -1,8 +1,9 @@
 """kb/*.md 제도 안내 문서와 app/kb/search.py 검색 모듈 테스트.
 
-12개 문서가 정해진 프런트매터·섹션 형식을 지키는지, 금지된 민간 금융회사명이나
-em dash가 없는지, 결정적 키워드 검색이 기대한 문서를 상위로 올리는지, 관계없는
-질문에는 답을 만들지 않는지를 확인한다. 임베딩이나 LLM 호출은 쓰지 않는다.
+15개 문서(P7 생애주기 층에서 추가한 연금·세제 문서 3편 포함)가 정해진 프런트매터·섹션
+형식을 지키는지, 금지된 민간 금융회사명이나 em dash가 없는지, 결정적 키워드 검색이
+기대한 문서를 상위로 올리는지, 관계없는 질문에는 답을 만들지 않는지를 확인한다.
+임베딩이나 LLM 호출은 쓰지 않는다.
 """
 from __future__ import annotations
 
@@ -27,6 +28,10 @@ EXPECTED_SLUGS = {
     "illegal-lending-response",
     "student-loan-repayment",
     "consumer-rights",
+    # P7 생애주기 층: 연금·세제 안내 3편
+    "national-pension-estimate",
+    "retirement-pension-db-dc-irp",
+    "pension-savings-isa-tax",
 }
 
 ALLOWED_CATEGORIES = {
@@ -41,6 +46,8 @@ ALLOWED_CATEGORIES = {
     "credit",
     "student",
     "consumer",
+    "pension",
+    "tax",
 }
 
 # 국내 주요 민간 은행·카드·저축은행·캐피탈·보험사 이름(20개 이상). kb 문서 어디에도
@@ -80,11 +87,11 @@ BANNED_PRIVATE_NAMES = [
 
 
 def _kb_files() -> list[Path]:
-    """12개 제도 안내 문서 파일만 반환한다(kb/README.md는 사람이 읽는 안내 파일이라 제외).
+    """15개 제도 안내 문서 파일만 반환한다(kb/README.md는 사람이 읽는 안내 파일이라 제외).
 
     README.md는 이 디렉터리의 형식과 규칙을 '설명'하는 문서라서, 예를 들어 em dash를
     쓰지 말라는 규칙을 적으면서 em dash 글자 자체를 인용해야 한다(CLAUDE.md가 같은
-    규칙을 설명할 때도 마찬가지다). 그래서 콘텐츠 규칙 테스트는 실제 12개 문서만 본다.
+    규칙을 설명할 때도 마찬가지다). 그래서 콘텐츠 규칙 테스트는 실제 15개 문서만 본다.
     """
     return sorted(p for p in KB_DIR.glob("*.md") if p.name.lower() != "readme.md")
 
@@ -101,8 +108,8 @@ def docs() -> list[KbDoc]:
 # ---------------------------------------------------------------------------
 
 
-def test_exactly_twelve_docs_with_expected_slugs(docs: list[KbDoc]) -> None:
-    assert len(docs) == 12
+def test_exactly_fifteen_docs_with_expected_slugs(docs: list[KbDoc]) -> None:
+    assert len(docs) == 15
     assert {d.slug for d in docs} == EXPECTED_SLUGS
 
 
@@ -133,7 +140,7 @@ def test_all_six_section_headings_present(docs: list[KbDoc]) -> None:
 
 def test_line_count_between_60_and_120() -> None:
     files = _kb_files()
-    assert len(files) == 12
+    assert len(files) == 15
     for path in files:
         n_lines = path.read_text(encoding="utf-8").count("\n") + 1
         assert 60 <= n_lines <= 120, f"{path.name}: {n_lines}줄 (60~120 범위를 벗어남)"
@@ -191,6 +198,21 @@ def test_search_debt_adjustment_top_hit(docs: list[KbDoc]) -> None:
 def test_search_prepayment_fee_top_hit(docs: list[KbDoc]) -> None:
     hits = search("중도상환수수료", docs=docs)
     assert hits and hits[0].slug == "prepayment-fee"
+
+
+def test_search_national_pension_estimate_top_hit(docs: list[KbDoc]) -> None:
+    hits = search("국민연금 예상연금 조회", docs=docs)
+    assert hits and hits[0].slug == "national-pension-estimate"
+
+
+def test_search_retirement_pension_top_hit(docs: list[KbDoc]) -> None:
+    hits = search("퇴직연금 DB DC IRP 차이", docs=docs)
+    assert hits and hits[0].slug == "retirement-pension-db-dc-irp"
+
+
+def test_search_pension_savings_isa_tax_top_hit(docs: list[KbDoc]) -> None:
+    hits = search("연금저축 ISA 세액공제", docs=docs)
+    assert hits and hits[0].slug == "pension-savings-isa-tax"
 
 
 def test_search_handles_conversational_phrasing(docs: list[KbDoc]) -> None:

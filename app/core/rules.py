@@ -10,6 +10,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Optional
 
 from app.core.loan import extra_payment_effect, prepay_fee, refinance_compare
+from app.core.retirement import coverage_ratio, national_pension_estimate
 from app.models import (
     ActionCard,
     Capacity,
@@ -18,6 +19,7 @@ from app.models import (
     Loan,
     LoanSchedule,
     LoanType,
+    PensionAssets,
     PolicyParams,
     ProductCategory,
     UserProfile,
@@ -120,14 +122,29 @@ def _rule_r5(loan: Loan, capacity: Capacity, schedule_by_loan: dict[str, LoanSch
     )
 
 
-def _rule_r4(profile: UserProfile, params: PolicyParams) -> Optional[ActionCard]:
-    months, needs_verification = _policy(params, "emergency_fund_months", 1)
-    target = profile.fixed_expenses * months
+def _rule_r4(
+    profile: UserProfile, params: PolicyParams, thresholds: Optional[dict[str, Any]] = None
+) -> Optional[ActionCard]:
+    """비상자금 규칙(문서 4.3절 유동성비율 룰의 R4 대응, 기존 R4 id·우선순위를 그대로 유지).
+
+    `thresholds`(생애 단계별 임계값, `config/thresholds.yaml`)에 `min_liquidity_months`가
+    있으면 그 값을 개월 기준으로 쓰고, 없으면 기존처럼 `policy.emergency_fund_months`를
+    쓴다(하위 호환: thresholds를 안 넘기던 기존 호출부와 테스트는 그대로 동작한다).
+    """
+    if thresholds and thresholds.get("min_liquidity_months") is not None:
+        months = thresholds["min_liquidity_months"]
+        needs_verification = bool(thresholds.get("needs_verification", True))
+        source_note = f"생애 단계 기준 비상자금 {months:g}개월분 (thresholds, {_verify_note(needs_verification)})"
+    else:
+        months, needs_verification = _policy(params, "emergency_fund_months", 1)
+        source_note = f"policy: emergency_fund_months={months}개월 ({_verify_note(needs_verification)})"
+
+    target = round(profile.fixed_expenses * months)
     if profile.emergency_fund >= target:
         return None
     gap = target - profile.emergency_fund
     summary = (
-        f"비상금이 {profile.emergency_fund:,}원으로 생활비 {months}개월분({target:,}원)에 못 미칩니다. "
+        f"비상금이 {profile.emergency_fund:,}원으로 생활비 {months:g}개월분({target:,}원)에 못 미칩니다. "
         f"{gap:,}원을 먼저 모으는 방법을 생각해보세요."
     )
     return ActionCard(
@@ -140,13 +157,166 @@ def _rule_r4(profile: UserProfile, params: PolicyParams) -> Optional[ActionCard]
             "target_emergency_fund": target,
             "gap": gap,
         },
-        assumptions=[f"policy: emergency_fund_months={months}개월 ({_verify_note(needs_verification)})"],
+        assumptions=[source_note],
         caveats=[],
         steps=["매월 여유자금 일부를 별도 비상금 계좌로 먼저 옮겨 두세요."],
         priority=20,
         safe_mode=False,
         related_loan_ids=[],
         chip=None,
+    )
+
+
+def _rule_r8(profile: UserProfile, capacity: Capacity, thresholds: Optional[dict[str, Any]]) -> Optional[ActionCard]:
+    """저축률이 생애 단계 최소 기준에 못 미치면 안내한다(문서 4.3절, thresholds가 있을 때만 평가).
+
+    thresholds가 없으면(생애 단계 정보 없이 호출된 기존 경로) 평가하지 않고 None을 돌려준다.
+    """
+    if not thresholds or thresholds.get("min_saving_rate") is None:
+        return None
+    min_rate = thresholds["min_saving_rate"]
+    annual_income = profile.monthly_income * 12
+    if annual_income <= 0:
+        return None
+    annual_saving = capacity.net_monthly * 12
+    saving_rate = annual_saving / annual_income
+    if saving_rate >= min_rate:
+        return None
+    needs_verification = bool(thresholds.get("needs_verification", True))
+    rate_pct = _round_half_up(saving_rate * 100)
+    min_pct = _round_half_up(min_rate * 100)
+    summary = (
+        f"저축률이 {rate_pct}%로 생애 단계 기준 {min_pct}%에 못 미칩니다. "
+        "자동이체 저축 계획을 세워보는 것을 살펴보세요."
+    )
+    return ActionCard(
+        id="action-r8-saving-rate",
+        rule_id="R8",
+        title="저축률을 끌어올려보세요",
+        summary=summary,
+        numbers={"saving_rate": saving_rate, "min_saving_rate": min_rate},
+        assumptions=[f"생애 단계 기준 최소 저축률 {min_pct}% (thresholds, {_verify_note(needs_verification)})"],
+        caveats=[],
+        steps=["매월 일정 금액이 자동으로 저축 계좌에 이체되도록 자동이체를 설정해보세요."],
+        priority=55,
+        safe_mode=False,
+        related_loan_ids=[],
+        chip=None,
+    )
+
+
+def _rule_r9(
+    profile: UserProfile, capacity: Capacity, thresholds: Optional[dict[str, Any]]
+) -> Optional[ActionCard]:
+    """원리금상환비율이 생애 단계 기준(문서 4.3절, 기본 40%)을 넘으면 상환 구조 점검을 안내한다.
+
+    R3(개별 대출의 대환 후보)와 달리 프로필 전체의 상환비율을 본다. thresholds가 없으면
+    평가하지 않는다(하위 호환).
+    """
+    if not thresholds or thresholds.get("max_debt_service_ratio") is None or not profile.loans:
+        return None
+    max_ratio = thresholds["max_debt_service_ratio"]
+    if capacity.debt_service_ratio <= max_ratio:
+        return None
+    needs_verification = bool(thresholds.get("needs_verification", True))
+    ratio_pct = _round_half_up(capacity.debt_service_ratio * 100)
+    max_pct = _round_half_up(max_ratio * 100)
+    highest = sorted(profile.loans, key=lambda l: (-l.annual_rate, l.id))[0]
+    category = _CATEGORY_BY_LOAN_TYPE.get(highest.loan_type, ProductCategory.CREDIT)
+    summary = (
+        f"연 원리금상환비율이 {ratio_pct}%로 생애 단계 기준 {max_pct}%를 넘습니다. "
+        "상환 구조를 점검하고 내 조건으로 다른 상품 금리를 비교해볼 수 있습니다."
+    )
+    chip = Chip(
+        id="chip-r9-compare",
+        text="내 조건으로 공시 비교",
+        tier=1,
+        intent="compare",
+        params={
+            "category": category.value,
+            "amount": highest.balance,
+            "term_months": highest.remaining_months,
+            "target_loan_id": highest.id,
+        },
+    )
+    return ActionCard(
+        id="action-r9-dsr",
+        rule_id="R9",
+        title="원리금상환비율이 높습니다",
+        summary=summary,
+        numbers={"debt_service_ratio": capacity.debt_service_ratio, "max_debt_service_ratio": max_ratio},
+        assumptions=[f"원리금상환비율 기준 {max_pct}% (thresholds, {_verify_note(needs_verification)})"],
+        caveats=["실제 승인 금리와 한도는 금융회사 심사에 따라 다를 수 있습니다."],
+        steps=["상환 구조(만기 연장, 대환 등)를 점검해보세요."],
+        priority=25,
+        safe_mode=False,
+        related_loan_ids=[highest.id],
+        chip=chip,
+    )
+
+
+def _rule_r10(
+    profile: UserProfile, params: PolicyParams, thresholds: Optional[dict[str, Any]]
+) -> Optional[ActionCard]:
+    """50세 이상이고 노후소득 충당률이 생애 단계 기준(문서 4.3절, 기본 60%)에 못 미치면
+    노후자금 시뮬레이션을 안내한다. thresholds에 min_coverage_ratio가 없으면 평가하지 않는다."""
+    if profile.age is None or profile.age < 50:
+        return None
+    if not thresholds or thresholds.get("min_coverage_ratio") is None:
+        return None
+    min_coverage = thresholds["min_coverage_ratio"]
+    essential_expense = profile.fixed_expenses
+    if essential_expense <= 0:
+        return None
+
+    pension = profile.assets.pension if profile.assets is not None else PensionAssets()
+    if pension.expected_national_pension_monthly is not None:
+        guaranteed = pension.expected_national_pension_monthly
+        source_note = "프로필에 입력된 국민연금 예상액을 사용했습니다."
+    else:
+        a_value, a_needs_verification = _policy(params, "national_pension_a_value", 3_190_000)
+        guaranteed = national_pension_estimate(
+            a_value, profile.monthly_income, pension.national_pension_months_paid,
+            pension.national_pension_months_paid,
+        )
+        source_note = (
+            f"policy: national_pension_a_value={a_value:,}원 ({_verify_note(a_needs_verification)})으로 "
+            "추정한 국민연금 예상액입니다."
+        )
+
+    ratio = coverage_ratio(guaranteed, essential_expense)
+    if ratio >= min_coverage:
+        return None
+    needs_verification = bool(thresholds.get("needs_verification", True))
+    ratio_pct = _round_half_up(ratio * 100)
+    min_pct = _round_half_up(min_coverage * 100)
+    summary = (
+        f"필수지출 {essential_expense:,}원 중 확정소득으로 충당되는 비율이 {ratio_pct}%로 "
+        f"생애 단계 기준 {min_pct}%에 못 미칩니다. 노후자금 시뮬레이션에서 격차를 확인해보세요."
+    )
+    chip = Chip(
+        id="chip-r10-lifecycle",
+        text="노후자금 시뮬레이션 보기",
+        tier=1,
+        intent="lifecycle",
+        params={},
+    )
+    return ActionCard(
+        id="action-r10-retirement-coverage",
+        rule_id="R10",
+        title="노후소득 충당률을 확인하세요",
+        summary=summary,
+        numbers={"coverage_ratio": ratio, "essential_expense": essential_expense, "guaranteed_income": guaranteed},
+        assumptions=[
+            f"노후소득 충당률 기준 {min_pct}% 이상 (thresholds, {_verify_note(needs_verification)})",
+            source_note,
+        ],
+        caveats=["실제 연금 수급액은 국민연금공단 조회 결과와 다를 수 있습니다."],
+        steps=["노후자금 시뮬레이션 화면에서 낙관·기준·비관 시나리오를 확인해보세요."],
+        priority=35,
+        safe_mode=False,
+        related_loan_ids=[],
+        chip=chip,
     )
 
 
@@ -304,8 +474,14 @@ def evaluate_rules(
     params: PolicyParams,
     *,
     today: date,
+    thresholds: Optional[dict[str, Any]] = None,
 ) -> list[ActionCard]:
-    """R0~R6 규칙을 평가해 priority 오름차순으로 정렬된 ActionCard 목록을 반환한다."""
+    """R0~R10 규칙을 평가해 priority 오름차순으로 정렬된 ActionCard 목록을 반환한다.
+
+    `thresholds`는 생애 단계별 임계값 1건(`app.core.lifecycle.thresholds_for_stage`의 결과)이며
+    선택 인자다. 넘기지 않으면(기존 호출부·테스트) R4는 예전처럼 policy 기준으로만 동작하고
+    R8~R10은 평가되지 않는다(하위 호환).
+    """
     cards: list[ActionCard] = []
     schedule_by_loan = {s.loan_id: s for s in schedules}
 
@@ -319,14 +495,23 @@ def evaluate_rules(
         if r5 is not None:
             cards.append(r5)
 
-    r4 = _rule_r4(profile, params)
+    r4 = _rule_r4(profile, params, thresholds)
     if r4 is not None:
         cards.append(r4)
+
+    if not safe_mode_active:
+        r9 = _rule_r9(profile, capacity, thresholds)
+        if r9 is not None:
+            cards.append(r9)
 
     for loan in _sorted_loans(profile):
         r6 = _rule_r6(loan, profile)
         if r6 is not None:
             cards.append(r6)
+
+    r10 = _rule_r10(profile, params, thresholds)
+    if r10 is not None:
+        cards.append(r10)
 
     if not safe_mode_active:
         r2_priority = 45 if r4 is not None else 40
@@ -338,6 +523,10 @@ def evaluate_rules(
         r1 = _rule_r1(loan, profile, params)
         if r1 is not None:
             cards.append(r1)
+
+    r8 = _rule_r8(profile, capacity, thresholds)
+    if r8 is not None:
+        cards.append(r8)
 
     if not safe_mode_active:
         for loan in _sorted_loans(profile):
