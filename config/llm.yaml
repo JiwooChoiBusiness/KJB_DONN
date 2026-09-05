@@ -1,0 +1,18 @@
+# LLM 공급자 설정. PoC는 Google AI Studio 무료 티어(키 8개, .env의 GEMINI_API_KEYS).
+# 실도입 시 Enterprise 급 API(OpenAI GPT 또는 Anthropic Claude)로 교체 예정. 어댑터만 바꾼다.
+provider: gemini
+# 체인 규칙: 모델 순서가 바깥 루프, 키 순서가 안쪽 루프.
+# 3.8 flash를 키 1~8로 시도해 모두 실패하면 3.7 flash를 다시 키 1부터, 이어서 3.6 flash, 3.5 flash-lite.
+model_chain:
+  - gemini-3.8-flash
+  - gemini-3.7-flash
+  - gemini-3.6-flash
+  - gemini-3.5-flash-lite
+retry_on_status: [429, 500, 503]      # 다음 키로 넘어가는 오류
+skip_model_on_status: [404]           # 다음 모델로 넘어가는 오류
+fail_fast_on_status: [400, 401, 403]  # 요청 자체 문제 또는 키 무효. 400은 즉시 실패, 401/403은 다음 키
+key_cooldown_seconds: 60              # 429를 받은 키는 60초 동안 건너뜀
+temperature: 0
+timeout_seconds: 20
+endpoint: https://generativelanguage.googleapis.com/v1beta
+data_grade_policy: "G3 금지. 개인신용정보 파생 수치는 외부 LLM으로 전송하지 않는다 (D4)"

@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic>=2
+requests
+python-dotenv
+pyyaml
+httpx
+openpyxl
+pytest
