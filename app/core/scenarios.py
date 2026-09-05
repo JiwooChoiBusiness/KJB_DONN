@@ -1,0 +1,252 @@
+"""현금흐름 시나리오(기준/불리/유리) 계산 (순수 함수).
+
+I/O 없음. app.models와 app.core.schedule(같은 패키지)만 import한다.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Optional
+
+from app.core.schedule import monthly_payment_equal
+from app.models import (
+    CashflowPoint,
+    Loan,
+    PolicyParams,
+    RateType,
+    RepayMethod,
+    Scenario,
+    ScenarioResult,
+    UserProfile,
+)
+
+_ONE = Decimal("1")
+FAVORABLE_RATE_DELTA_PCT = 0.5
+FAVORABLE_EXTRA_SHARE = Decimal("0.5")
+ADVERSE_VARIABLE_EXPENSE_MULTIPLIER = Decimal("1.05")
+
+
+def _round_won(value: Decimal) -> int:
+    return int(value.quantize(_ONE, rounding=ROUND_HALF_UP))
+
+
+def _monthly_rate(annual_rate_pct: float) -> Decimal:
+    return Decimal(str(annual_rate_pct)) / Decimal(100) / Decimal(12)
+
+
+@dataclass
+class _LoanSim:
+    """시나리오 내부용 대출 상태. build_schedule과 달리 매월 다른 extra를
+    동적으로 받아야 하므로(유리 시나리오의 최고금리 대출 몰아주기) 별도 구현한다."""
+
+    loan: Loan
+    rate: float
+    balance: Decimal
+    month_idx: int = 0
+    effective_payment: Optional[Decimal] = None
+    base_principal: Optional[Decimal] = None
+    finished: bool = False
+    _pending_interest: Decimal = field(default=Decimal(0))
+    _pending_scheduled: Decimal = field(default=Decimal(0))
+    _pending_month_idx: int = 0
+
+    @property
+    def term_total(self) -> int:
+        return max(self.loan.remaining_months, 0)
+
+    @property
+    def grace(self) -> int:
+        return min(max(self.loan.grace_months, 0), self.term_total)
+
+    def is_done(self) -> bool:
+        return self.finished or self.balance <= 0
+
+    def peek(self) -> tuple[Decimal, Decimal]:
+        """다음 회차의 (이자, extra 제외 원금)을 계산한다(잔액은 바꾸지 않음)."""
+        if self.is_done():
+            return (Decimal(0), Decimal(0))
+        next_month_idx = self.month_idx + 1
+        r = _monthly_rate(self.rate)
+        interest = (self.balance * r).quantize(_ONE, rounding=ROUND_HALF_UP)
+        grace = self.grace
+        post_grace_total = self.term_total - grace
+        method = self.loan.repay_method
+
+        if next_month_idx <= grace:
+            scheduled = Decimal(0)
+        elif method == RepayMethod.EQUAL_PAYMENT:
+            if self.effective_payment is None:
+                if post_grace_total <= 0:
+                    self.effective_payment = self.balance
+                else:
+                    override = self.loan.monthly_payment_override
+                    if override is not None and Decimal(override) > interest:
+                        self.effective_payment = Decimal(override)
+                    else:
+                        self.effective_payment = Decimal(
+                            monthly_payment_equal(int(self.balance), self.rate, post_grace_total)
+                        )
+            scheduled = self.effective_payment - interest
+        elif method == RepayMethod.EQUAL_PRINCIPAL:
+            if self.base_principal is None:
+                self.base_principal = (
+                    (self.balance / Decimal(post_grace_total)).quantize(_ONE, rounding=ROUND_HALF_UP)
+                    if post_grace_total > 0
+                    else self.balance
+                )
+            scheduled = self.base_principal
+        else:  # BULLET, REVOLVING
+            scheduled = Decimal(0)
+
+        self._pending_interest = interest
+        self._pending_scheduled = scheduled
+        self._pending_month_idx = next_month_idx
+        return (interest, scheduled)
+
+    def commit(self, extra: Decimal) -> tuple[int, int, int]:
+        """peek() 직후 호출. extra를 반영해 실제로 잔액을 갱신하고
+        (이자, 원금, 납입액)을 정수로 반환한다."""
+        if self.is_done():
+            return (0, 0, 0)
+        interest = self._pending_interest
+        principal = self._pending_scheduled + extra
+        is_last = self._pending_month_idx >= self.term_total or principal >= self.balance
+        if is_last:
+            principal = self.balance
+        payment = principal + interest
+        self.balance = self.balance - principal
+        self.month_idx = self._pending_month_idx
+        if is_last:
+            self.finished = True
+        return (_round_won(interest), _round_won(principal), _round_won(payment))
+
+
+_LABELS = {
+    Scenario.BASE: "기준 시나리오",
+    Scenario.ADVERSE: "악화 시나리오",
+    Scenario.FAVORABLE: "완화 시나리오",
+}
+
+
+def _effective_rate(loan: Loan, scenario: Scenario, stress_add: float) -> float:
+    if loan.rate_type != RateType.VARIABLE:
+        return loan.annual_rate
+    if scenario == Scenario.ADVERSE:
+        return loan.annual_rate + stress_add
+    if scenario == Scenario.FAVORABLE:
+        return max(loan.annual_rate - FAVORABLE_RATE_DELTA_PCT, 0.0)
+    return loan.annual_rate
+
+
+def _run_one(
+    scenario: Scenario,
+    profile: UserProfile,
+    stress_add: float,
+    stress_add_needs_verification: bool,
+    horizon_months: int,
+) -> ScenarioResult:
+    sims = [
+        _LoanSim(loan=loan, rate=_effective_rate(loan, scenario, stress_add), balance=Decimal(loan.balance))
+        for loan in profile.loans
+    ]
+
+    assumptions: list[str] = []
+    if scenario == Scenario.BASE:
+        assumptions.append("기준 시나리오: 현재 금리와 지출 조건을 그대로 유지한다고 가정합니다.")
+        variable_expenses = profile.variable_expenses
+    elif scenario == Scenario.ADVERSE:
+        verify_note = "확인 필요" if stress_add_needs_verification else "확인됨"
+        assumptions.append(
+            f"악화 시나리오: 변동금리 대출 금리를 연 {stress_add:.4g}%p 올리고"
+            f"(policy: stress_variable_rate_add_pct, {verify_note}) 변동지출을 5% 늘린다고 가정합니다."
+        )
+        variable_expenses = _round_won(Decimal(profile.variable_expenses) * ADVERSE_VARIABLE_EXPENSE_MULTIPLIER)
+    else:
+        assumptions.append(
+            "완화 시나리오: 변동금리 대출 금리를 연 0.5%p 내리고 "
+            "매월 여유자금의 50%를 최고금리 대출에 추가 상환한다고 가정합니다."
+        )
+        variable_expenses = profile.variable_expenses
+
+    expenses = profile.fixed_expenses + variable_expenses
+    income = profile.monthly_income
+
+    points: list[CashflowPoint] = []
+    cumulative_net = 0
+    debt_free_month: Optional[int] = None
+    total_interest_accum = 0
+
+    if all(s.is_done() for s in sims):
+        debt_free_month = 1 if horizon_months > 0 else None
+
+    for m in range(1, max(horizon_months, 0) + 1):
+        peeked = [s.peek() for s in sims]  # (interest, scheduled_principal) per loan, extra 제외
+
+        required_payment = sum(_round_won(i + p) for (i, p) in peeked)
+        surplus = income - expenses - required_payment
+
+        extra_target_idx = None
+        extra_amount = Decimal(0)
+        if scenario == Scenario.FAVORABLE and surplus > 0:
+            active = [(idx, s) for idx, s in enumerate(sims) if not s.is_done()]
+            if active:
+                extra_target_idx = sorted(active, key=lambda pair: (-pair[1].rate, pair[1].loan.id))[0][0]
+                extra_amount = (Decimal(surplus) * FAVORABLE_EXTRA_SHARE).quantize(_ONE, rounding=ROUND_HALF_UP)
+
+        month_interest = 0
+        month_payment = 0
+        for idx, sim in enumerate(sims):
+            extra = extra_amount if idx == extra_target_idx else Decimal(0)
+            interest, _principal, payment = sim.commit(extra)
+            month_interest += interest
+            month_payment += payment
+
+        total_balance = sum(_round_won(s.balance) if s.balance > 0 else 0 for s in sims)
+        net = income - month_payment - expenses
+        cumulative_net += net
+        total_interest_accum += month_interest
+
+        points.append(
+            CashflowPoint(
+                month=m,
+                income=income,
+                debt_payment=month_payment,
+                expenses=expenses,
+                net=net,
+                total_balance=total_balance,
+                cumulative_net=cumulative_net,
+            )
+        )
+
+        if debt_free_month is None and total_balance == 0:
+            debt_free_month = m
+
+    min_cumulative_net = min((p.cumulative_net for p in points), default=0)
+
+    return ScenarioResult(
+        scenario=scenario,
+        label=_LABELS[scenario],
+        assumptions=assumptions,
+        points=points,
+        debt_free_month=debt_free_month,
+        total_interest=total_interest_accum,
+        min_cumulative_net=min_cumulative_net,
+    )
+
+
+def run_scenarios(
+    profile: UserProfile, params: PolicyParams, *, horizon_months: int = 60
+) -> list[ScenarioResult]:
+    """기준/악화/완화 3개 시나리오의 월별 현금흐름을 계산한다."""
+    stress_param = params.params.get("stress_variable_rate_add_pct")
+    if stress_param is None:
+        stress_add = 1.0
+        stress_needs_verification = True
+    else:
+        stress_add = float(stress_param.value)
+        stress_needs_verification = stress_param.needs_verification
+
+    return [
+        _run_one(scenario, profile, stress_add, stress_needs_verification, horizon_months)
+        for scenario in (Scenario.BASE, Scenario.ADVERSE, Scenario.FAVORABLE)
+    ]

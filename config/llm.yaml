@@ -13,6 +13,9 @@ skip_model_on_status: [404]           # 다음 모델로 넘어가는 오류
 fail_fast_on_status: [400, 401, 403]  # 요청 자체 문제 또는 키 무효. 400은 즉시 실패, 401/403은 다음 키
 key_cooldown_seconds: 60              # 429를 받은 키는 60초 동안 건너뜀
 temperature: 0
-timeout_seconds: 20
+timeout_seconds: 8                    # 요청 1건 상한
+total_deadline_seconds: 12            # 체인 전체 상한, 초과 시 규칙 파서 폴백
+model_cooldown_seconds: 120           # 500/503이 2회 반복된 모델은 120초 동안 건너뜀 (순서는 유지)
+model_failure_threshold: 2
 endpoint: https://generativelanguage.googleapis.com/v1beta
 data_grade_policy: "G3 금지. 개인신용정보 파생 수치는 외부 LLM으로 전송하지 않는다 (D4)"

@@ -12,10 +12,12 @@
 
 ## 실행
 ```
-run.bat            # 서버 (http://localhost:3666)
-run.bat load       # 상품 스냅샷 적재 (금감원 + 공공데이터)
+python run.py              # 사용자용 서버 http://localhost:3666 (IDE에서 run.py 실행해도 됨)
+python run.py --reload     # 코드 수정 시 자동 재시작
+run.bat load               # 상품 스냅샷 적재 (금감원 + 공공데이터)
 .venv\Scripts\python -m pytest -q
 ```
+포트 규칙: 사용자는 3666, Claude Code의 테스트·미리보기는 3676(`.claude/launch.json`, `python run.py 3676`). 두 서버를 동시에 띄워도 된다.
 
 ## 모델 정책 (Claude Code 작업 시)
 - 오케스트레이터(메인 세션): Fable 5.1. 판단, 통합, 규제·계산 검토는 여기서만.
@@ -26,3 +28,8 @@ run.bat load       # 상품 스냅샷 적재 (금감원 + 공공데이터)
 
 ## 모듈 경계
 `app/core` 순수 함수(I/O 금지) → `app/data`만 네트워크·DB → `app/services` 조합 → `app/api` HTTP → `web/` 정적 페이지. LLM은 `app/llm` 어댑터 뒤에 두고 PoC는 Gemini 체인(`config/llm.yaml`).
+
+## 커밋 규칙
+- 커밋 작성자는 사용자(Jiwoo Choi) 한 명이다. `Co-Authored-By:` 트레일러를 넣지 않는다(GitHub가 기여자로 집계하므로).
+- 대신 커밋 본문 마지막 줄에 평문으로 `작성 보조: Claude Fable 5.1 (Anthropic)`를 적는다. 이 줄은 GitHub가 파싱하지 않는다.
+- 커밋과 푸시는 사용자가 요청할 때만 한다. `.env`, `data/`, `.venv`는 절대 커밋하지 않는다.

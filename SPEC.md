@@ -197,7 +197,7 @@ main.py: `FastAPI(title="DONN PoC")`, `GET /` → `web/index.html`, `/static` �
 | 원리금균등 2 | 30,000,000원, 6.0%, 36개월 | 월 912,658원, 총이자 2,855,688원 ± 36원 |
 | 원금균등 | 12,000,000원, 12.0%, 12개월 | 1회차 1,120,000원(원금 1,000,000 + 이자 120,000), 총이자 780,000원 |
 | 만기일시 | 10,000,000원, 6.0%, 12개월 | 매월 이자 50,000원, 12회차 10,050,000원, 총이자 600,000원 |
-| 거치 | 10,000,000원, 6.0%, 거치 2 + 상환 10개월 원리금균등 | 1~2회차 50,000원, 3회차 1,027,660원 ± 5원, 총이자 376,600원 ± 60원 |
+| 거치 | 10,000,000원, 6.0%, 거치 2 + 상환 10개월 원리금균등 | 1~2회차 50,000원, 3회차 1,027,706원 ± 5원, 총이자 377,057원 ± 60원 (2026-09-06 정정: 초안의 1,027,660/376,600은 계산 착오) |
 | 재현성 | 같은 CompareContext, 같은 스냅샷 | result_hash 동일, 순위 동일 |
 | 안전모드 | delinquency_signal 플래그 | R0 카드만 safe_mode, R3 카드 없음 |
 
@@ -207,6 +207,7 @@ main.py: `FastAPI(title="DONN PoC")`, `GET /` → `web/index.html`, `/static` �
 .venv\Scripts\python -m pip install -r requirements.txt
 .venv\Scripts\python -m scripts.load_products --source finlife --groups 020000,030300
 .venv\Scripts\python -m scripts.load_products --source datago
-.venv\Scripts\python -m uvicorn app.main:app --reload --port 3666
+python run.py            # 사용자 3666
+python run.py 3676       # Claude Code 테스트용
 .venv\Scripts\python -m pytest -q
 ```

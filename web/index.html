@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DONN 부채 코치</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<a class="skip-link" href="#mainContent">본문으로 바로가기</a>
+
+<div id="app">
+
+  <header class="topbar" id="topbar">
+    <div class="topbar-left">
+      <button type="button" id="hamburgerBtn" class="icon-btn hamburger-btn" aria-label="메뉴 열기" aria-expanded="false" aria-controls="sidebar">
+      </button>
+      <span class="logo-mark" aria-hidden="true">D</span>
+      <div class="wordmark-wrap">
+        <span class="wordmark">DONN</span>
+        <span class="wordmark-subtitle">부채 코치 PoC</span>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <div class="avatar" aria-hidden="true">나</div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <div id="sidebarBackdrop" class="sidebar-backdrop is-hidden"></div>
+
+    <aside class="sidebar" id="sidebar" aria-label="주요 메뉴">
+      <div class="sidebar-top">
+        <button type="button" class="new-chat-btn" id="newChatBtn" aria-label="새 대화 시작">
+          <span class="icon-circle icon-circle-accent" id="newChatIcon"></span>
+          <span class="label">새 대화</span>
+        </button>
+        <button type="button" class="icon-btn sidebar-collapse-btn" id="sidebarCollapseBtn" aria-label="사이드바 접기" aria-expanded="true" aria-controls="sidebar">
+        </button>
+      </div>
+
+      <nav class="sidebar-nav-wrap">
+        <div class="sidebar-section-label label">리소스</div>
+        <ul class="sidebar-nav" id="resourceNav">
+          <li><a href="#debts" data-view="debts" aria-label="내 부채"><span class="nav-icon" data-icon="wallet"></span><span class="label">내 부채</span></a></li>
+          <li><a href="#compare" data-view="compare" aria-label="공시 비교"><span class="nav-icon" data-icon="bars"></span><span class="label">공시 비교</span></a></li>
+          <li><a href="#spending" data-view="spending" aria-label="소비 패턴"><span class="nav-icon" data-icon="receipt"></span><span class="label">소비 패턴</span></a></li>
+          <li><a href="#personas" data-view="personas" aria-label="페르소나 테스트"><span class="nav-icon" data-icon="user"></span><span class="label">페르소나 테스트</span></a></li>
+          <li><a href="#decisions" data-view="decisions" aria-label="결정 기록"><span class="nav-icon" data-icon="history"></span><span class="label">결정 기록</span></a></li>
+        </ul>
+
+        <div class="sidebar-section-label label">고정</div>
+        <button type="button" class="sidebar-pinned" id="pinnedAction" aria-label="이번 달 행동">
+          <span class="label">부채를 입력하면 나타나요</span>
+        </button>
+
+        <div class="sidebar-section-label label">최근</div>
+        <ul class="sidebar-recent" id="recentList"></ul>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <button type="button" class="sidebar-settings-btn" id="settingsBtn" aria-label="환경설정 열기" aria-haspopup="dialog">
+          <span class="nav-icon" data-icon="sliders"></span>
+          <span class="label">환경설정</span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="main-content" id="mainContent" tabindex="-1">
+      <div id="viewRoot" class="main-inner"></div>
+    </main>
+  </div>
+
+  <footer class="footer-disclaimer" id="footerDisclaimer">
+    <p id="disclaimerText" class="footer-line"></p>
+    <p id="aiNoticeText" class="footer-line"></p>
+  </footer>
+
+</div>
+
+<div id="settingsModal" class="modal-backdrop is-hidden" aria-hidden="true">
+  <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="modal-header">
+      <h2 id="settingsTitle">환경설정</h2>
+      <button type="button" id="settingsCloseBtn" class="icon-btn" aria-label="환경설정 닫기"></button>
+    </div>
+    <div id="settingsBody" class="modal-body"></div>
+  </div>
+</div>
+
+<noscript>이 페이지는 자바스크립트가 필요합니다.</noscript>
+<script src="/static/app.js" defer></script>
+</body>
+</html>
