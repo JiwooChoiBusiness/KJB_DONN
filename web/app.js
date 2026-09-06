@@ -497,6 +497,10 @@ async function streamChatRequest(message, chatId, handlers) {
   let sawReply = false;
   try {
     for (;;) {
+      if (handlers.isStale && handlers.isStale()) {
+        try { await reader.cancel(); } catch (_) { /* noop */ }
+        return sawReply;
+      }
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
@@ -4205,7 +4209,29 @@ function buildInlineActionCard(action) {
   const payload = action.payload || {};
   if (action.type === 'prepare_compare') return buildPrepareCompareCard(payload.params || payload);
   if (action.type === 'open_view') return buildOpenViewCard(payload);
+  if (action.type === 'search_suggestions') return buildSearchSuggestionsCard(payload);
   return null;  // open_kb 는 본문 자체가 제도 안내 카드다
+}
+
+/* Google 검색 그라운딩을 쓰면 Google이 준 검색 제안 마크업을 그대로 보여줘야 한다(이용약관).
+   서버가 준 HTML은 우리 DOM에 직접 넣지 않고 스크립트가 막힌 iframe(srcdoc)에 격리해 그린다.
+   링크는 새 창으로만 열린다(allow-popups). */
+function buildSearchSuggestionsCard(payload) {
+  const html = payload && typeof payload.html === 'string' ? payload.html : '';
+  if (!html.trim()) return null;
+  const card = h('div', { class: 'inline-action-card search-suggestions-card' });
+  card.appendChild(h('div', { class: 'inline-action-title' }, 'Google 검색 제안'));
+  const frame = document.createElement('iframe');
+  frame.className = 'search-suggestions-frame';
+  frame.setAttribute('sandbox', 'allow-popups allow-popups-to-escape-sandbox');
+  frame.setAttribute('referrerpolicy', 'no-referrer');
+  frame.setAttribute('title', 'Google 검색 제안');
+  frame.setAttribute('loading', 'lazy');
+  frame.srcdoc = '<!doctype html><meta charset="utf-8"><base target="_blank">'
+    + '<style>html,body{margin:0;padding:0;background:transparent;font-family:Pretendard,system-ui,sans-serif}</style>'
+    + html;
+  card.appendChild(frame);
+  return card;
 }
 
 /* ---- 13-6. 제도 안내(KB) 카드 ---- */
@@ -4433,6 +4459,7 @@ async function performChatSend(text) {
     },
     onReply: (r) => { reply = r; },
     onError: (e) => { console.debug('[DONN] 대화 스트림 오류', (e && e.message) || e); },
+    isStale: () => seq !== state.chat.streamSeq,
   });
   if (seq !== state.chat.streamSeq) return;
 

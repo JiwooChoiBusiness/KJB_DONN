@@ -2285,3 +2285,8 @@ button.resource-open:hover .resource-title { color: var(--accent); }
   .prep-row { flex-direction: column; align-items: flex-start; gap: 0; }
   .prep-value { text-align: left; }
 }
+
+/* Google 검색 제안(외부 검색 그라운딩) 격리 프레임 */
+.search-suggestions-card { padding: var(--sp-2) var(--sp-3); }
+.search-suggestions-frame { display: block; width: 100%; height: 76px; border: 0; background: transparent; }
+
