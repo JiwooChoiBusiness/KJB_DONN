@@ -373,6 +373,24 @@ function lsSetStr(key, val) {
   } catch (_) { /* noop */ }
 }
 
+/* 답변 길이(SPEC 2.16): 'full'(자세히, 기본) 또는 'brief'(간단히).
+   값은 이 브라우저에만 남고, 요청마다 detail 필드로 함께 보낸다.
+   저장소를 못 쓰는 환경(시크릿 모드 등)에서는 lsGetStr/lsSetStr 이 조용히 기본값으로 돌아간다. */
+const ANSWER_DETAIL_KEY = 'donn.answerDetail';
+const ANSWER_DETAIL_VALUES = ['full', 'brief'];
+const ANSWER_DETAIL_DEFAULT = 'full';
+
+function getAnswerDetail() {
+  const v = lsGetStr(ANSWER_DETAIL_KEY, ANSWER_DETAIL_DEFAULT);
+  return ANSWER_DETAIL_VALUES.indexOf(v) >= 0 ? v : ANSWER_DETAIL_DEFAULT;
+}
+
+function setAnswerDetail(v) {
+  const next = ANSWER_DETAIL_VALUES.indexOf(v) >= 0 ? v : ANSWER_DETAIL_DEFAULT;
+  lsSetStr(ANSWER_DETAIL_KEY, next);
+  return next;
+}
+
 /* ---------- 3. API 헬퍼 ---------- */
 
 /* 서버 오류 원문(Pydantic 의 영어 검증 메시지, fetch 예외 문자열 등)은 화면에 절대
@@ -485,7 +503,7 @@ async function streamChatRequest(message, chatId, handlers) {
     res = await fetch(API_BASE + '/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-      body: JSON.stringify({ message, chat_id: chatId || null }),
+      body: JSON.stringify({ message, chat_id: chatId || null, detail: getAnswerDetail() }),
     });
   } catch (e) {
     console.debug('[DONN] 스트림 연결 실패', (e && e.message) || e);
@@ -559,14 +577,21 @@ const Api = {
   getDecisions: (limit) => apiGet(`/decisions${limit ? `?limit=${encodeURIComponent(limit)}` : ''}`),
   getDecision: (id) => apiGet(`/decisions/${encodeURIComponent(id)}`),
   replayDecision: (id) => apiSend('POST', `/decisions/${encodeURIComponent(id)}/replay`),
-  chat: (message, chatId) => apiSend('POST', '/chat', { message, chat_id: chatId || null }),
+  chat: (message, chatId) => apiSend('POST', '/chat', {
+    message, chat_id: chatId || null, detail: getAnswerDetail(),
+  }),
   /* 대화창 파일 첨부(SPEC 2.12): 원본 파일이 아니라 브라우저가 정규화한 거래 행만 보낸다. */
   chatAttach: (chatId, filename, transactions, months) => apiSend('POST', '/chat/attach', {
     chat_id: chatId || null, filename, months: months || 3, transactions,
   }),
-  compareExplain: (decisionId) => apiSend('POST', `/compare/${encodeURIComponent(decisionId)}/explain`, {}),
+  /* 설명 호출도 답변 길이를 따른다(SPEC 2.16). */
+  compareExplain: (decisionId) => apiSend(
+    'POST', `/compare/${encodeURIComponent(decisionId)}/explain`, { detail: getAnswerDetail() },
+  ),
   getCompareExplain: (decisionId) => apiGet(`/compare/${encodeURIComponent(decisionId)}/explain`),
-  actionExplain: (actionId) => apiSend('POST', `/actions/${encodeURIComponent(actionId)}/explain`, {}),
+  actionExplain: (actionId) => apiSend(
+    'POST', `/actions/${encodeURIComponent(actionId)}/explain`, { detail: getAnswerDetail() },
+  ),
   listChats: () => apiGet('/chats'),
   chatMessages: (chatId) => apiGet(`/chats/${encodeURIComponent(chatId)}/messages`),
   deleteChat: (chatId) => apiSend('DELETE', `/chats/${encodeURIComponent(chatId)}`),
@@ -5384,14 +5409,97 @@ function closeSettingsModal() {
   const btn = document.getElementById('settingsBtn');
   if (btn) btn.focus();
 }
+/* 답변 길이 설정(SPEC 2.16). 세그먼트 버튼 2개 = 라디오 그룹 하나.
+   좌우 화살표로도 고를 수 있게 roving tabindex 를 쓴다. */
+const ANSWER_DETAIL_OPTIONS = [
+  { value: 'full', label: '자세히(기본)' },
+  { value: 'brief', label: '간단히' },
+];
+const ANSWER_DETAIL_HELP =
+  '자세히는 4~6문장으로 이유와 주의점까지, 간단히는 2~3문장으로 답해요. 숫자는 어느 쪽이든 계산 엔진 값이에요.';
+const ANSWER_DETAIL_SAVED = '저장했어요. 다음 요청부터 이 길이로 답해요.';
+
+/* 길이를 바꾸면 이미 받아 둔 설명은 옛 길이 그대로다. 캐시를 비워 다음 요청에서 다시 받는다.
+   진행 중인 비교 설명 요청은 decisionId 대조에 걸리지 않도록 건드리지 않는다. */
+function forgetExplainCaches() {
+  state.actionExplains = {};
+  if (state.compare && state.compare.explain && state.compare.explain.status !== 'loading') {
+    state.compare.explain = { decisionId: null, status: 'idle', data: null };
+  }
+}
+
+function buildAnswerDetailSetting() {
+  const group = h('div', { class: 'settings-group' });
+  group.appendChild(h('div', { class: 'settings-group-title', id: 'answerDetailLabel' }, '답변 길이'));
+
+  const saved = h('p', { class: 'settings-saved is-hidden', role: 'status', 'aria-live': 'polite' });
+  const seg = h('div', {
+    class: 'seg-control', role: 'radiogroup', 'aria-labelledby': 'answerDetailLabel',
+  });
+  const btns = [];
+  let current = getAnswerDetail();
+
+  function paint() {
+    btns.forEach((b) => {
+      const on = b.getAttribute('data-detail') === current;
+      b.classList.toggle('is-on', on);
+      b.setAttribute('aria-checked', on ? 'true' : 'false');
+      b.tabIndex = on ? 0 : -1;
+    });
+  }
+
+  function choose(next, moveFocus) {
+    const changed = next !== current;
+    current = setAnswerDetail(next);
+    paint();
+    if (moveFocus) {
+      const target = btns.filter((b) => b.getAttribute('data-detail') === current)[0];
+      if (target) target.focus();
+    }
+    if (!changed) return;
+    forgetExplainCaches();
+    clearNode(saved);
+    saved.appendChild(document.createTextNode(ANSWER_DETAIL_SAVED));
+    saved.classList.remove('is-hidden');
+  }
+
+  ANSWER_DETAIL_OPTIONS.forEach((opt, i) => {
+    const btn = h('button', {
+      type: 'button', class: 'seg-btn', role: 'radio', 'data-detail': opt.value,
+      onClick: () => choose(opt.value, false),
+      onKeydown: (e) => {
+        if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft'
+          && e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+        e.preventDefault();
+        const step = (e.key === 'ArrowRight' || e.key === 'ArrowDown') ? 1 : -1;
+        const n = ANSWER_DETAIL_OPTIONS.length;
+        choose(ANSWER_DETAIL_OPTIONS[(i + step + n) % n].value, true);
+      },
+    }, opt.label);
+    btns.push(btn);
+    seg.appendChild(btn);
+  });
+
+  paint();
+  group.appendChild(seg);
+  group.appendChild(h('p', { class: 'settings-note' }, ANSWER_DETAIL_HELP));
+  group.appendChild(saved);
+  return group;
+}
+
 async function loadSettingsBody() {
   const body = document.getElementById('settingsBody');
   clearNode(body);
-  body.appendChild(h('p', { class: 'loading-text' }, '불러오는 중...'));
+  body.appendChild(buildAnswerDetailSetting());
+  /* 서버 상태는 따로 담아 둔다. 불러오기에 실패해도 위의 답변 길이 설정은 남는다. */
+  const statusSlot = h('div', { class: 'settings-status' });
+  body.appendChild(statusSlot);
+  statusSlot.appendChild(h('p', { class: 'loading-text' }, '불러오는 중...'));
   const res = await Api.health();
-  clearNode(body);
+  if (!document.body.contains(statusSlot)) return;
+  clearNode(statusSlot);
   if (!res.ok) {
-    body.appendChild(noticeBox('서버에 연결되지 않았습니다.', { error: true, onRetry: loadSettingsBody }));
+    statusSlot.appendChild(noticeBox('서버에 연결되지 않았습니다.', { error: true, onRetry: loadSettingsBody }));
     return;
   }
   state.health = res.data;
@@ -5403,14 +5511,14 @@ async function loadSettingsBody() {
     ['LLM 사용 가능', res.data.llm_available ? '예' : '아니오'],
   ];
   rows.forEach(([k, v]) => {
-    body.appendChild(h('div', { class: 'settings-row' }, h('span', { class: 'k' }, k), h('span', { class: 'v' }, String(v))));
+    statusSlot.appendChild(h('div', { class: 'settings-row' }, h('span', { class: 'k' }, k), h('span', { class: 'v' }, String(v))));
   });
 
-  body.appendChild(h('div', { class: 'settings-note-title' }, '면책 고지'));
-  body.appendChild(h('p', { class: 'settings-note' },
+  statusSlot.appendChild(h('div', { class: 'settings-note-title' }, '면책 고지'));
+  statusSlot.appendChild(h('p', { class: 'settings-note' },
     (state.home && state.home.disclaimer) || FALLBACK_DISCLAIMER));
-  body.appendChild(h('div', { class: 'settings-note-title' }, 'AI 고지'));
-  body.appendChild(h('p', { class: 'settings-note' },
+  statusSlot.appendChild(h('div', { class: 'settings-note-title' }, 'AI 고지'));
+  statusSlot.appendChild(h('p', { class: 'settings-note' },
     (state.home && state.home.ai_notice) || FALLBACK_AI_NOTICE));
 }
 
