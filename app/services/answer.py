@@ -244,7 +244,7 @@ def _render_kb_markdown(summary: str, points: list[str], needs_verification: boo
     lines.extend(f"- {p}" for p in points)
     if needs_verification:
         lines.append("")
-        lines.append("_일부 수치는 확인이 필요한 항목이에요._")
+        lines.append("일부 수치는 확인이 필요한 항목이에요.")
     return "\n".join(lines)
 
 

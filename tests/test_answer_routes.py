@@ -448,3 +448,26 @@ def test_build_direct_answer_unavailable_provider_uses_fallback():
     assert llm_used is False
     assert model is None
     assert text == answer_service.DIRECT_ANSWER_FALLBACK_TEXT
+
+
+def test_time_sensitive_question_goes_external_even_if_kb_bigrams_overlap(monkeypatch):
+    """"요즘 기준금리 얼마야?"는 "금리" 바이그램 때문에 금리인하요구권 문서와 점수가 겹치지만
+    시점성 질문이고 문서 키워드가 발화에 없으므로 external(규칙 모드에서는 공식 링크 폴백)이어야 한다."""
+    monkeypatch.setattr(routes_module, "_llm_provider", _FakeUnavailableProvider())
+    r = client.post("/api/chat", json={"message": "요즘 기준금리 얼마야?"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["route"] == "external"
+    assert "금리인하요구권" not in body["reply_text"]
+    client.delete(f"/api/chats/{body['chat_id']}")
+
+
+def test_keyword_doc_wins_over_time_sensitive_words(monkeypatch):
+    """문서 키워드("금리인하요구권")가 발화에 그대로 있으면 "지금" 같은 시점성 단어가 있어도 internal이다."""
+    monkeypatch.setattr(routes_module, "_llm_provider", _FakeUnavailableProvider())
+    r = client.post("/api/chat", json={"message": "지금 금리인하요구권 신청하면 돼?"})
+    body = r.json()
+    assert body["route"] == "internal"
+    assert any(res["kind"] == "kb" and "금리인하요구권" in res["title"] for res in body["resources"])
+    client.delete(f"/api/chats/{body['chat_id']}")
+

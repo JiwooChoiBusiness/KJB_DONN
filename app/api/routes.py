@@ -940,9 +940,21 @@ def _build_chat_reply(
                 stages.finish("explain", "skip", "규칙 문장")
 
     else:  # faq: internal(KB 히트) 또는 external(KB 미달·시점성 질문)
-        hits = kb_search.search(masked, k=1)
+        # 라우팅 근거는 두 단계다. (1) 발화에 문서 키워드가 그대로 들어있으면(고정밀) 그 문서로
+        # internal. (2) 아니면 바이그램 점수가 임계값을 넘고 시점성 질문이 아닐 때만 internal.
+        # 바이그램 점수만 쓰면 "요즘 기준금리 얼마야?"가 "금리" 겹침으로 금리인하요구권 문서에
+        # 붙는 오답이 난다(2026-09-06 화면 실측).
+        hits = kb_search.search(masked, k=20)
         hit = hits[0] if hits else None
-        kb_ok = hit is not None and hit.score > kb_search.MIN_SCORE
+        keyword_doc = answer_service.find_institutional_keyword_doc(masked)
+        time_sensitive_q = any(k in masked for k in _TIME_SENSITIVE_KEYWORDS)
+        if keyword_doc is not None:
+            kw_hit = next((h for h in hits if h.slug == keyword_doc.slug), None)
+            if kw_hit is not None:
+                hit = kw_hit
+            kb_ok = hit is not None and hit.slug == keyword_doc.slug
+        else:
+            kb_ok = hit is not None and hit.score > kb_search.MIN_SCORE and not time_sensitive_q
 
         if kb_ok:
             route = "internal"
