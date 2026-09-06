@@ -471,3 +471,15 @@ def test_keyword_doc_wins_over_time_sensitive_words(monkeypatch):
     assert any(res["kind"] == "kb" and "금리인하요구권" in res["title"] for res in body["resources"])
     client.delete(f"/api/chats/{body['chat_id']}")
 
+
+def test_greeting_stays_direct_even_if_llm_says_faq(monkeypatch):
+    """LLM 추출이 인사를 faq로 분류해도 규칙 파서가 direct면 direct 경로로 답한다(KB 오매칭 방지)."""
+    from tests.test_api import _FakeSuccessProvider
+
+    monkeypatch.setattr(routes_module, "_llm_provider", _FakeSuccessProvider({"intent": "faq"}))
+    r = client.post("/api/chat", json={"message": "안녕, 뭐 할 수 있어?"})
+    body = r.json()
+    assert body["route"] == "direct"
+    assert not any(res["kind"] == "kb" for res in body["resources"])
+    client.delete(f"/api/chats/{body['chat_id']}")
+

@@ -759,6 +759,10 @@ def _build_chat_reply(
         slots = _ground_numeric_slots(slots, masked)
 
     intent = _normalize_intent(slots.get("intent"))
+    if intent == "faq" and guardrails.parse_message(masked).get("intent") == "direct":
+        # LLM이 인사·도움말을 faq로 분류하면 KB 바이그램 잡음으로 엉뚱한 제도 문서가 붙는다
+        # (2026-09-06 실측: "안녕, 뭐 할 수 있어?" → 학자금 문서). 규칙이 direct면 직접 답변으로 고정한다.
+        intent = "direct"
     if (base_params and slots.get("intent") in (None, "", "faq") and intent != "compare"
             and any(slots.get(k) not in (None, "", []) for k in ("max_rate", "term_months", "amount", "exclude_companies", "sort_key"))):
         intent = "compare"  # 직전 비교 조건이 있는 대화에서 다른 의도 없이 조건만 말하면 후속 질의로 본다
