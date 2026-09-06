@@ -21,7 +21,28 @@ const FALLBACK_AI_NOTICE =
 /* app/kb/search.py 의 DISCLAIMER 와 동일하게 유지한다. */
 const KB_DISCLAIMER = '제도 설명은 참고용이며 최신 내용은 관련 기관 안내를 확인하세요.';
 
-const ROUTES = ['home', 'debts', 'compare', 'spending', 'lifecycle', 'personas', 'decisions'];
+const ROUTES = ['home', 'chat', 'debts', 'compare', 'spending', 'lifecycle', 'personas', 'decisions'];
+
+/* 대화 화면 상단의 모델 라벨. 실제 모델명은 응답마다 배지로 따로 보여준다. */
+const CHAT_MODEL_LABEL = 'Gemini 체인';
+const CHAT_NEW_TITLE = '새 대화';
+
+/* SPEC 2.11 리소스 패널: kind 별 묶음 제목 */
+const RESOURCE_KIND_LABELS = {
+  profile: '내 정보', loan: '내 대출', calc: '계산 결과', kb: '제도 안내',
+  products: '공시 자료', policy: '기준값', external: '외부 출처',
+};
+const RESOURCE_KIND_ORDER = ['profile', 'loan', 'calc', 'kb', 'products', 'policy', 'external'];
+
+/* 인라인 액션 카드(open_view)의 화면 이름 버튼 문구 */
+const OPEN_VIEW_LABELS = {
+  home: '홈으로', debts: '내 부채 열기', compare: '공시 비교 열기',
+  spending: '소비 패턴 열기', lifecycle: '생애 흐름 열기',
+  decisions: '결정 기록 열기', personas: '계정 선택 열기',
+};
+
+/* 노드 카드 상태 표기 */
+const STAGE_STATUS_LABELS = { start: '진행 중', done: '완료', fallback: '대체 경로', skip: '건너뜀' };
 
 const LOAN_TYPE_LABELS = {
   credit: '신용대출', mortgage: '주택담보대출', jeonse: '전세자금대출',
@@ -126,6 +147,11 @@ const ICONS = {
   download: [['path', { d: 'M12 3v11' }], ['polyline', { points: '7 10 12 15 17 10' }], ['path', { d: 'M4 19h16' }]],
   upload: [['path', { d: 'M12 20V9' }], ['polyline', { points: '7 13 12 8 17 13' }], ['path', { d: 'M4 4h16' }]],
   lifeline: [['polyline', { points: '4 4 4 20 20 20' }], ['polyline', { points: '7 16 11 11 14 14 19 7' }]],
+  check: [['polyline', { points: '4 12.5 9.5 18 20 6.5' }]],
+  alert: [['path', { d: 'M12 4.5 21 19.5H3z' }], ['line', { x1: 12, y1: 10, x2: 12, y2: 14 }], ['line', { x1: 12, y1: 16.6, x2: 12, y2: 16.7 }]],
+  minus: [['line', { x1: 6, y1: 12, x2: 18, y2: 12 }]],
+  external: [['path', { d: 'M14 4h6v6' }], ['line', { x1: 20, y1: 4, x2: 11, y2: 13 }], ['path', { d: 'M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5' }]],
+  chevronRight: [['polyline', { points: '9 6 15 12 9 18' }]],
 };
 
 /* ---------- 1. DOM 헬퍼 ---------- */
@@ -218,6 +244,9 @@ function mountView(viewClass) {
   const root = document.getElementById('viewRoot');
   clearNode(root);
   root.className = 'main-inner view-' + viewClass;
+  /* 대화 화면만 본문 대신 스레드가 스크롤한다(입력 카드를 하단에 고정하기 위해서). */
+  const main = document.getElementById('mainContent');
+  if (main) main.classList.toggle('is-chat', viewClass === 'chat');
   return { root, isStale: () => myToken !== renderToken };
 }
 
@@ -421,6 +450,75 @@ async function apiSend(method, path, body) {
   }
 }
 
+/* SSE(text/event-stream) 프레임 파서.
+   프레임은 "event: 이름" 줄과 하나 이상의 "data: ..." 줄이고 빈 줄로 끝난다.
+   네트워크 청크는 프레임 경계와 무관하게 잘려 오므로 버퍼에 모았다가 "\n\n" 로만 자른다.
+   onEvent(name, dataObject) 를 호출하고, 파싱 실패한 프레임은 조용히 버린다. */
+function parseSseChunk(buffer, onEvent) {
+  const frames = buffer.split(/\r?\n\r?\n/);
+  const rest = frames.pop();
+  frames.forEach((frame) => {
+    let name = 'message';
+    const dataLines = [];
+    frame.split(/\r?\n/).forEach((line) => {
+      if (line.startsWith('event:')) name = line.slice(6).trim();
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''));
+    });
+    if (!dataLines.length) return;
+    let payload = null;
+    try { payload = JSON.parse(dataLines.join('\n')); } catch (_) { return; }
+    onEvent(name, payload);
+  });
+  return rest;
+}
+
+/* POST /api/chat/stream 을 읽어 stage/reply/error 이벤트를 콜백으로 넘긴다.
+   비 2xx, 스트림 미지원, 네트워크 오류면 false 를 돌려주고 호출부가 /api/chat 으로 폴백한다. */
+async function streamChatRequest(message, chatId, handlers) {
+  let res;
+  try {
+    res = await fetch(API_BASE + '/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify({ message, chat_id: chatId || null }),
+    });
+  } catch (e) {
+    console.debug('[DONN] 스트림 연결 실패', (e && e.message) || e);
+    return false;
+  }
+  if (!res.ok || !res.body || typeof res.body.getReader !== 'function') {
+    console.debug('[DONN] 스트림 사용 불가', res.status);
+    return false;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let sawReply = false;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      buffer = parseSseChunk(buffer, (name, data) => {
+        if (name === 'stage') handlers.onStage(data);
+        else if (name === 'reply') { sawReply = true; handlers.onReply(data); }
+        else if (name === 'error') handlers.onError(data);
+      });
+    }
+    buffer += decoder.decode();
+    parseSseChunk(buffer + '\n\n', (name, data) => {
+      if (name === 'stage') handlers.onStage(data);
+      else if (name === 'reply') { sawReply = true; handlers.onReply(data); }
+      else if (name === 'error') handlers.onError(data);
+    });
+  } catch (e) {
+    console.debug('[DONN] 스트림 읽기 중단', (e && e.message) || e);
+    return sawReply;
+  }
+  return sawReply;
+}
+
 /* 실패한 API 응답을 화면 문장으로 바꾼다. 앞머리(무엇을 못 했는지)와 원인 문장을 붙인다. */
 function apiErrorText(res, prefix) {
   const msg = (res && res.error) || API_ERROR_MESSAGES.unknown;
@@ -447,6 +545,9 @@ const Api = {
   getDecision: (id) => apiGet(`/decisions/${encodeURIComponent(id)}`),
   replayDecision: (id) => apiSend('POST', `/decisions/${encodeURIComponent(id)}/replay`),
   chat: (message, chatId) => apiSend('POST', '/chat', { message, chat_id: chatId || null }),
+  compareExplain: (decisionId) => apiSend('POST', `/compare/${encodeURIComponent(decisionId)}/explain`, {}),
+  getCompareExplain: (decisionId) => apiGet(`/compare/${encodeURIComponent(decisionId)}/explain`),
+  actionExplain: (actionId) => apiSend('POST', `/actions/${encodeURIComponent(actionId)}/explain`, {}),
   listChats: () => apiGet('/chats'),
   chatMessages: (chatId) => apiGet(`/chats/${encodeURIComponent(chatId)}/messages`),
   deleteChat: (chatId) => apiSend('DELETE', `/chats/${encodeURIComponent(chatId)}`),
@@ -474,8 +575,19 @@ const state = {
   lastPersonaId: lsGetStr('donn.lastPersonaId', null),
   personaNotice: null,
   kbOpener: null,
-  chat: { messages: [], pending: false, chatId: null },
-  compare: { context: null, result: null, step: 1, queuedPrepareParams: null },
+  /* 대화: messages 는 화면에 그린 순서 그대로다. resources 는 "가장 최근 응답"의 자료 목록이며
+     오른쪽 리소스 패널이 이것을 그린다. streamSeq 는 늦게 도착한 스트림 응답을 버리는 데 쓴다. */
+  chat: {
+    messages: [], pending: false, chatId: null, title: '',
+    resources: [], streamSeq: 0, queuedSend: null, liveRow: null,
+  },
+  compare: {
+    context: null, result: null, step: 1, queuedPrepareParams: null,
+    /* 설명 문장(SPEC 2.8): decisionId 를 대조해 늦게 온 응답을 버린다. */
+    explain: { decisionId: null, status: 'idle', data: null },
+  },
+  /* 행동 카드 "AI 설명 보기" 캐시: action_id -> ExplainResult (첫 화면 로드에서는 채우지 않는다) */
+  actionExplains: {},
   debts: { selectedLoanId: null, editingLoanId: null, schedule: null, pendingFocusLoanId: null },
   /* 소비 패턴: data 는 서버 응답 {summary, features, cards},
      upload 는 브라우저에서 읽은 파일의 파싱 상태(서버로 보내지 않는다). */
@@ -534,6 +646,7 @@ function renderCurrentView() {
   state.currentView = currentRouteFromHash();
   updateSidebarActiveState();
   switch (state.currentView) {
+    case 'chat': renderChat(); break;
     case 'debts': renderDebts(); break;
     case 'compare': renderCompare(); break;
     case 'spending': renderSpending(); break;
@@ -602,6 +715,28 @@ function plainList(items, cls) {
   if (!items || !items.length) return null;
   const ul = h('ul', { class: cls || 'plain-list' });
   items.forEach((s) => ul.appendChild(h('li', {}, s)));
+  return ul;
+}
+
+/* 검증되지 않은 규제·기준 수치는 서버가 문장 안에 "(확인 필요)"로 표시해 보낸다.
+   그 표시를 배지로 빼고 어디서 온 값인지("참고 문서 기준")를 함께 적는다. */
+const NEEDS_VERIFY_MARK = /\s*\(확인\s*필요\)\s*\.?/;
+const VERIFY_SOURCE_NOTE = '참고 문서 기준';
+
+function verifiableItem(text) {
+  const raw = String(text || '');
+  const li = h('li', {});
+  if (!NEEDS_VERIFY_MARK.test(raw)) { li.appendChild(document.createTextNode(raw)); return li; }
+  li.appendChild(document.createTextNode(raw.replace(NEEDS_VERIFY_MARK, ' ').trim()));
+  li.appendChild(badge('(확인 필요)', 'badge-estimated estimated-tag'));
+  li.appendChild(h('span', { class: 'verify-note' }, VERIFY_SOURCE_NOTE));
+  return li;
+}
+
+function verifiableList(items, cls) {
+  if (!items || !items.length) return null;
+  const ul = h('ul', { class: cls || 'plain-list' });
+  items.forEach((s) => ul.appendChild(verifiableItem(s)));
   return ul;
 }
 
@@ -722,7 +857,89 @@ function fieldMoneyWithBadge(name, label, value, estimated) {
   return { input, wrap };
 }
 
-function buildInsightCard(card) {
+/* ---------- 6-2. 설명 문장(SPEC 2.8) 공용 UI ---------- */
+
+/* 설명 상자 머리줄: 누가 쓴 문장인지(AI/규칙)와 모델명·지연을 밝힌다. */
+function explainMetaRow(data) {
+  const row = h('div', { class: 'explain-meta' });
+  if (data && data.source === 'llm') {
+    row.appendChild(badge('AI 응답', 'badge-accent'));
+    if (data.model) row.appendChild(h('span', { class: 'explain-meta-text' }, data.model));
+    const sec = Number(data.latency_ms || 0) / 1000;
+    if (sec >= 0.05) row.appendChild(h('span', { class: 'explain-meta-text' }, `${sec.toFixed(1)}초`));
+  } else {
+    row.appendChild(badge('규칙 기반 설명', 'badge-rule'));
+  }
+  return row;
+}
+
+/* 설명 블록 옆에는 언제나 AI 고지가 보인다(SPEC 3절). */
+function explainNoticeLine(data) {
+  const text = (data && data.ai_notice) || (state.home && state.home.ai_notice) || FALLBACK_AI_NOTICE;
+  return h('p', { class: 'explain-notice' }, text);
+}
+
+function buildExplainBody(data) {
+  const box = h('div', { class: 'explain-box' });
+  box.appendChild(explainMetaRow(data));
+  box.appendChild(h('p', { class: 'explain-summary' }, (data && data.summary) || ''));
+  box.appendChild(explainNoticeLine(data));
+  return box;
+}
+
+/* 행동 카드의 "AI 설명 보기". 클릭했을 때만 POST 하고 결과는 메모리에 캐시한다.
+   첫 화면 로드에서는 절대 호출되지 않는다(CLAUDE.md 절대 규칙). */
+function attachActionExplain(wrap, actionId) {
+  if (!actionId) return;
+  const slot = h('div', { class: 'explain-slot is-hidden' });
+  const btn = h('button', {
+    type: 'button', class: 'explain-toggle', 'aria-expanded': 'false',
+    'aria-label': '이 행동 제안의 AI 설명 보기',
+  }, 'AI 설명 보기');
+
+  let busy = false;
+  btn.addEventListener('click', async () => {
+    const expanded = btn.getAttribute('aria-expanded') === 'true';
+    if (expanded) {
+      btn.setAttribute('aria-expanded', 'false');
+      slot.classList.add('is-hidden');
+      return;
+    }
+    btn.setAttribute('aria-expanded', 'true');
+    slot.classList.remove('is-hidden');
+
+    const cached = state.actionExplains[actionId];
+    if (cached) { clearNode(slot); slot.appendChild(buildExplainBody(cached)); return; }
+    if (busy) return;
+    busy = true;
+    clearNode(slot);
+    slot.appendChild(explainPlaceholder());
+    const res = await Api.actionExplain(actionId);
+    busy = false;
+    clearNode(slot);
+    if (!res.ok) {
+      slot.appendChild(h('p', { class: 'explain-fail' }, '설명을 불러오지 못했어요.'));
+      return;
+    }
+    state.actionExplains[actionId] = res.data;
+    slot.appendChild(buildExplainBody(res.data));
+  });
+
+  let row = wrap.querySelector(':scope > .card-actions-row');
+  if (!row) { row = h('div', { class: 'card-actions-row' }); wrap.appendChild(row); }
+  row.appendChild(btn);
+  wrap.appendChild(slot);
+}
+
+/* 설명을 기다리는 동안의 자리표시(문장 + 얇은 진행 바) */
+function explainPlaceholder() {
+  const box = h('div', { class: 'explain-box is-pending' });
+  box.appendChild(h('p', { class: 'explain-pending-text' }, 'AI가 계산 결과를 읽고 설명을 쓰는 중이에요'));
+  box.appendChild(h('div', { class: 'explain-progress', role: 'progressbar', 'aria-label': '설명 작성 중' }, h('i', {})));
+  return box;
+}
+
+function buildInsightCard(card, actionId) {
   const wrap = h('div', { class: 'insight-card tone-' + (card.tone || 'neutral') });
   wrap.appendChild(h('div', { class: 'insight-card-title' }, card.title || ''));
   wrap.appendChild(h('div', { class: 'insight-card-body' }, card.body || ''));
@@ -746,6 +963,8 @@ function buildInsightCard(card) {
   }
   if (actionsRow.childNodes.length) wrap.appendChild(actionsRow);
   if (explainBox) wrap.appendChild(explainBox);
+  /* 홈의 top_action 카드에는 "AI 설명 보기"가 붙는다(클릭했을 때만 LLM 호출). */
+  if (card.kind === 'action' && actionId) attachActionExplain(wrap, actionId);
   return wrap;
 }
 
@@ -772,11 +991,11 @@ function buildActionCard(action) {
   const assumptions = plainList(action.assumptions, 'plain-list');
   if (assumptions) wrap.appendChild(assumptions);
 
-  if (action.chip) {
-    const row = h('div', { class: 'card-actions-row' });
-    row.appendChild(chipButton(action.chip));
-    wrap.appendChild(row);
-  }
+  const row = h('div', { class: 'card-actions-row' });
+  if (action.chip) row.appendChild(chipButton(action.chip));
+  wrap.appendChild(row);
+  attachActionExplain(wrap, action.id);
+  if (!row.childNodes.length) row.remove();
   return wrap;
 }
 
@@ -795,16 +1014,12 @@ async function renderHome() {
   cardsWrap.appendChild(h('p', { class: 'loading-text' }, '불러오는 중...'));
   root.appendChild(cardsWrap);
 
+  /* 홈은 입력만 받고 대화는 #chat 에서 이어간다(첫 화면 LLM 0회 유지). */
   const inputCard = buildChatInputCard();
   root.appendChild(inputCard.node);
 
-  const transcriptWrap = h('div', { class: 'chat-transcript', id: 'chatTranscriptWrap' });
-  root.appendChild(transcriptWrap);
-
   const homeChipsWrap = h('div', { class: 'chip-row', id: 'homeChipsWrap' });
   root.appendChild(homeChipsWrap);
-
-  renderChatTranscript();
 
   const res = await loadAndSetHome();
   if (isStale()) return;
@@ -815,7 +1030,8 @@ async function renderHome() {
     return;
   }
   const payload = res.data || {};
-  (payload.cards || []).forEach((c) => cardsWrap.appendChild(buildInsightCard(c)));
+  const topActionId = (payload.top_action && payload.top_action.id) || null;
+  (payload.cards || []).forEach((c) => cardsWrap.appendChild(buildInsightCard(c, topActionId)));
   clearNode(homeChipsWrap);
   (payload.chips || []).forEach((c) => homeChipsWrap.appendChild(chipButton(c)));
 }
@@ -833,15 +1049,38 @@ function buildChatInputCard() {
 
   const sendBtn = h('button', {
     type: 'submit', class: 'send-btn', id: 'chatSendBtn', 'aria-label': '메시지 보내기',
-  }, icon('send', 18));
-  if (state.chat.pending) {
-    sendBtn.disabled = true;
-    sendBtn.setAttribute('aria-busy', 'true');
-  }
+  }, icon('send', 18), h('span', { class: 'send-spinner', 'aria-hidden': 'true' }));
 
   const row = h('div', { class: 'chat-input-row' }, left, sendBtn);
   const form = h('form', { id: 'chatForm', class: 'chat-input-card', onSubmit: onChatSubmit }, input, row);
+  /* Enter 로 전송. 한글 입력 중(IME 조합)에 눌린 Enter 는 글자를 확정하는 키라 보내지 않는다. */
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.shiftKey) return;
+    if (e.isComposing || e.keyCode === 229) return;
+    onChatSubmit(e);
+  });
+  /* 응답 생성 중이면 입력과 보내기를 잠근다(진행 표시는 버튼 안 스피너). */
+  applyChatPendingToInputs(form);
   return { node: form, input };
+}
+
+/* 입력 카드가 새로 그려질 때마다 현재 pending 상태를 반영한다. */
+function applyChatPendingToInputs(scope) {
+  const root = scope || document;
+  const pending = !!state.chat.pending;
+  const btn = root.querySelector ? root.querySelector('#chatSendBtn') : null;
+  if (btn) {
+    btn.disabled = pending;
+    btn.setAttribute('aria-busy', String(pending));
+    btn.classList.toggle('is-busy', pending);
+    btn.setAttribute('aria-label', pending ? '응답을 받는 중' : '메시지 보내기');
+  }
+  const input = root.querySelector ? root.querySelector('#chatInput') : null;
+  if (input) {
+    input.disabled = pending;
+    input.setAttribute('aria-busy', String(pending));
+    input.placeholder = pending ? '응답을 받는 중이에요' : '어떤 부채 고민을 도와드릴까요?';
+  }
 }
 
 function onChatSubmit(e) {
@@ -1562,6 +1801,7 @@ function buildCompareStep1(ctx) {
     }
     state.compare.result = res.data;
     state.compare.step = 2;
+    state.compare.explain = { decisionId: null, status: 'idle', data: null };
     renderCompare();
   });
 
@@ -1617,7 +1857,7 @@ function hasUsableRate(item) {
   return Number.isFinite(n) && n > 0;
 }
 
-function buildCompareItemCard(item) {
+function buildCompareItemCard(item, reason) {
   const card = h('div', { class: 'compare-item-card' });
   const rateOk = hasUsableRate(item);
 
@@ -1653,6 +1893,9 @@ function buildCompareItemCard(item) {
       '금리가 공시되지 않아 월 납입과 총이자를 계산하지 않았습니다.'));
   }
 
+  /* 상위 3개 항목에는 설명 문장(SPEC 2.8 item_reasons)을 한 줄로 넣는다. */
+  if (reason) card.appendChild(h('p', { class: 'compare-item-reason' }, reason));
+
   const foot = h('div', { class: 'compare-item-foot' });
   const linkLabel = disclosureLinkLabel(item.disclosure_url);
   if (linkLabel) {
@@ -1670,11 +1913,106 @@ function buildCompareItemCard(item) {
   return card;
 }
 
+/* ---- 출처 표기 ----
+   공시 월은 assumptions 의 "공시 자료 기준: 2026년 8월" 문장에서 읽고,
+   기관 이름은 항목의 disclosure_url 호스트로 정한다(정책상품은 정책기관). */
+const DISCLOSURE_SOURCE_NAMES = [
+  { host: 'finlife.fss.or.kr', name: '금융감독원 금융상품한눈에' },
+  { host: 'kinfa.or.kr', name: '서민금융진흥원' },
+  { host: 'hf.go.kr', name: '주택금융공사' },
+];
+
+function disclosureMonthText(assumptions) {
+  const list = Array.isArray(assumptions) ? assumptions : [];
+  for (const a of list) {
+    const m = /공시\s*자료\s*기준\s*[:：]\s*(.+?)\s*$/.exec(String(a || ''));
+    if (m) return m[1].trim();
+  }
+  return '';
+}
+
+function disclosureSourceNames(items) {
+  const found = [];
+  (items || []).forEach((it) => {
+    const url = String((it && it.disclosure_url) || '').trim();
+    if (!/^https?:\/\//i.test(url)) return;
+    let host = '';
+    try { host = new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch (_) { return; }
+    const hit = DISCLOSURE_SOURCE_NAMES.find((e) => host === e.host || host.endsWith('.' + e.host));
+    if (hit && found.indexOf(hit.name) === -1) found.push(hit.name);
+  });
+  return found;
+}
+
+function buildDisclosureCitation(result) {
+  const names = disclosureSourceNames(result.items);
+  const fallback = result.context && result.context.category === COMPARE_POLICY_CATEGORY
+    ? ['서민금융진흥원', '주택금융공사'] : ['금융감독원 금융상품한눈에'];
+  const source = (names.length ? names : fallback).join(' · ');
+  const month = disclosureMonthText(result.assumptions);
+  const text = month ? `출처: ${source} · ${month} 공시` : `출처: ${source} 공시 자료`;
+  return h('p', { class: 'source-citation' }, text);
+}
+
+/* "왜 이 순서인가요?" 블록. 결과를 먼저 그린 뒤 채운다(첫 화면 LLM 0회 유지).
+   다른 비교로 넘어갔으면 늦게 온 응답은 decision_id 대조로 버린다. */
+function fillCompareExplain(slot, result) {
+  const decisionId = result.decision_id;
+  if (!decisionId) { slot.classList.add('is-hidden'); return; }
+
+  const cached = state.compare.explain;
+  if (cached && cached.decisionId === decisionId && cached.status === 'done' && cached.data) {
+    renderCompareExplain(slot, result, cached.data);
+    return;
+  }
+
+  state.compare.explain = { decisionId, status: 'loading', data: null };
+  clearNode(slot);
+  slot.classList.remove('is-hidden');
+  slot.appendChild(h('h3', { class: 'explain-block-title' }, '왜 이 순서인가요?'));
+  slot.appendChild(explainPlaceholder());
+
+  Api.compareExplain(decisionId).then((res) => {
+    if (state.compare.explain.decisionId !== decisionId) return;  // 다른 비교로 넘어갔다
+    if (!document.body.contains(slot)) return;                    // 화면을 떠났다
+    if (!res.ok) {
+      state.compare.explain = { decisionId, status: 'failed', data: null };
+      slot.classList.add('is-hidden');
+      clearNode(slot);
+      return;
+    }
+    state.compare.explain = { decisionId, status: 'done', data: res.data };
+    renderCompareExplain(slot, result, res.data);
+  });
+}
+
+function renderCompareExplain(slot, result, data) {
+  clearNode(slot);
+  slot.classList.remove('is-hidden');
+  slot.appendChild(h('h3', { class: 'explain-block-title' }, '왜 이 순서인가요?'));
+  slot.appendChild(buildExplainBody(data));
+
+  /* 항목 카드의 한 줄 이유는 결과가 이미 그려진 뒤 채운다. */
+  const reasons = (data && data.item_reasons) || {};
+  const scope = slot.parentNode || document;
+  (result.items || []).forEach((item) => {
+    const holder = scope.querySelector(`[data-reason-rank="${item.rank}"]`);
+    if (!holder) return;
+    const text = reasons[String(item.rank)];
+    clearNode(holder);
+    if (text) holder.appendChild(h('p', { class: 'compare-item-reason' }, text));
+  });
+}
+
 function buildCompareStep2(result) {
   const wrap = h('div', {});
   wrap.appendChild(compareStepIndicator(2));
 
   wrap.appendChild(h('p', { class: 'sort-explain' }, result.sort_explain || ''));
+
+  const explainSlot = h('div', { class: 'explain-block is-hidden' });
+  wrap.appendChild(explainSlot);
+
   wrap.appendChild(h('p', { class: 'compare-count' },
     `전체 ${result.candidates_total ?? '-'}개 상품 중 상위 ${(result.items || []).length}개`));
 
@@ -1682,7 +2020,13 @@ function buildCompareStep2(result) {
   if (!items.length) {
     wrap.appendChild(noticeBox('조건에 맞는 공시 상품이 없습니다. 조건을 넓혀서 다시 시도해보세요.'));
   }
-  items.forEach((item) => wrap.appendChild(buildCompareItemCard(item)));
+  items.forEach((item) => {
+    const card = buildCompareItemCard(item);
+    card.appendChild(h('div', { class: 'reason-slot', 'data-reason-rank': String(item.rank) }));
+    wrap.appendChild(card);
+  });
+
+  if (items.length) wrap.appendChild(buildDisclosureCitation(result));
 
   const assumptions = plainList(result.assumptions, 'plain-list');
   if (assumptions) {
@@ -1692,12 +2036,18 @@ function buildCompareStep2(result) {
     wrap.appendChild(details);
   }
 
-  wrap.appendChild(h('p', { class: 'result-meta-line' },
+  const tech = h('details', { class: 'collapsible quiet' });
+  tech.appendChild(h('summary', {}, '기술 정보'));
+  tech.appendChild(h('p', { class: 'result-meta-line' },
     `decision_id ${result.decision_id} · result_hash ${result.result_hash} · snapshot ${result.snapshot_id} · engine ${result.engine_version} · ${fmtDateTime(result.created_at)}`));
+  wrap.appendChild(tech);
 
   wrap.appendChild(h('div', { class: 'form-actions' },
     h('button', { type: 'button', class: 'btn btn-secondary', onClick: backToCompareStep1 }, '조건 바꿔서 다시 보기'),
   ));
+
+  /* 결과(숫자)를 다 그린 다음에 설명을 요청한다. */
+  setTimeout(() => fillCompareExplain(explainSlot, result), 0);
 
   return wrap;
 }
@@ -2662,7 +3012,10 @@ function buildRatioTiles(ratios) {
       flag === 'ok' ? '기준 충족' : flag === 'warn' ? '점검 필요' : flag === 'ref' ? '참고 지표' : '자료 부족'));
     tile.appendChild(head);
     tile.appendChild(h('div', { class: 'ratio-value' }, ratioValueText(meta, ratios[meta.key])));
-    tile.appendChild(h('div', { class: 'ratio-threshold' }, ratioThresholdText(meta, threshold)));
+    const thresholdRow = h('div', { class: 'ratio-threshold' }, ratioThresholdText(meta, threshold));
+    /* 기준값은 아직 검증되지 않은 참고 문서 값이다(SPEC 2.7 가정 문장과 같은 출처). */
+    if (threshold !== null) thresholdRow.appendChild(h('span', { class: 'verify-note' }, VERIFY_SOURCE_NOTE));
+    tile.appendChild(thresholdRow);
     const sentence = (ratios.interpretations || {})[meta.key];
     if (sentence) tile.appendChild(h('p', { class: 'ratio-note' }, sentence));
     grid.appendChild(tile);
@@ -2742,7 +3095,7 @@ function buildRetirementCard(proj) {
   if (proj.assumptions && proj.assumptions.length) {
     const details = h('details', { class: 'collapsible quiet' });
     details.appendChild(h('summary', {}, '가정 보기'));
-    details.appendChild(plainList(proj.assumptions, 'plain-list'));
+    details.appendChild(verifiableList(proj.assumptions, 'plain-list'));
     card.appendChild(details);
   }
   return card;
@@ -3232,7 +3585,7 @@ async function renderLifecycle() {
   if (assumptions.length) {
     const details = h('details', { class: 'collapsible quiet' });
     details.appendChild(h('summary', {}, `이 화면이 쓴 가정 ${assumptions.length}개 보기`));
-    details.appendChild(plainList(assumptions, 'plain-list'));
+    details.appendChild(verifiableList(assumptions, 'plain-list'));
     footer.appendChild(details);
   }
   footer.appendChild(h('p', { class: 'lifecycle-disclaimer' }, data.disclaimer || LIFECYCLE_LEAD));
@@ -3243,9 +3596,15 @@ async function renderLifecycle() {
 
 /* 계정(페르소나)이 바뀌면 대화는 그 계정의 것이므로 화면에서 비운다. */
 function resetChatForProfileChange() {
+  state.chat.streamSeq += 1;
   state.chat.messages = [];
   state.chat.chatId = null;
   state.chat.pending = false;
+  state.chat.title = '';
+  state.chat.resources = [];
+  state.chat.queuedSend = null;
+  state.chat.liveRow = null;
+  state.actionExplains = {};
 }
 
 /* 소비 패턴 분석 결과도 계정별이므로 계정이 바뀌면 다시 불러온다. */
@@ -3362,7 +3721,14 @@ function buildDecisionRow(rec) {
     `${fmtDateTime(rec.created_at)} · ${String(rec.result_hash || '').slice(0, 10)}`));
   row.appendChild(info);
 
-  const detailPre = h('pre', { class: 'decision-detail-pre is-hidden' });
+  const detailWrap = h('div', { class: 'decision-detail is-hidden' });
+  const explainSlot = h('div', {});
+  const detailPre = h('pre', { class: 'decision-detail-pre' });
+  const techDetails = h('details', { class: 'collapsible quiet' });
+  techDetails.appendChild(h('summary', {}, '기술 정보'));
+  techDetails.appendChild(detailPre);
+  detailWrap.appendChild(explainSlot);
+  detailWrap.appendChild(techDetails);
   const resultSpan = h('span', { class: 'replay-result' });
 
   const actions = h('div', { class: 'decision-actions' });
@@ -3381,21 +3747,30 @@ function buildDecisionRow(rec) {
   actions.appendChild(h('button', {
     type: 'button', class: 'btn btn-secondary btn-sm', 'aria-label': '상세 보기',
     onClick: async () => {
-      const isHidden = detailPre.classList.contains('is-hidden');
-      if (isHidden && !detailPre.dataset.loaded) {
+      const isHidden = detailWrap.classList.contains('is-hidden');
+      if (isHidden && !detailWrap.dataset.loaded) {
         detailPre.textContent = '불러오는 중...';
+        detailWrap.dataset.loaded = '1';
         const r = await Api.getDecision(rec.decision_id);
         detailPre.textContent = r.ok ? JSON.stringify(r.data, null, 2) : '상세 정보를 불러오지 못했습니다.';
-        detailPre.dataset.loaded = '1';
+        /* 저장된 설명만 보여준다(생성하지 않는다, SPEC 2.8). 없으면 그냥 생략한다. */
+        if (rec.kind === 'compare') {
+          const ex = await Api.getCompareExplain(rec.decision_id);
+          if (ex.ok && ex.data && ex.data.summary) {
+            clearNode(explainSlot);
+            explainSlot.appendChild(h('h3', { class: 'explain-block-title' }, '왜 이 순서인가요?'));
+            explainSlot.appendChild(buildExplainBody(ex.data));
+          }
+        }
       }
-      detailPre.classList.toggle('is-hidden');
+      detailWrap.classList.toggle('is-hidden');
     },
   }, '상세'));
   actions.appendChild(resultSpan);
   row.appendChild(actions);
 
   wrap.appendChild(row);
-  wrap.appendChild(detailPre);
+  wrap.appendChild(detailWrap);
   return wrap;
 }
 
@@ -3423,44 +3798,492 @@ async function renderDecisions() {
   items.forEach((rec) => listWrap.appendChild(buildDecisionRow(rec)));
 }
 
-/* ---------- 13. 채팅 ---------- */
+/* ---------- 13. 대화 화면 (#chat) ----------
+   SPEC 2.9 / 2.11. 홈에서 메시지를 보내면 이 화면으로 넘어와 스트림을 받는다.
+   그리는 순서: (1) 사용자 말풍선 (2) 노드 카드 묶음("생각 과정")
+   (3) 응답 문장(타자 효과) (4) 인라인 액션 카드 (5) 칩.
+   서버 문자열은 전부 텍스트 노드로 넣는다(innerHTML 사용 금지). */
 
-function buildPendingRow() {
-  const dots = h('span', { class: 'chat-pending-dots', 'aria-hidden': 'true' }, h('i', {}), h('i', {}), h('i', {}));
-  const box = h('div', { class: 'chat-pending', role: 'status', 'aria-live': 'polite' }, dots, h('span', {}, '생각하는 중'));
-  return h('div', { class: 'chat-bubble-row from-reply' }, box);
+/* ---- 13-1. 마크다운 라이트 렌더러 ----
+   answer_format="markdown" 응답만 여기로 온다. 제목(#~####), **굵게**, "- " 목록,
+   "1. " 번호 목록, 빈 줄 단락만 처리하고 나머지는 전부 평문으로 이스케이프한다.
+   링크는 만들지 않는다(주소는 리소스 패널에만 둔다). */
+
+function appendInlineMarkdown(parent, text) {
+  const src = String(text || '');
+  const re = /\*\*([^*\n]+)\*\*/g;
+  let last = 0;
+  let m = re.exec(src);
+  while (m !== null) {
+    if (m.index > last) parent.appendChild(document.createTextNode(src.slice(last, m.index)));
+    parent.appendChild(h('strong', {}, m[1]));
+    last = m.index + m[0].length;
+    m = re.exec(src);
+  }
+  if (last < src.length) parent.appendChild(document.createTextNode(src.slice(last)));
 }
 
-function kbSourceList(sources, cls) {
-  const list = Array.isArray(sources) ? sources.filter(Boolean) : [];
-  if (!list.length) return null;
-  const ul = h('ul', { class: cls || 'kb-source-list' });
-  list.forEach((s) => {
-    const li = h('li', {});
-    const title = s.title || s.url || '출처';
-    if (s.url && /^https?:\/\//i.test(s.url)) {
-      li.appendChild(h('a', { href: s.url, target: '_blank', rel: 'noopener noreferrer' }, title));
-    } else {
-      li.appendChild(h('span', {}, title));
+function renderMarkdownLite(text) {
+  const frag = document.createDocumentFragment();
+  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  let list = null;
+  let listTag = null;
+  let para = null;
+  const flushList = () => { if (list) { frag.appendChild(list); list = null; listTag = null; } };
+  const flushPara = () => { if (para) { frag.appendChild(para); para = null; } };
+
+  lines.forEach((raw) => {
+    const line = raw.trim();
+    if (!line) { flushList(); flushPara(); return; }
+
+    const head = /^(#{1,4})\s+(.+)$/.exec(line);
+    if (head) {
+      flushList(); flushPara();
+      const el = h(head[1].length <= 2 ? 'h3' : 'h4', { class: 'md-h' });
+      appendInlineMarkdown(el, head[2]);
+      frag.appendChild(el);
+      return;
     }
-    if (s.accessed) li.appendChild(h('span', { class: 'kb-source-date' }, `확인 ${s.accessed}`));
-    ul.appendChild(li);
+
+    const bullet = /^[-*]\s+(.+)$/.exec(line);
+    if (bullet) {
+      flushPara();
+      if (!list || listTag !== 'ul') { flushList(); list = h('ul', { class: 'md-ul' }); listTag = 'ul'; }
+      const li = h('li', {});
+      appendInlineMarkdown(li, bullet[1]);
+      list.appendChild(li);
+      return;
+    }
+
+    const num = /^(\d{1,2})[.)]\s+(.+)$/.exec(line);
+    if (num) {
+      flushPara();
+      if (!list || listTag !== 'ol') { flushList(); list = h('ol', { class: 'md-ol' }); listTag = 'ol'; }
+      const li = h('li', {});
+      appendInlineMarkdown(li, num[2]);
+      list.appendChild(li);
+      return;
+    }
+
+    flushList();
+    if (!para) para = h('p', { class: 'md-p' });
+    else para.appendChild(document.createTextNode('\n'));
+    appendInlineMarkdown(para, line);
   });
-  return ul;
+
+  flushList();
+  flushPara();
+  return frag;
 }
 
-/* open_kb 응답은 말풍선 대신 "제도 안내" 카드로 보여준다(화면 이동은 하지 않는다). */
+/* answer_format 에 따라 본문 노드를 만든다. text 면 줄바꿈만 살린다. */
+function buildAnswerBody(text, format) {
+  const box = h('div', { class: 'answer-body' });
+  if (format === 'markdown') {
+    box.classList.add('is-markdown');
+    box.appendChild(renderMarkdownLite(text));
+  } else {
+    box.classList.add('is-text');
+    box.appendChild(document.createTextNode(String(text || '')));
+  }
+  return box;
+}
+
+/* ---- 13-2. 타자 효과 ----
+   완성된 DOM 을 먼저 만들고 텍스트 노드만 앞에서부터 채운다(마크다운 구조를 지킨다).
+   글자당 12ms 기준, 전체 2.5초를 넘지 않도록 한 틱에 여러 글자를 드러낸다.
+   클릭하면 즉시 전체 표시. 동작 최소화 설정이면 처음부터 전부 보여준다. */
+
+const TYPE_TICK_MS = 16;
+const TYPE_PER_CHAR_MS = 12;
+const TYPE_MAX_MS = 2500;
+
+function prefersReducedMotion() {
+  try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (_) { return false; }
+}
+
+function typeIntoElement(el) {
+  const parts = [];
+  let total = 0;
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+  let node = walker.nextNode();
+  while (node) {
+    parts.push({ node, full: node.data });
+    total += node.data.length;
+    node = walker.nextNode();
+  }
+  if (!total || prefersReducedMotion()) return { finish: () => {} };
+
+  parts.forEach((p) => { p.node.data = ''; });
+  el.classList.add('is-typing');
+
+  /* 남은 시간이 아니라 "지난 시간"으로 진행도를 계산한다. 배경 탭처럼 타이머가
+     느려지는 환경에서도 정해진 시간 안에 문장이 다 나온다. */
+  const duration = Math.min(TYPE_MAX_MS, Math.max(240, total * TYPE_PER_CHAR_MS));
+  const started = Date.now();
+  let shown = 0;
+  let idx = 0;
+  let offset = 0;
+  let timer = null;
+
+  const revealTo = (target) => {
+    while (shown < target && idx < parts.length) {
+      const p = parts[idx];
+      const take = Math.min(target - shown, p.full.length - offset);
+      offset += take;
+      shown += take;
+      p.node.data = p.full.slice(0, offset);
+      if (offset >= p.full.length) { idx += 1; offset = 0; }
+    }
+  };
+
+  const finish = () => {
+    if (timer) { clearInterval(timer); timer = null; }
+    parts.forEach((p) => { p.node.data = p.full; });
+    el.classList.remove('is-typing');
+    el.removeEventListener('click', finish);
+  };
+
+  timer = setInterval(() => {
+    const ratio = (Date.now() - started) / duration;
+    if (ratio >= 1) { finish(); return; }
+    revealTo(Math.max(1, Math.floor(total * ratio)));
+  }, TYPE_TICK_MS);
+
+  el.addEventListener('click', finish);
+  return { finish };
+}
+
+/* ---- 13-3. 노드 카드("생각 과정") ---- */
+
+function stageStatusIcon(status) {
+  if (status === 'done') return icon('check', 13);
+  if (status === 'fallback') return icon('alert', 13);
+  if (status === 'skip') return icon('minus', 13);
+  return h('span', { class: 'node-spinner', 'aria-hidden': 'true' });
+}
+
+function buildNodeCard(stage) {
+  const status = stage.status || 'start';
+  const card = h('div', { class: `node-card is-${status}` });
+
+  const top = h('div', { class: 'node-card-top' });
+  const mark = h('span', {
+    class: 'node-status', 'aria-label': STAGE_STATUS_LABELS[status] || status, role: 'img',
+  }, stageStatusIcon(status));
+  top.appendChild(mark);
+  top.appendChild(h('span', { class: 'node-label' }, stage.label || stage.id || '단계'));
+  const ms = Number(stage.ms || 0);
+  if (ms > 0) top.appendChild(h('span', { class: 'node-ms' }, ms >= 1000 ? `${(ms / 1000).toFixed(1)}초` : `${ms}ms`));
+  card.appendChild(top);
+
+  if (stage.detail) card.appendChild(h('p', { class: 'node-detail' }, stage.detail));
+
+  if (Array.isArray(stage.steps) && stage.steps.length) {
+    const ul = h('ul', { class: 'node-steps' });
+    stage.steps.forEach((s) => ul.appendChild(h('li', {}, String(s))));
+    card.appendChild(ul);
+  }
+
+  const refs = Array.isArray(stage.resource_refs) ? stage.resource_refs.filter(Boolean) : [];
+  if (refs.length) card.appendChild(h('span', { class: 'node-refs' }, `리소스 ${refs.length}개`));
+
+  return card;
+}
+
+function traceTotalSeconds(trace) {
+  const ms = (trace || []).reduce((sum, s) => sum + Number((s && s.ms) || 0), 0);
+  return ms / 1000;
+}
+
+/* 응답이 끝나면 묶음을 한 줄 요약으로 접는다. 클릭하면 카드들이 펼쳐진다. */
+function buildTraceSummary(trace, model) {
+  const list = Array.isArray(trace) ? trace.filter(Boolean) : [];
+  if (!list.length) return null;
+  const parts = [`생각 과정 ${list.length}단계`, `${traceTotalSeconds(list).toFixed(1)}초`];
+  if (model) parts.push(`Gemini ${model}`);
+
+  const details = h('details', { class: 'node-group is-collapsed' });
+  details.appendChild(h('summary', { class: 'node-group-summary' }, parts.join(' · ')));
+  const body = h('div', { class: 'node-cards' });
+  list.forEach((s) => body.appendChild(buildNodeCard(s)));
+  details.appendChild(body);
+  return details;
+}
+
+/* 스트리밍 중에는 stage 이벤트마다 카드를 다시 그린다. */
+function buildLiveNodeGroup() {
+  const wrap = h('div', { class: 'node-group is-live' });
+  const head = h('div', { class: 'node-group-head' });
+  head.appendChild(h('span', { class: 'node-group-title' }, '생각 과정'));
+  const countEl = h('span', { class: 'node-group-count' }, '사용한 노드 0개');
+  head.appendChild(countEl);
+  wrap.appendChild(head);
+  const cards = h('div', { class: 'node-cards', role: 'status', 'aria-live': 'polite' });
+  wrap.appendChild(cards);
+
+  const order = [];
+  const byId = Object.create(null);
+
+  const redraw = () => {
+    clearNode(cards);
+    order.forEach((id) => cards.appendChild(buildNodeCard(byId[id])));
+    countEl.textContent = `사용한 노드 ${order.length}개`;
+  };
+
+  return {
+    node: wrap,
+    isEmpty: () => order.length === 0,
+    stages: () => order.map((id) => byId[id]),
+    push: (ev) => {
+      if (!ev || !ev.id) return;
+      if (!byId[ev.id]) { byId[ev.id] = {}; order.push(ev.id); }
+      Object.keys(ev).forEach((k) => {
+        const v = ev[k];
+        if (v === '' && byId[ev.id][k]) return;
+        byId[ev.id][k] = v;
+      });
+      redraw();
+    },
+  };
+}
+
+/* ---- 13-4. 리소스 (SPEC 2.11) ---- */
+
+function groupResources(list) {
+  const seen = Object.create(null);
+  const order = [];
+  (Array.isArray(list) ? list : []).forEach((r) => {
+    if (!r || !r.kind) return;
+    if (!seen[r.kind]) { seen[r.kind] = []; order.push(r.kind); }
+    seen[r.kind].push(r);
+  });
+  const known = RESOURCE_KIND_ORDER.filter((k) => seen[k]);
+  const extra = order.filter((k) => RESOURCE_KIND_ORDER.indexOf(k) === -1);
+  return known.concat(extra).map((k) => ({ kind: k, items: seen[k] }));
+}
+
+function resourceCount(list) {
+  return (Array.isArray(list) ? list : []).filter(Boolean).length;
+}
+
+/* 리소스를 클릭했을 때 여는 화면. 열 곳이 없으면 null 을 돌려준다. */
+function resourceOpenAction(r) {
+  const kind = r.kind;
+  if (kind === 'kb') {
+    const slug = String(r.ref || '').split('#')[0];
+    if (!slug) return null;
+    return () => openKbPanel(slug, r.title);
+  }
+  if (kind === 'calc') return () => navigateTo('decisions');
+  if (kind === 'loan' || kind === 'profile') return () => navigateTo('debts');
+  if (kind === 'products') return () => navigateTo('compare');
+  return null;
+}
+
+function resourceItemNode(r) {
+  const li = h('li', { class: `resource-item kind-${r.kind || 'other'}` });
+  const openFn = resourceOpenAction(r);
+  const inner = openFn
+    ? h('button', { type: 'button', class: 'resource-open', 'aria-label': `${r.title || '자료'} 열기`, onClick: openFn })
+    : h('div', { class: 'resource-open is-static' });
+
+  inner.appendChild(h('span', { class: 'resource-title' }, r.title || '자료'));
+  if (r.detail) inner.appendChild(h('span', { class: 'resource-detail' }, r.detail));
+
+  const meta = h('span', { class: 'resource-meta' });
+  if (r.verified_at) meta.appendChild(h('span', { class: 'resource-date' }, `확인 ${r.verified_at}`));
+  if (r.needs_verification) meta.appendChild(badge('(확인 필요)', 'badge-estimated estimated-tag'));
+  if (meta.childNodes.length) inner.appendChild(meta);
+  li.appendChild(inner);
+
+  if (typeof r.url === 'string' && /^https?:\/\//i.test(r.url)) {
+    const link = h('a', {
+      class: 'resource-link', href: r.url, target: '_blank', rel: 'noopener noreferrer',
+      'aria-label': `${r.title || '자료'} 새 창으로 열기`,
+    }, '새 창에서 열기');
+    link.appendChild(icon('external', 12));
+    li.appendChild(link);
+  }
+  return li;
+}
+
+function buildResourceGroups(list) {
+  const frag = document.createDocumentFragment();
+  groupResources(list).forEach((g) => {
+    const box = h('div', { class: 'resource-group' });
+    box.appendChild(h('div', { class: 'resource-group-head' },
+      h('span', { class: 'resource-group-title' }, RESOURCE_KIND_LABELS[g.kind] || '자료'),
+      h('span', { class: 'resource-group-count' }, `${g.items.length}개`)));
+    const ul = h('ul', { class: 'resource-list' });
+    g.items.forEach((r) => ul.appendChild(resourceItemNode(r)));
+    box.appendChild(ul);
+    frag.appendChild(box);
+  });
+  return frag;
+}
+
+/* 오른쪽 고정 열. 리소스가 없으면 열 자체를 숨긴다. */
+function renderResourcePanel() {
+  const col = document.getElementById('chatResourceCol');
+  const body = document.getElementById('chatResourceBody');
+  const countEl = document.getElementById('chatResourceCount');
+  if (!col || !body) return;
+  const list = state.chat.resources || [];
+  const n = resourceCount(list);
+  col.classList.toggle('is-hidden', n === 0);
+  if (countEl) countEl.textContent = `${n}개`;
+  clearNode(body);
+  if (n) body.appendChild(buildResourceGroups(list));
+}
+
+/* 각 응답 말풍선 아래의 접이식 "리소스 N개" (좁은 화면에서 패널 대신 쓰인다). */
+function buildResourceToggle(list) {
+  const n = resourceCount(list);
+  if (!n) return null;
+  const details = h('details', { class: 'resource-inline' });
+  details.appendChild(h('summary', {}, `리소스 ${n}개`));
+  details.appendChild(buildResourceGroups(list));
+  return details;
+}
+
+/* ---- 13-5. 인라인 액션 카드 (자동 화면 이동 없음) ---- */
+
+const PREPARE_FIELD_LABELS = {
+  category: '카테고리', amount: '금액', term_months: '기간', repay_method: '상환 방식',
+  credit_band: '신용 구간', sort_key: '정렬 기준', target_loan_id: '대상 대출',
+  rate_type: '금리 유형', max_rate: '금리 상한',
+};
+
+function prepareRow(key, value, estimated) {
+  const row = h('div', { class: 'prep-row' });
+  const label = h('span', { class: 'prep-label' }, PREPARE_FIELD_LABELS[key] || key);
+  if (estimated) label.appendChild(badge('추정', 'badge-estimated estimated-tag'));
+  row.appendChild(label);
+  row.appendChild(h('span', { class: 'prep-value' }, value));
+  return row;
+}
+
+function buildPrepareCompareCard(params) {
+  const p = params || {};
+  const est = Array.isArray(p.estimated_fields) ? p.estimated_fields : [];
+  const card = h('div', { class: 'inline-action-card' });
+  card.appendChild(h('div', { class: 'inline-action-head' },
+    h('span', { class: 'inline-action-kicker' }, '공시 비교 조건'),
+    h('span', { class: 'inline-action-title' }, '이 조건으로 나란히 비교할 수 있어요')));
+
+  const rows = h('div', { class: 'prep-rows' });
+  rows.appendChild(prepareRow('category', CATEGORY_LABELS[p.category] || p.category || '-', est.indexOf('category') >= 0));
+  rows.appendChild(prepareRow('amount', fmtWon(p.amount), est.indexOf('amount') >= 0));
+  rows.appendChild(prepareRow('term_months', fmtMonths(p.term_months), est.indexOf('term_months') >= 0));
+  rows.appendChild(prepareRow('repay_method', REPAY_METHOD_LABELS[p.repay_method] || p.repay_method || '-', est.indexOf('repay_method') >= 0));
+  if (p.credit_band) rows.appendChild(prepareRow('credit_band', String(p.credit_band), est.indexOf('credit_band') >= 0));
+  card.appendChild(rows);
+
+  card.appendChild(h('div', { class: 'inline-action-foot' }, h('button', {
+    type: 'button', class: 'btn btn-primary btn-sm', 'aria-label': '조건 확인하고 비교하기',
+    onClick: () => goToCompareWithPrepare(p),
+  }, '조건 확인하고 비교하기')));
+  return card;
+}
+
+function buildOpenViewCard(payload) {
+  const raw = payload.view || payload.name || payload.target || (typeof payload === 'string' ? payload : '');
+  const view = String(raw || '').replace('#', '');
+  if (!view) return null;
+  const label = OPEN_VIEW_LABELS[view] || '화면 열기';
+  const card = h('div', { class: 'inline-action-card is-compact' });
+  card.appendChild(h('button', {
+    type: 'button', class: 'btn btn-secondary btn-sm', 'aria-label': label,
+    onClick: () => navigateTo(view),
+  }, label));
+  return card;
+}
+
+function buildInlineActionCard(action) {
+  if (!action || !action.type) return null;
+  const payload = action.payload || {};
+  if (action.type === 'prepare_compare') return buildPrepareCompareCard(payload.params || payload);
+  if (action.type === 'open_view') return buildOpenViewCard(payload);
+  return null;  // open_kb 는 본문 자체가 제도 안내 카드다
+}
+
+/* ---- 13-6. 제도 안내(KB) 카드 ---- */
+
+/* 본문에 섞여 오는 주의·면책 문장. 본문이 아니라 작은 회색 노트 줄로 뺀다. */
+const KB_NOTE_MARKERS = ['확인이 필요한 항목', '제도 설명은 참고용', '참고용이며'];
+const KB_SENTENCE_RE = /[^.!?]+[.!?]+|[^.!?]+$/g;
+
+/* text 형식 응답을 (요약, 핵심 목록, 노트)로 나눈다. markdown 은 렌더러가 처리한다. */
+function splitKbBody(text) {
+  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  const notes = [];
+  const bullets = [];
+  const sentences = [];
+
+  lines.forEach((raw) => {
+    const line = raw.trim();
+    if (!line) return;
+    if (/^[-*]\s+/.test(line)) { bullets.push(line.replace(/^[-*]\s+/, '')); return; }
+    (line.match(KB_SENTENCE_RE) || [line]).forEach((s) => {
+      const st = s.trim();
+      if (!st) return;
+      if (KB_NOTE_MARKERS.some((mk) => st.indexOf(mk) >= 0)) notes.push(st);
+      else sentences.push(st);
+    });
+  });
+
+  /* "OO 안내입니다."처럼 제목을 되풀이하는 첫 문장은 카드 제목과 겹치므로 뺀다. */
+  if (sentences.length > 1 && /안내입니다\.?$/.test(sentences[0])) sentences.shift();
+
+  const lead = sentences.length ? sentences[0] : '';
+  const rest = sentences.slice(1);
+  const points = bullets.length ? bullets.slice(0, 3) : rest.slice(0, 3);
+  return { lead, points, notes };
+}
+
+function kbSourceLine(source) {
+  const line = h('p', { class: 'kb-source-line' });
+  line.appendChild(h('span', { class: 'kb-source-prefix' }, '출처: '));
+  const title = source.title || source.url || '출처';
+  if (source.url && /^https?:\/\//i.test(source.url)) {
+    line.appendChild(h('a', {
+      href: source.url, target: '_blank', rel: 'noopener noreferrer',
+      'aria-label': `${title} 새 창으로 열기`,
+    }, title));
+  } else {
+    line.appendChild(h('span', {}, title));
+  }
+  if (source.accessed) line.appendChild(h('span', { class: 'kb-source-date' }, ` · 확인 ${source.accessed}`));
+  return line;
+}
+
 function buildKbReplyCard(msg) {
   const payload = (msg.action && msg.action.payload) || {};
   const card = h('div', { class: 'kb-card' });
+
   const head = h('div', { class: 'kb-card-head' });
   head.appendChild(h('span', { class: 'kb-card-kicker' }, '제도 안내'));
-  head.appendChild(h('span', { class: 'kb-card-title' }, payload.title || ''));
+  head.appendChild(h('span', { class: 'kb-card-title' }, payload.title || '제도 안내'));
   card.appendChild(head);
-  card.appendChild(h('p', { class: 'kb-card-body' }, msg.text || ''));
 
-  const sources = kbSourceList(payload.sources);
-  if (sources) card.appendChild(sources);
+  if (msg.answer_format === 'markdown') {
+    const body = h('div', { class: 'answer-body is-markdown kb-card-md' });
+    body.appendChild(renderMarkdownLite(msg.text || ''));
+    card.appendChild(body);
+  } else {
+    const parts = splitKbBody(msg.text || '');
+    if (parts.lead) card.appendChild(h('p', { class: 'kb-card-lead' }, parts.lead));
+    if (parts.points.length) {
+      const ul = h('ul', { class: 'kb-card-points' });
+      parts.points.forEach((p) => ul.appendChild(h('li', {}, p)));
+      card.appendChild(ul);
+    }
+    parts.notes.forEach((n) => card.appendChild(h('p', { class: 'kb-card-note' }, n)));
+  }
+
+  const sources = Array.isArray(payload.sources) ? payload.sources.filter(Boolean) : [];
+  sources.forEach((s) => card.appendChild(kbSourceLine(s)));
 
   if (payload.slug) {
     card.appendChild(h('div', { class: 'kb-card-actions' }, h('button', {
@@ -3472,112 +4295,325 @@ function buildKbReplyCard(msg) {
   return card;
 }
 
+/* ---- 13-7. 말풍선 ---- */
+
+function buildPendingRow() {
+  const dots = h('span', { class: 'chat-pending-dots', 'aria-hidden': 'true' }, h('i', {}), h('i', {}), h('i', {}));
+  return h('div', { class: 'chat-pending', role: 'status', 'aria-live': 'polite' }, dots, h('span', {}, '응답을 쓰는 중'));
+}
+
+function replyBadgeRow(msg) {
+  const row = h('div', { class: 'chat-reply-meta' });
+  if (msg.llm_used) {
+    row.appendChild(badge('AI 응답', 'badge-accent'));
+    if (msg.model) row.appendChild(h('span', { class: 'chat-model-name' }, msg.model));
+  } else {
+    row.appendChild(badge('규칙 기반 응답', 'badge-rule'));
+  }
+  if (msg.route === 'external') row.appendChild(badge('외부 검색 요약(확인 필요)', 'badge-estimated'));
+  if (msg.route === 'safety') row.appendChild(badge('안전 안내', 'badge-safe'));
+  return row;
+}
+
+/* 응답 한 건의 본문을 row 에 붙인다. typing 이면 타자 효과로 문장을 드러낸다. */
+function appendReplyBody(row, msg, opts) {
+  const typing = !!(opts && opts.typing);
+  row.appendChild(replyBadgeRow(msg));
+
+  const isKb = !!(msg.action && msg.action.type === 'open_kb');
+  let bodyEl;
+  if (isKb) {
+    bodyEl = buildKbReplyCard(msg);
+  } else {
+    bodyEl = h('div', { class: 'chat-bubble reply' });
+    bodyEl.appendChild(buildAnswerBody(msg.text || '', msg.answer_format));
+  }
+  row.appendChild(bodyEl);
+  if (typing) typeIntoElement(bodyEl);
+
+  const resToggle = buildResourceToggle(msg.resources);
+  if (resToggle) row.appendChild(resToggle);
+
+  const actionCard = buildInlineActionCard(msg.action);
+  if (actionCard) row.appendChild(actionCard);
+
+  if (msg.chips && msg.chips.length) row.appendChild(renderChipRow(msg.chips));
+}
+
+function buildReplyRow(msg, opts) {
+  const row = h('div', { class: 'chat-bubble-row from-reply' });
+  const summary = buildTraceSummary(msg.trace, msg.model);
+  if (summary) row.appendChild(summary);
+  appendReplyBody(row, msg, opts);
+  return row;
+}
+
 function renderChatTranscript(scrollToEnd) {
   const wrap = document.getElementById('chatTranscriptWrap');
   if (!wrap) return;
   clearNode(wrap);
+
+  if (!state.chat.messages.length && !state.chat.pending) {
+    wrap.appendChild(h('p', { class: 'chat-empty' },
+      '아래 입력창에 궁금한 점을 적어주세요. 계산은 엔진이 하고 설명만 AI가 씁니다.'));
+  }
+
   state.chat.messages.forEach((msg) => {
     if (msg.role === 'user') {
       wrap.appendChild(h('div', { class: 'chat-bubble-row from-user' }, h('div', { class: 'chat-bubble user' }, msg.text)));
     } else if (msg.role === 'reply') {
-      const row = h('div', { class: 'chat-bubble-row from-reply' });
-      row.appendChild(h('div', { class: 'chat-reply-meta' },
-        msg.llm_used ? badge('AI 응답', 'badge-accent') : badge('규칙 기반 응답', 'badge-rule')));
-      const isKb = !!(msg.action && msg.action.type === 'open_kb');
-      row.appendChild(isKb ? buildKbReplyCard(msg) : h('div', { class: 'chat-bubble reply' }, msg.text));
-      if (msg.chips && msg.chips.length) row.appendChild(renderChipRow(msg.chips));
-      wrap.appendChild(row);
+      wrap.appendChild(buildReplyRow(msg, { typing: false }));
     } else {
       wrap.appendChild(h('div', { class: 'chat-bubble-row from-reply' }, h('div', { class: 'chat-bubble error' }, msg.text)));
     }
   });
-  if (state.chat.pending) wrap.appendChild(buildPendingRow());
 
-  if (scrollToEnd && wrap.lastChild && wrap.lastChild.scrollIntoView) {
-    try { wrap.lastChild.scrollIntoView({ block: 'nearest' }); } catch (_) { /* noop */ }
-  }
+  /* 응답을 받는 중에 다른 화면에 갔다 돌아오면 진행 중인 줄을 그대로 다시 붙인다. */
+  if (state.chat.pending && state.chat.liveRow) wrap.appendChild(state.chat.liveRow);
+
+  if (scrollToEnd) scrollChatToEnd();
 }
+
+function scrollChatToEnd() {
+  const box = document.getElementById('chatTranscriptWrap') || document.getElementById('mainContent');
+  if (!box) return;
+  try { box.scrollTop = box.scrollHeight; } catch (_) { /* noop */ }
+}
+
+/* ---- 13-8. 전송과 스트리밍 ---- */
 
 function setChatPending(pending) {
   state.chat.pending = pending;
-  const btn = document.getElementById('chatSendBtn');
-  if (btn) {
-    btn.disabled = pending;
-    btn.setAttribute('aria-busy', String(pending));
-  }
-  const input = document.getElementById('chatInput');
-  if (input) input.setAttribute('aria-busy', String(pending));
-  renderChatTranscript(true);
+  applyChatPendingToInputs(document);
 }
 
-async function sendChatMessage(rawText) {
+function sendChatMessage(rawText) {
   const text = (rawText || '').trim();
   if (!text || state.chat.pending) return;
   state.chat.messages.push({ role: 'user', text });
+  state.chat.queuedSend = text;
   setChatPending(true);
 
-  const res = await Api.chat(text, state.chat.chatId);
-
-  if (!res.ok) {
-    state.chat.messages.push({ role: 'error', text: '응답을 받지 못했습니다. 잠시 후 다시 시도해주세요.' });
-    setChatPending(false);
+  if (currentRouteFromHash() !== 'chat') {
+    navigateTo('chat');  // renderChat 이 그린 뒤 이어서 보낸다
     return;
   }
-  const reply = res.data || {};
-  if (reply.chat_id) state.chat.chatId = reply.chat_id;
-  state.chat.messages.push({
-    role: 'reply', text: reply.reply_text || '', llm_used: !!reply.llm_used,
-    chips: reply.chips || [], action: reply.action || null,
-  });
-  setChatPending(false);
-  refreshRecentChats();
-  if (reply.action) handleChatAction(reply.action);
+  renderChatTranscript(true);
+  flushQueuedChatSend();
 }
 
-/* 사이드바 "최근"에서 고른 대화를 홈 화면 대화 영역으로 불러온다. */
+function flushQueuedChatSend() {
+  const text = state.chat.queuedSend;
+  if (!text) return;
+  state.chat.queuedSend = null;
+  performChatSend(text);
+}
+
+async function performChatSend(text) {
+  const seq = state.chat.streamSeq + 1;
+  state.chat.streamSeq = seq;
+
+  const wrap = document.getElementById('chatTranscriptWrap');
+  const row = h('div', { class: 'chat-bubble-row from-reply is-live' });
+  const group = buildLiveNodeGroup();
+  const bodySlot = h('div', { class: 'live-body-slot' });
+  bodySlot.appendChild(buildPendingRow());
+  row.appendChild(group.node);
+  row.appendChild(bodySlot);
+  state.chat.liveRow = row;
+  if (wrap) { wrap.appendChild(row); scrollChatToEnd(); }
+
+  let reply = null;
+  let streamed = false;
+  streamed = await streamChatRequest(text, state.chat.chatId, {
+    onStage: (s) => {
+      if (seq !== state.chat.streamSeq) return;
+      group.push(s);
+      scrollChatToEnd();
+    },
+    onReply: (r) => { reply = r; },
+    onError: (e) => { console.debug('[DONN] 대화 스트림 오류', (e && e.message) || e); },
+  });
+  if (seq !== state.chat.streamSeq) return;
+
+  if (!streamed || !reply) {
+    /* 스트림 실패: 같은 요청을 일반 엔드포인트로 한 번 더 보내고 생각 과정 없이 그린다. */
+    const res = await Api.chat(text, state.chat.chatId);
+    if (seq !== state.chat.streamSeq) return;
+    if (!res.ok) {
+      if (row.parentNode) row.parentNode.removeChild(row);
+      state.chat.liveRow = null;
+      state.chat.messages.push({ role: 'error', text: '응답을 받지 못했습니다. 잠시 후 다시 시도해주세요.' });
+      setChatPending(false);
+      renderChatTranscript(true);
+      return;
+    }
+    reply = res.data || {};
+    clearNode(group.node);
+  }
+
+  finishChatReply(row, group, reply);
+}
+
+function finishChatReply(row, group, reply) {
+  if (reply.chat_id) state.chat.chatId = reply.chat_id;
+
+  const msg = {
+    role: 'reply',
+    text: reply.reply_text || '',
+    llm_used: !!reply.llm_used,
+    model: reply.model || null,
+    route: reply.route || 'internal',
+    answer_format: reply.answer_format === 'markdown' ? 'markdown' : 'text',
+    chips: reply.chips || [],
+    action: reply.action || null,
+    trace: Array.isArray(reply.trace) && reply.trace.length ? reply.trace : group.stages(),
+    resources: Array.isArray(reply.resources) ? reply.resources : [],
+  };
+  state.chat.messages.push(msg);
+  state.chat.liveRow = null;
+  state.chat.resources = msg.resources;
+  setChatPending(false);
+
+  if (!document.body.contains(row)) {
+    /* 응답이 오는 동안 다른 화면에 가 있었다면 전체를 다시 그린다(타자 효과 없음). */
+    renderChatTranscript(true);
+  } else {
+    clearNode(row);
+    row.classList.remove('is-live');
+    const summary = buildTraceSummary(msg.trace, msg.model);
+    if (summary) row.appendChild(summary);
+    appendReplyBody(row, msg, { typing: true });
+  }
+
+  renderResourcePanel();
+  scrollChatToEnd();
+
+  refreshRecentChats().then(syncChatTitleFromRecent);
+}
+
+/* ---- 13-9. 화면 ---- */
+
+function chatTitleText() {
+  return state.chat.title || CHAT_NEW_TITLE;
+}
+
+/* 대화 제목은 서버가 만든 것(마스킹본 앞 30자)을 쓴다. */
+function syncChatTitleFromRecent() {
+  const id = state.chat.chatId;
+  if (!id) return;
+  const hit = (state.recentChats || []).find((c) => c && c.id === id);
+  if (!hit || !hit.title) return;
+  state.chat.title = hit.title;
+  const el = document.getElementById('chatHeadTitle');
+  if (el) el.textContent = hit.title;
+}
+
+function buildChatHeader() {
+  const head = h('div', { class: 'chat-head' });
+  const back = h('button', {
+    type: 'button', class: 'back-btn', 'aria-label': '뒤로 가기',
+    onClick: () => navigateTo('home'),
+  });
+  back.appendChild(icon('chevronLeft', 16));
+  back.appendChild(h('span', {}, '뒤로'));
+  head.appendChild(back);
+
+  head.appendChild(h('h1', { class: 'chat-head-title', id: 'chatHeadTitle' }, chatTitleText()));
+
+  const right = h('div', { class: 'chat-head-right' });
+  right.appendChild(h('span', { class: 'chat-model-label' }, CHAT_MODEL_LABEL));
+  right.appendChild(h('span', { class: 'avatar chat-head-avatar', 'aria-hidden': 'true' }, profileInitial()));
+  head.appendChild(right);
+  return head;
+}
+
+function buildResourceColumn() {
+  const col = h('aside', { class: 'chat-col-side', id: 'chatResourceCol', 'aria-label': '리소스' });
+  const panel = h('div', { class: 'resource-panel' });
+  panel.appendChild(h('div', { class: 'resource-panel-head' },
+    h('span', { class: 'resource-panel-title' }, '리소스'),
+    h('span', { class: 'resource-panel-count', id: 'chatResourceCount' }, '0개')));
+  panel.appendChild(h('div', { class: 'resource-panel-body', id: 'chatResourceBody' }));
+  col.appendChild(panel);
+  return col;
+}
+
+function renderChat() {
+  const { root } = mountView('chat');
+  focusMainAfterRender();
+
+  const shell = h('div', { class: 'chat-shell' });
+  const main = h('div', { class: 'chat-col-main' });
+  main.appendChild(buildChatHeader());
+  main.appendChild(h('div', { class: 'chat-thread chat-transcript', id: 'chatTranscriptWrap' }));
+
+  const composer = h('div', { class: 'chat-composer' });
+  composer.appendChild(buildChatInputCard().node);
+  composer.appendChild(h('p', { class: 'chat-composer-notice' },
+    (state.home && state.home.ai_notice) || FALLBACK_AI_NOTICE));
+  main.appendChild(composer);
+
+  shell.appendChild(main);
+  shell.appendChild(buildResourceColumn());
+  root.appendChild(shell);
+
+  renderChatTranscript(false);
+  renderResourcePanel();
+  scrollChatToEnd();
+  flushQueuedChatSend();
+}
+
+/* 사이드바 "최근"에서 고른 대화를 대화 화면으로 불러온다. */
 async function openChat(chatId) {
   if (!chatId) return;
+  state.chat.streamSeq += 1;  // 진행 중이던 스트림 결과는 버린다
+  const hit = (state.recentChats || []).find((c) => c && c.id === chatId);
+  state.chat.title = (hit && hit.title) || '';
+
   const res = await Api.chatMessages(chatId);
   if (!res.ok) {
     state.chat.chatId = null;
     state.chat.messages = [{ role: 'error', text: '대화를 불러오지 못했습니다.' }];
+    state.chat.resources = [];
   } else {
     state.chat.chatId = chatId;
     state.chat.messages = (Array.isArray(res.data) ? res.data : []).map((m) => ({
       role: m.role === 'user' ? 'user' : 'reply',
       text: m.text || '',
       llm_used: !!m.llm_used,
+      model: m.model || null,
+      route: m.route || 'internal',
+      answer_format: m.answer_format === 'markdown' ? 'markdown' : 'text',
       chips: m.chips || [],
       action: m.action || null,
+      trace: Array.isArray(m.trace) ? m.trace : [],
+      resources: Array.isArray(m.resources) ? m.resources : [],
     }));
+    const lastReply = state.chat.messages.filter((m) => m.role === 'reply').pop();
+    state.chat.resources = (lastReply && lastReply.resources) || [];
   }
   state.chat.pending = false;
-  navigateTo('home');
+  state.chat.queuedSend = null;
+  state.chat.liveRow = null;
+  navigateTo('chat');
   renderChatTranscript(true);
+  renderResourcePanel();
   renderRecentList();
 }
 
 function startNewChat() {
+  state.chat.streamSeq += 1;
   state.chat.messages = [];
   state.chat.pending = false;
   state.chat.chatId = null;  // 서버가 첫 메시지에서 새 대화를 만든다
+  state.chat.title = '';
+  state.chat.resources = [];
+  state.chat.queuedSend = null;
+  state.chat.liveRow = null;
   navigateTo('home');
-  renderChatTranscript();
   renderRecentList();
   setTimeout(() => { const el = document.getElementById('chatInput'); if (el) el.focus(); }, 0);
-}
-
-function handleChatAction(action) {
-  if (!action || !action.type) return;
-  if (action.type === 'open_kb') return;  // 제도 안내는 카드로만 보여주고 화면을 옮기지 않는다
-  const payload = action.payload || {};
-  if (action.type === 'open_view') {
-    const view = payload.view || payload.name || payload.target || (typeof payload === 'string' ? payload : null);
-    if (view) navigateTo(String(view).replace('#', ''));
-  } else if (action.type === 'prepare_compare') {
-    const params = payload.params || payload;
-    goToCompareWithPrepare(params);
-  }
 }
 
 async function handleChipClick(chip) {
@@ -3608,7 +4644,7 @@ async function handleChipClick(chip) {
       navigateTo(state.profile ? 'debts' : 'personas');
       break;
     default:
-      await sendChatMessage(chip.text);
+      sendChatMessage(chip.text);
       break;
   }
 }
@@ -3618,7 +4654,27 @@ function goToCompareWithPrepare(params) {
   state.compare.context = null;
   state.compare.result = null;
   state.compare.step = 1;
+  state.compare.explain = { decisionId: null, status: 'idle', data: null };
   navigateTo('compare');
+}
+
+/* 제도 안내 패널과 결정 기록에서 쓰는 출처 목록(대화 카드는 kbSourceLine 을 쓴다). */
+function kbSourceList(sources, cls) {
+  const list = Array.isArray(sources) ? sources.filter(Boolean) : [];
+  if (!list.length) return null;
+  const ul = h('ul', { class: cls || 'kb-source-list' });
+  list.forEach((s) => {
+    const li = h('li', {});
+    const title = s.title || s.url || '출처';
+    if (s.url && /^https?:\/\//i.test(s.url)) {
+      li.appendChild(h('a', { href: s.url, target: '_blank', rel: 'noopener noreferrer' }, title));
+    } else {
+      li.appendChild(h('span', {}, title));
+    }
+    if (s.accessed) li.appendChild(h('span', { class: 'kb-source-date' }, `확인 ${s.accessed}`));
+    ul.appendChild(li);
+  });
+  return ul;
 }
 
 /* ---------- 13-2. 제도 안내 패널 (KB) ---------- */
