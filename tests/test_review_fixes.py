@@ -407,7 +407,7 @@ class _CountingCompareExplainProvider:
         if "label_a" not in placeholders:
             data = {"summary": "지금은 참고할 상품이 없어요.", "reasons": []}
         else:
-            summary = "{label_a} 조건을 확인했어요. 금리는 {rate_a}이고 총이자는 {total_a}예요."
+            summary = "{label_a} 조건이 금리 {rate_a}이라서 총이자 {total_a}로 유리해요. 조건을 확인해 보세요."
             reasons = []
             for letter in ("a", "b", "c"):
                 if f"label_{letter}" in placeholders:

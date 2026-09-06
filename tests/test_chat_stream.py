@@ -120,7 +120,7 @@ def test_chat_stream_stage_order_and_reply_trace_matches_stored_message(monkeypa
 def test_chat_stream_compare_intent_llm_explain_fills_numbers_into_reply(monkeypatch):
     fake = _FakeChatProvider(
         extract_data={"intent": "compare", "category": "credit", "amount": 20_000_000, "term_months": 36},
-        explain_summary="신용대출을 {amount}, {term_months} 조건으로 준비했어요. 기간은 추정값이에요.",
+        explain_summary="신용대출 금액 {amount}을 {term_months} 동안 갚는 조건이라서 준비했어요. 기간은 추정값이에요.",
     )
     monkeypatch.setattr(routes_module, "_llm_provider", fake)
     _clear_session()
@@ -139,7 +139,8 @@ def test_chat_stream_compare_intent_llm_explain_fills_numbers_into_reply(monkeyp
 
     terminal = _terminal_stage_map(events)
     assert terminal["explain"]["status"] == "done"
-    assert "fake-explain-model" in terminal["explain"]["detail"]
+    # 2026-09-06 PMO 지적: 모델명 등 기술 정보는 detail이 아니라 tech로 옮겼다.
+    assert "fake-explain-model" in terminal["explain"]["tech"]
 
     client.delete(f"/api/chats/{reply['chat_id']}")
     _clear_session()
@@ -164,7 +165,10 @@ def test_chat_stream_compare_intent_llm_digit_leak_falls_back_to_template(monkey
 
     terminal = _terminal_stage_map(events)
     assert terminal["explain"]["status"] == "fallback"
-    assert "템플릿 문장 사용" in terminal["explain"]["detail"]
+    # 2026-09-06 PMO 지적: detail은 사람 말("AI 대신 준비된 문장을 썼어요")로 바뀌었고,
+    # 폴백 사유 코드는 tech로 옮겼다.
+    assert terminal["explain"]["detail"] == "AI 대신 준비된 문장을 썼어요"
+    assert "템플릿(" in terminal["explain"]["tech"]
 
     client.delete(f"/api/chats/{reply['chat_id']}")
     _clear_session()
@@ -179,7 +183,7 @@ def test_chat_stream_action_intent_uses_llm_explain_sentence(monkeypatch):
     assert client.post("/api/session/persona/P1").status_code == 200
     fake = _FakeChatProvider(
         extract_data={"intent": "action"},
-        explain_summary={"action_card_v1": "이번 상황을 확인했어요. 지금 여건에 맞게 살펴보세요."},
+        explain_summary={"action_card_v1": "지금 상황 때문에 한번 확인했어요. 여건에 맞게 계속 살펴보세요."},
     )
     monkeypatch.setattr(routes_module, "_llm_provider", fake)
 
@@ -188,12 +192,12 @@ def test_chat_stream_action_intent_uses_llm_explain_sentence(monkeypatch):
     events = _parse_sse_events(r.text)
     reply = events[-1][1]
 
-    assert reply["reply_text"] == "이번 상황을 확인했어요. 지금 여건에 맞게 살펴보세요."
+    assert reply["reply_text"] == "지금 상황 때문에 한번 확인했어요. 여건에 맞게 계속 살펴보세요."
     assert reply["llm_used"] is True
 
     terminal = _terminal_stage_map(events)
     assert terminal["explain"]["status"] == "done"
-    assert "fake-explain-model" in terminal["explain"]["detail"]
+    assert "fake-explain-model" in terminal["explain"]["tech"]
 
     client.delete(f"/api/chats/{reply['chat_id']}")
     _clear_session()
@@ -217,7 +221,8 @@ def test_chat_stream_crisis_message_skips_explain_and_never_calls_llm(monkeypatc
 
     terminal = _terminal_stage_map(events)
     assert terminal["guard"]["status"] == "done"
-    assert "위기" in terminal["guard"]["detail"]
+    # 2026-09-06 PMO 지적: "위기 신호 감지" 같은 기술 용어 대신 사람 말로 바뀌었다.
+    assert "상담" in terminal["guard"]["detail"]
     assert terminal["explain"]["status"] == "skip"
 
     assert fake.extract_calls == 0

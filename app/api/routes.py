@@ -653,18 +653,20 @@ def _merge_followup(base: dict[str, Any], new_params: dict[str, Any]) -> tuple[d
 # ---------------------------------------------------------------------------
 
 _STAGE_LABELS: dict[str, str] = {
-    "guard": "발화 점검",
-    "intent": "의도·조건 추출",
-    "compute": "계산 엔진",
-    "explain": "설명 작성",
-    "check": "응답 점검",
+    # 2026-09-06 PMO 지적: "생각 과정" 라벨이 기술 용어 그대로 노출됨. 사람 말로 바꾼다
+    # (id는 그대로 둔다 - 화면·테스트가 id를 쓴다).
+    "guard": "질문 확인",
+    "intent": "무엇이 필요한지 파악",
+    "compute": "상담 준비",
+    "explain": "설명 쓰기",
+    "check": "마지막 점검",
     # SPEC 2.11: 답변 경로·노드 카드용 신규 노드 id.
-    "debt_data": "내 부채 자료",
-    "calc": "계산 엔진",
-    "kb": "제도 안내",
-    "products": "공시 자료",
-    "external": "외부 검색",
-    "direct": "직접 답변",
+    "debt_data": "내 대출 살펴보기",
+    "calc": "계산하기",
+    "kb": "제도 안내 찾기",
+    "products": "공시 자료 찾기",
+    "external": "외부 자료 찾기",
+    "direct": "바로 답하기",
 }
 
 _INTENT_LABELS_KR: dict[str, str] = {
@@ -702,18 +704,19 @@ class _StageEmitter:
     def _cancelled(self) -> bool:
         return self._cancel_event is not None and self._cancel_event.is_set()
 
-    def start(self, stage_id: str) -> None:
+    def start(self, stage_id: str, detail: str = "") -> None:
         if self._cancelled():
             return
         self._started_at[stage_id] = time.monotonic()
         self._send({
-            "id": stage_id, "label": _STAGE_LABELS[stage_id], "status": "start", "detail": "", "ms": 0,
-            "steps": [], "resource_refs": [],
+            "id": stage_id, "label": _STAGE_LABELS[stage_id], "status": "start", "detail": detail, "ms": 0,
+            "tech": "", "steps": [], "resource_refs": [],
         })
 
     def finish(
         self, stage_id: str, status: str, detail: str,
-        *, steps: Optional[list[str]] = None, resource_refs: Optional[list[str]] = None,
+        *, tech: Optional[str] = None, steps: Optional[list[str]] = None,
+        resource_refs: Optional[list[str]] = None,
     ) -> None:
         if self._cancelled():
             return
@@ -721,7 +724,9 @@ class _StageEmitter:
         ms = int((time.monotonic() - started) * 1000) if started is not None else 0
         event = {
             "id": stage_id, "label": _STAGE_LABELS[stage_id], "status": status, "detail": detail, "ms": ms,
-            "steps": list(steps) if steps else [], "resource_refs": list(resource_refs) if resource_refs else [],
+            # 2026-09-06 PMO 지적: label/detail은 사람 말로, 모델명·소요 초·사유 코드 같은
+            # 기술 정보는 tech(선택, 화면은 작은 회색 줄로 보여준다)로 분리한다.
+            "tech": tech or "", "steps": list(steps) if steps else [], "resource_refs": list(resource_refs) if resource_refs else [],
         }
         self.trace.append(event)
         self._send(event)
@@ -731,12 +736,26 @@ class _StageEmitter:
             self._emit(dict(event))
 
 
-def _explain_stage_detail(result: ExplainResult) -> tuple[str, str]:
-    """ExplainResult 하나로 explain 단계의 (status, detail)을 만든다(SPEC 2.9)."""
+def _fmt_seconds(ms: int) -> str:
+    return f"{ms / 1000:.1f}초"
+
+
+def _fmt_disclosure_month(raw: str) -> str:
+    """공시 기준월 원시 값("202608" 같은 YYYYMM)을 "2026년 8월"로. 형식이 다르면 그대로."""
+    if len(raw) == 6 and raw.isdigit():
+        return f"{raw[:4]}년 {int(raw[4:6])}월"
+    return raw
+
+
+def _explain_stage_detail(result: ExplainResult) -> tuple[str, str, str]:
+    """ExplainResult 하나로 explain 단계의 (status, detail, tech)을 만든다(SPEC 2.9).
+
+    2026-09-06 PMO 지적: 모델명·소요 시간은 사람이 읽는 detail이 아니라 tech(기술 정보,
+    선택)로 옮긴다."""
     if result.source == "llm":
-        return "done", f"Gemini {result.model}, {result.latency_ms}ms"
+        return "done", "설명을 썼어요", f"Gemini {result.model} · {_fmt_seconds(result.latency_ms)}"
     first_problem = result.problems[0] if result.problems else "unknown"
-    return "fallback", f"템플릿 문장 사용({first_problem})"
+    return "fallback", "AI 대신 준비된 문장을 썼어요", f"템플릿({first_problem})"
 
 
 @dataclass
@@ -768,26 +787,26 @@ def _build_chat_reply(
     banned = insights_service.get_banned_terms()
 
     # ---- guard: PII 마스킹 + 위기 신호 확인 ----
-    stages.start("guard")
+    stages.start("guard", "질문을 읽고 있어요")
     masked = guardrails.mask_pii(message)
     crisis = guardrails.detect_crisis(masked)
     if crisis != "none":
-        stages.finish("guard", "done", "위기 신호 감지: 공적 상담 안내로 전환")
+        stages.finish("guard", "done", "많이 힘든 상황으로 보여 상담 창구부터 준비했어요")
         stages.start("compute")
-        stages.finish("compute", "done", "공적 상담 안내 준비")
+        stages.finish("compute", "done", "상담 창구를 준비했어요")
         stages.start("explain")
-        stages.finish("explain", "skip", "규칙 문장")
+        stages.finish("explain", "skip", "준비된 문장을 그대로 썼어요")
         text, chips, action = _crisis_reply(crisis, session_service.get_profile())
         stages.start("check")
         # SEV3 2026-09-06 리뷰: guardrails.check_text(상품·회사명) 외에 권유 표현
         # (slotfill.FORBIDDEN_PHRASES)도 경로 무관하게 검사한다.
         if guardrails.check_text(text, banned) or any(p in text for p in slotfill.FORBIDDEN_PHRASES):
-            stages.finish("check", "fallback", "금칙어 감지로 기본 안내로 대체")
+            stages.finish("check", "fallback", "표현 문제가 있어 기본 안내로 바꿨어요")
             text = "안내 문구를 표시할 수 없어 기본 안내로 대체했습니다. 메뉴에서 원하는 화면을 선택해주세요."
         else:
-            stages.finish("check", "done", "상품명·회사명·권유 표현 없음 확인")
+            stages.finish("check", "done", "상품 이름이나 권유 표현이 없는지 확인했어요")
         return _ChatBuildResult(text, chips, action, False, stages.trace, None, route="safety")
-    stages.finish("guard", "done", "개인정보 마스킹 완료")
+    stages.finish("guard", "done", "개인정보는 가리고 읽었어요")
 
     # ---- intent: 의도·조건 추출 ----
     stages.start("intent")
@@ -826,9 +845,12 @@ def _build_chat_reply(
 
     if llm_used:
         intent_label = _INTENT_LABELS_KR.get(intent, intent)
-        stages.finish("intent", "done", f"Gemini {extract_model}, {extract_latency_ms}ms, 의도: {intent_label}")
+        stages.finish(
+            "intent", "done", f"{intent_label}{slotfill.josa(intent_label, '으로/로')} 이해했어요",
+            tech=f"Gemini {extract_model} · {_fmt_seconds(extract_latency_ms)}",
+        )
     else:
-        stages.finish("intent", "fallback", "규칙 파서로 대체(LLM 응답 없음)")
+        stages.finish("intent", "fallback", "AI 응답이 없어 규칙으로 파악했어요", tech="규칙 파서")
 
     profile = session_service.get_profile()
     chips: list[Chip] = []
@@ -853,11 +875,13 @@ def _build_chat_reply(
             answer_service.build_direct_answer(_llm_provider, banned)
         )
         if direct_llm_used:
-            stages.finish("direct", "done", f"Gemini {direct_model}, {direct_latency_ms}ms",
+            stages.finish("direct", "done", "자료 없이 바로 답할 수 있는 질문이에요",
+                          tech=f"Gemini {direct_model} · {_fmt_seconds(direct_latency_ms)}",
                           steps=["DONN이 할 수 있는 일을 안내했어요."])
         else:
             first_problem = direct_problems[0] if direct_problems else "llm_unavailable"
-            stages.finish("direct", "fallback", f"고정 안내 문장 사용({first_problem})",
+            stages.finish("direct", "fallback", "자료 없이 바로 답할 수 있는 질문이에요",
+                          tech=f"고정 문장({first_problem})",
                           steps=["DONN이 할 수 있는 일을 안내했어요."])
         reply_text = text
         route = "direct"
@@ -888,20 +912,23 @@ def _build_chat_reply(
             ctx = None
 
         if ctx is None:
-            stages.finish("products", "fallback", "비교 조건을 이해하지 못함")
+            stages.finish("products", "fallback", "비교 조건을 이해하지 못했어요")
             reply_text = "조건을 이해하지 못했어요. 금액과 기간(최대 600개월)을 다시 알려주세요."
             stages.start("explain")
-            stages.finish("explain", "skip", "규칙 문장")
+            stages.finish("explain", "skip", "준비된 문장을 그대로 썼어요")
         else:
             category_label = _CATEGORY_LABELS_KR.get(ctx.category.value, ctx.category.value)
 
             if ctx.category in (ProductCategory.DEPOSIT, ProductCategory.SAVING):
                 # 결정 D5: 예·적금은 순위 비교 대상이 아니다. 비교 화면으로 보내는 대신
                 # 공시 열람만 안내하고, prepare_compare 액션은 만들지 않는다(2026-09-06 리뷰).
-                stages.finish("products", "done", f"비교 조건 준비: {category_label}, 예·적금은 순위 비교 대상 아님")
+                stages.finish(
+                    "products", "done",
+                    f"{category_label}{slotfill.josa(category_label, '은/는')} 순위 비교 대상이 아니에요",
+                )
                 reply_text = compare_service.NO_RANKING_CATEGORY_MESSAGE
                 stages.start("explain")
-                stages.finish("explain", "skip", "규칙 문장")
+                stages.finish("explain", "skip", "준비된 문장을 그대로 썼어요")
             else:
                 resources.extend(answer_service.profile_resources(profile))
                 products_res = answer_service.products_resource(ctx.category)
@@ -909,19 +936,25 @@ def _build_chat_reply(
                 compute_steps = [f"{products_res.title}을 조건에 맞춰 준비했어요."]
                 followup_labels = [_FOLLOWUP_LABELS.get(k, k) for k in followup_changed]
                 if followup_labels:
-                    stages.finish("products", "done", f"이전 조건에서 {', '.join(followup_labels)}만 변경",
+                    stages.finish("products", "done", f"이전 조건에서 {', '.join(followup_labels)}만 바꿔서 다시 준비했어요",
                                   steps=compute_steps, resource_refs=[r.ref for r in resources])
                 else:
+                    # 2026-09-06 PMO 지적: 조건 자체(금액·기간)보다 "공시 자료에서 몇 건을
+                    # 골랐는지"가 이 단계에서 실제로 한 일이라 그 정보로 detail을 쓴다.
+                    catalog_items = products.query(ctx.category)
+                    disclosure_month = next(
+                        (it.disclosure_month for it in catalog_items if it.disclosure_month), "",
+                    )
+                    month_prefix = f"{_fmt_disclosure_month(disclosure_month)} " if disclosure_month else ""
                     stages.finish(
                         "products", "done",
-                        f"비교 조건 준비: {category_label}, 금액 {ctx.amount:,}원, "
-                        f"기간 {ctx.term_months}개월(추정 {len(ctx.estimated_fields)}개)",
+                        f"{month_prefix}공시 상품 {len(catalog_items)}건을 골랐어요",
                         steps=compute_steps, resource_refs=[r.ref for r in resources],
                     )
                 stages.start("explain")
                 explain_result = explain_service.explain_chat_compare(ctx, followup_labels, _llm_provider)
-                status, detail = _explain_stage_detail(explain_result)
-                stages.finish("explain", status, detail)
+                status, detail, tech = _explain_stage_detail(explain_result)
+                stages.finish("explain", status, detail, tech=tech)
                 if explain_result.source == "llm":
                     explain_llm_used = True
                     explain_model = explain_result.model
@@ -934,28 +967,28 @@ def _build_chat_reply(
         stages.start("debt_data")
         resources.extend(answer_service.profile_resources(profile))
         if resources:
-            stages.finish("debt_data", "done", "화면 안내", steps=["내 부채 자료를 참조했어요."],
-                          resource_refs=[r.ref for r in resources])
+            stages.finish("debt_data", "done", f"대출 {len(profile.loans) if profile else 0}건과 이번 달 여력을 확인했어요",
+                          steps=["내 대출 자료를 참조했어요."], resource_refs=[r.ref for r in resources])
         else:
-            stages.finish("debt_data", "done", "화면 안내")
+            stages.finish("debt_data", "done", "상환표와 시나리오를 준비했어요")
         reply_text = "내 부채 화면에서 상환표와 시나리오를 확인할 수 있어요."
         action = {"type": "open_view", "payload": {"view": "debts"}}
         chips.append(Chip(id=f"chip-chat-{intent}", text="내 부채로 이동", tier=1, intent=intent, params={}))
         stages.start("explain")
-        stages.finish("explain", "skip", "규칙 문장")
+        stages.finish("explain", "skip", "준비된 문장을 그대로 썼어요")
 
     elif intent == "spending":
         stages.start("debt_data")
         resources.extend(answer_service.profile_resources(profile))
         if resources:
-            stages.finish("debt_data", "done", "화면 안내", steps=["내 부채 자료를 참조했어요."],
-                          resource_refs=[r.ref for r in resources])
+            stages.finish("debt_data", "done", f"대출 {len(profile.loans) if profile else 0}건과 이번 달 여력을 확인했어요",
+                          steps=["내 대출 자료를 참조했어요."], resource_refs=[r.ref for r in resources])
         else:
-            stages.finish("debt_data", "done", "화면 안내")
+            stages.finish("debt_data", "done", "소비 패턴 화면을 준비했어요")
         reply_text = "소비 패턴 화면에서 합성 거래내역을 확인할 수 있어요."
         action = {"type": "open_view", "payload": {"view": "spending"}}
         stages.start("explain")
-        stages.finish("explain", "skip", "규칙 문장")
+        stages.finish("explain", "skip", "준비된 문장을 그대로 썼어요")
 
     elif intent in ("retirement", "saving", "liquidity"):
         # SEV2 2026-09-06 리뷰: 재무비율·노후자금은 실제 계산이므로 "calc"(계산 엔진)
@@ -968,13 +1001,13 @@ def _build_chat_reply(
                 resources.extend(answer_service.policy_resources(policy.load_policy_params(), policy_keys))
         reply_text, chips, action = _build_lifecycle_chat_reply(intent, profile)
         if profile is not None:
-            stages.finish("calc", "done", "재무비율·노후자금 계산",
+            stages.finish("calc", "done", "재무비율과 노후자금을 계산했어요",
                           steps=["재무비율과 노후자금 격차를 계산했어요."],
                           resource_refs=[r.ref for r in resources])
         else:
-            stages.finish("calc", "done", "재무비율·노후자금 계산")
+            stages.finish("calc", "done", "프로필이 없어 계산하지 못했어요")
         stages.start("explain")
-        stages.finish("explain", "skip", "규칙 문장")
+        stages.finish("explain", "skip", "준비된 문장을 그대로 썼어요")
 
     elif intent == "action":
         # SEV2 2026-09-06 리뷰: 행동 규칙 평가는 계산 엔진의 산출물이므로 "calc" 노드로
@@ -987,9 +1020,9 @@ def _build_chat_reply(
             )
             chips.append(Chip(id="chip-chat-onboarding", text="페르소나 선택하러 가기", tier=1,
                                intent="onboarding", params={}))
-            stages.finish("calc", "done", "행동 규칙 평가: 프로필 없음")
+            stages.finish("calc", "done", "프로필이 없어 행동 규칙을 검토하지 못했어요")
             stages.start("explain")
-            stages.finish("explain", "skip", "규칙 문장")
+            stages.finish("explain", "skip", "준비된 문장을 그대로 썼어요")
         else:
             resources.extend(answer_service.profile_resources(profile))
             params_policy = policy.load_policy_params()
@@ -997,7 +1030,7 @@ def _build_chat_reply(
             if cards:
                 top = cards[0]
                 resources.append(answer_service.calc_resource("행동 카드", top.id, top.title))
-                stages.finish("calc", "done", f"행동 규칙 평가: {len(cards)}건, 최우선 {top.title}",
+                stages.finish("calc", "done", f"행동 규칙을 검토해 {len(cards)}건을 찾았어요",
                               steps=[f"행동 규칙 {len(cards)}건을 평가해 최우선 카드를 골랐어요."],
                               resource_refs=[r.ref for r in resources])
                 if top.chip is not None:
@@ -1007,20 +1040,21 @@ def _build_chat_reply(
                     top.id, _llm_provider, profile, params_policy, today=date.today(),
                 )
                 if explain_result is not None:
-                    status, detail = _explain_stage_detail(explain_result)
-                    stages.finish("explain", status, detail)
+                    status, detail, tech = _explain_stage_detail(explain_result)
+                    stages.finish("explain", status, detail, tech=tech)
                     if explain_result.source == "llm":
                         explain_llm_used = True
                         explain_model = explain_result.model
                     reply_text = explain_result.summary
                 else:
-                    stages.finish("explain", "skip", "규칙 문장")
+                    stages.finish("explain", "skip", "준비된 문장을 그대로 썼어요")
                     reply_text = top.summary
             else:
-                stages.finish("calc", "done", "행동 규칙 평가: 0건", resource_refs=[r.ref for r in resources])
+                stages.finish("calc", "done", "행동 규칙을 검토했지만 안내할 항목이 없었어요",
+                              resource_refs=[r.ref for r in resources])
                 reply_text = "지금은 특별히 안내할 행동이 없어요. 계속 잘 관리하고 계세요."
                 stages.start("explain")
-                stages.finish("explain", "skip", "규칙 문장")
+                stages.finish("explain", "skip", "준비된 문장을 그대로 썼어요")
 
     else:  # faq: internal(KB 히트) 또는 external(KB 미달·시점성 질문)
         # 라우팅 근거는 두 단계다. (1) 발화에 문서 키워드가 그대로 들어있으면(고정밀) 그 문서로
@@ -1047,15 +1081,15 @@ def _build_chat_reply(
                 answer_format = "text"
                 reply_text = f"{hit.title} 안내입니다. {hit.snippet}"
                 stages.start("kb")
-                stages.finish("kb", "done", f"제도 문서 검색: {hit.title}")
+                stages.finish("kb", "done", f"{hit.title} 문서를 찾았어요")
                 stages.start("explain")
-                stages.finish("explain", "skip", "규칙 문장")
+                stages.finish("explain", "skip", "준비된 문장을 그대로 썼어요")
             else:
                 stages.start("kb")
                 ref_sections = answer_service.kb_reference_sections(doc)
                 kb_res = answer_service.kb_resources(doc, ref_sections)
                 resources.extend(kb_res)
-                stages.finish("kb", "done", f"제도 문서 검색: {hit.title}",
+                stages.finish("kb", "done", f"{hit.title} 문서에서 {len(ref_sections)}개 문단을 참조했어요",
                               steps=[f"제도 문서 1편에서 {len(ref_sections)}개 문단을 참조했어요: {hit.title}"],
                               resource_refs=[r.ref for r in kb_res])
                 stages.start("explain")
@@ -1064,12 +1098,12 @@ def _build_chat_reply(
                     deadline_seconds=explain_service.CHAT_EXPLAIN_DEADLINE_SECONDS,
                 )
                 if kb_llm_used:
-                    stages.finish("explain", "done", f"Gemini {kb_model}, {kb_latency_ms}ms")
+                    stages.finish("explain", "done", "설명을 썼어요", tech=f"Gemini {kb_model} · {_fmt_seconds(kb_latency_ms)}")
                     explain_llm_used = True
                     explain_model = kb_model
                 else:
                     first_problem = kb_problems[0] if kb_problems else "규칙 렌더링"
-                    stages.finish("explain", "fallback", f"템플릿 문장 사용({first_problem})")
+                    stages.finish("explain", "fallback", "AI 대신 준비된 문장을 썼어요", tech=f"템플릿({first_problem})")
                 reply_text = markdown_text
             chips.append(Chip(id=f"chip-kb-{hit.slug}", text=f"{hit.title} 자세히 보기", tier=1,
                               intent="faq", params={"slug": hit.slug}))
@@ -1095,14 +1129,16 @@ def _build_chat_reply(
                 {"banned_term_removed", "no_grounding_sources", "empty_summary"} & set(ext_problems)
             )
             if grounded_ok:
-                stages.finish("external", "done", f"Gemini {ext_model}, 출처 {len(ext_resources)}건",
+                stages.finish("external", "done", f"웹 검색으로 출처 {len(ext_resources)}건을 찾았어요",
+                              tech=f"Gemini {ext_model}",
                               steps=[reason_step, f"출처 {len(ext_resources)}건을 모았어요."],
                               resource_refs=[r.ref for r in ext_resources])
                 explain_llm_used = True
                 explain_model = ext_model
             else:
                 first_problem = ext_problems[0] if ext_problems else "search_unavailable"
-                stages.finish("external", "fallback", f"그라운딩 대신 공식 링크 사용({first_problem})",
+                stages.finish("external", "fallback", "내부 자료에 없어 공식 안내 링크를 모았어요",
+                              tech=first_problem,
                               steps=[reason_step, f"공식 안내 링크 {len(ext_resources)}건을 모았어요."],
                               resource_refs=[r.ref for r in ext_resources])
             reply_text = text
@@ -1123,7 +1159,7 @@ def _build_chat_reply(
             extra_res = answer_service.kb_resources(extra_doc, extra_sections)
             resources.extend(extra_res)
             stages.start("kb")
-            stages.finish("kb", "done", f"제도 문서 검색: {extra_doc.title}",
+            stages.finish("kb", "done", f"{extra_doc.title} 문서에서 참조했어요",
                           steps=[f"제도 문서 1편에서 참조했어요: {extra_doc.title}"],
                           resource_refs=[r.ref for r in extra_res])
             extra_chip_id = f"chip-kb-extra-{extra_doc.slug}"
@@ -1140,11 +1176,11 @@ def _build_chat_reply(
     # slotfill.FORBIDDEN_PHRASES(권유 표현)도 검사한다. LLM 문장뿐 아니라 규칙/KB 렌더링
     # 경로도 예외 없이 통과해야 한다("경로 무관").
     if guardrails.check_text(reply_text, banned) or any(p in reply_text for p in slotfill.FORBIDDEN_PHRASES):
-        stages.finish("check", "fallback", "금칙어 감지로 기본 안내로 대체")
+        stages.finish("check", "fallback", "표현 문제가 있어 기본 안내로 바꿨어요")
         reply_text = "안내 문구를 표시할 수 없어 기본 안내로 대체했습니다. 메뉴에서 원하는 화면을 선택해주세요."
         answer_format = "text"
     else:
-        stages.finish("check", "done", "상품명·회사명·권유 표현 없음 확인")
+        stages.finish("check", "done", "상품 이름이나 권유 표현이 없는지 확인했어요")
 
     final_llm_used = llm_used or explain_llm_used
     final_model = explain_model or extract_model

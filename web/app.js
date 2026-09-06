@@ -24,7 +24,6 @@ const KB_DISCLAIMER = '제도 설명은 참고용이며 최신 내용은 관련 
 const ROUTES = ['home', 'chat', 'debts', 'compare', 'spending', 'lifecycle', 'personas', 'decisions'];
 
 /* 대화 화면 상단의 모델 라벨. 실제 모델명은 응답마다 배지로 따로 보여준다. */
-const CHAT_MODEL_LABEL = 'Gemini 체인';
 const CHAT_NEW_TITLE = '새 대화';
 
 /* SPEC 2.11 리소스 패널: kind 별 묶음 제목 */
@@ -549,6 +548,10 @@ const Api = {
   getDecision: (id) => apiGet(`/decisions/${encodeURIComponent(id)}`),
   replayDecision: (id) => apiSend('POST', `/decisions/${encodeURIComponent(id)}/replay`),
   chat: (message, chatId) => apiSend('POST', '/chat', { message, chat_id: chatId || null }),
+  /* 대화창 파일 첨부(SPEC 2.12): 원본 파일이 아니라 브라우저가 정규화한 거래 행만 보낸다. */
+  chatAttach: (chatId, filename, transactions, months) => apiSend('POST', '/chat/attach', {
+    chat_id: chatId || null, filename, months: months || 3, transactions,
+  }),
   compareExplain: (decisionId) => apiSend('POST', `/compare/${encodeURIComponent(decisionId)}/explain`, {}),
   getCompareExplain: (decisionId) => apiGet(`/compare/${encodeURIComponent(decisionId)}/explain`),
   actionExplain: (actionId) => apiSend('POST', `/actions/${encodeURIComponent(actionId)}/explain`, {}),
@@ -583,7 +586,7 @@ const state = {
      오른쪽 리소스 패널이 이것을 그린다. streamSeq 는 늦게 도착한 스트림 응답을 버리는 데 쓴다. */
   chat: {
     messages: [], pending: false, chatId: null, title: '',
-    resources: [], streamSeq: 0, queuedSend: null, liveRow: null,
+    resources: [], streamSeq: 0, queuedSend: null, queuedAttach: null, liveRow: null,
   },
   compare: {
     context: null, result: null, step: 1, queuedPrepareParams: null,
@@ -595,7 +598,11 @@ const state = {
   debts: { selectedLoanId: null, editingLoanId: null, schedule: null, pendingFocusLoanId: null },
   /* 소비 패턴: data 는 서버 응답 {summary, features, cards},
      upload 는 브라우저에서 읽은 파일의 파싱 상태(서버로 보내지 않는다). */
-  spending: { data: null, loaded: false, upload: null, lastSyntheticMonths: null, busy: false },
+  spending: {
+    data: null, loaded: false, upload: null, lastSyntheticMonths: null, busy: false,
+    /* 대화창 첨부에서 넘어왔을 때만 true. 소비 패턴 화면이 열 지정 칸으로 시선을 옮긴다. */
+    focusMapping: false,
+  },
   /* 생애 흐름: data 는 GET /api/lifecycle 응답, goal 편집 상태는 화면에서만 쓴다. */
   lifecycle: { data: null, editingGoalId: null, goalFormOpen: false, hover: null },
   nav: { depth: 0 },
@@ -868,7 +875,6 @@ function explainMetaRow(data) {
   const row = h('div', { class: 'explain-meta' });
   if (data && data.source === 'llm') {
     row.appendChild(badge('AI 응답', 'badge-accent'));
-    if (data.model) row.appendChild(h('span', { class: 'explain-meta-text' }, data.model));
     const sec = Number(data.latency_ms || 0) / 1000;
     if (sec >= 0.05) row.appendChild(h('span', { class: 'explain-meta-text' }, `${sec.toFixed(1)}초`));
   } else {
@@ -1045,11 +1051,28 @@ function buildChatInputCard() {
     type: 'text', id: 'chatInput', class: 'chat-input-field',
     placeholder: '어떤 부채 고민을 도와드릴까요?', 'aria-label': '채팅 메시지 입력', autocomplete: 'off',
   });
+  /* "+" 는 거래내역 파일 첨부다(SPEC 2.12). 새 대화는 사이드바 "새 대화" 버튼에서만 시작한다.
+     파일은 브라우저에서만 읽고 서버로 올리지 않는다. */
+  const fileInput = h('input', {
+    type: 'file', id: 'chatAttachInput', class: 'visually-hidden', accept: SPENDING_FILE_ACCEPT,
+    tabindex: '-1',  // 초점은 "+" 버튼이 받는다(보이지 않는 탭 정거장을 만들지 않는다)
+  });
+  const fileLabel = h('label', { for: 'chatAttachInput', class: 'visually-hidden' },
+    '거래내역 파일 선택 (CSV 또는 XLSX)');
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files && fileInput.files[0];
+    fileInput.value = '';
+    if (file) attachTransactionFile(file);
+  });
+
   const left = h('div', { class: 'chat-input-row-left' });
   left.appendChild(h('button', {
-    type: 'button', class: 'round-btn-outline', 'aria-label': '새 대화 시작', onClick: startNewChat,
+    type: 'button', class: 'round-btn-outline', id: 'chatAttachBtn',
+    'aria-label': '거래내역 파일 첨부', title: '거래내역 CSV·XLSX 첨부',
+    onClick: () => fileInput.click(),
   }, icon('plus', 18)));
-  left.appendChild(h('span', { class: 'mode-badge' }, '모드: M0 공시 비교'));
+  left.appendChild(fileLabel);
+  left.appendChild(fileInput);
 
   const sendBtn = h('button', {
     type: 'submit', class: 'send-btn', id: 'chatSendBtn', 'aria-label': '메시지 보내기',
@@ -1079,6 +1102,8 @@ function applyChatPendingToInputs(scope) {
     btn.classList.toggle('is-busy', pending);
     btn.setAttribute('aria-label', pending ? '응답을 받는 중' : '메시지 보내기');
   }
+  const attachBtn = root.querySelector ? root.querySelector('#chatAttachBtn') : null;
+  if (attachBtn) attachBtn.disabled = pending;
   const input = root.querySelector ? root.querySelector('#chatInput') : null;
   if (input) {
     input.disabled = pending;
@@ -2062,6 +2087,7 @@ function buildCompareStep2(result) {
    summary/features 만 저장한다. 분석은 사용자가 버튼을 눌렀을 때만 실행한다(D8). */
 
 const SHEETJS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+const SPENDING_FILE_ACCEPT = '.csv,.xlsx,.xls';
 const SPENDING_MAX_BYTES = 8 * 1024 * 1024;
 const SPENDING_MAX_ROWS = 10000;
 const SPENDING_PREVIEW_ROWS = 5;
@@ -2407,6 +2433,8 @@ async function renderSpending() {
   root.appendChild(h('div', { id: 'spendingSource' }, buildSpendingSourcePanel()));
   root.appendChild(h('div', { id: 'spendingResult' }));
   updateSpendingConsent();
+  /* 읽어 둔 파일(대화창 첨부에서 넘어온 것 포함)이 있으면 열 지정 패널을 다시 그린다. */
+  restoreSpendingMapping();
 
   if (state.spending.loaded) { renderSpendingResults(); return; }
 
@@ -2424,6 +2452,19 @@ async function renderSpending() {
   }
   updateSpendingConsent();
   renderSpendingResults();
+}
+
+/* 화면을 다시 그렸을 때 열 지정 패널을 복원한다. 대화창에서 넘어온 경우에는
+   날짜 열 선택 칸으로 초점을 옮겨 무엇을 해야 하는지 바로 보이게 한다. */
+function restoreSpendingMapping() {
+  if (!state.spending.upload) { state.spending.focusMapping = false; return; }
+  renderSpendingMapping();
+  if (!state.spending.focusMapping) return;
+  state.spending.focusMapping = false;
+  const target = document.getElementById('spendingCol_date') || document.getElementById('spendingMapping');
+  if (!target) return;
+  try { target.scrollIntoView({ block: 'center' }); } catch (_) { target.scrollIntoView(); }
+  if (target.focus) { try { target.focus({ preventScroll: true }); } catch (_) { target.focus(); } }
 }
 
 function updateSpendingConsent() {
@@ -2519,7 +2560,7 @@ function buildUploadPath() {
     'CSV 또는 XLSX 파일을 브라우저에서 직접 읽습니다. 파일은 서버로 올라가지 않습니다.'));
 
   const fileInput = h('input', {
-    type: 'file', id: 'spendingFileInput', accept: '.csv,.xlsx', class: 'visually-hidden',
+    type: 'file', id: 'spendingFileInput', accept: SPENDING_FILE_ACCEPT, class: 'visually-hidden',
     'aria-label': '거래내역 파일 선택 (CSV 또는 XLSX)',
   });
   fileInput.addEventListener('change', () => {
@@ -2571,21 +2612,60 @@ function setUploadNotice(message, isError) {
   renderSpendingMapping();
 }
 
-async function handleSpendingFile(file) {
-  const name = String(file.name || '');
-  const lower = name.toLowerCase();
-  const isCsv = /\.csv$/.test(lower) || /\.txt$/.test(lower);
-  const isXlsx = /\.xlsx$/.test(lower);
-  state.spending.upload = null;
+/* 확장자로 읽기 방식을 고른다(csv 는 직접 파싱, sheet 는 SheetJS). */
+function spendingFileKind(name) {
+  const lower = String(name || '').toLowerCase();
+  if (/\.(csv|txt)$/.test(lower)) return 'csv';
+  if (/\.(xlsx|xls)$/.test(lower)) return 'sheet';
+  return null;
+}
 
-  if (!isCsv && !isXlsx) {
-    setUploadNotice('CSV 또는 XLSX 파일만 읽을 수 있습니다.', true);
-    return;
-  }
+/* 파일을 브라우저 안에서만 읽어 표 행렬로 만든다. 소비 패턴 화면과 대화창 첨부가 같이 쓴다.
+   예외를 던지지 않고 {matrix} 또는 {error: 화면 문장} 을 돌려준다. */
+async function readTransactionFileMatrix(file) {
+  const kind = spendingFileKind(file && file.name);
+  if (!kind) return { error: 'CSV 또는 XLSX 파일만 읽을 수 있습니다.' };
   if (file.size > SPENDING_MAX_BYTES) {
-    setUploadNotice('파일이 너무 큽니다. 8MB 이하 파일로 다시 시도해주세요.', true);
-    return;
+    return { error: '파일이 너무 큽니다. 8MB 이하 파일로 다시 시도해주세요.' };
   }
+
+  let matrix = null;
+  try {
+    const buffer = await readFileAsArrayBuffer(file);
+    if (kind === 'sheet') {
+      let XLSXlib = null;
+      try {
+        XLSXlib = await loadSheetJs();
+      } catch (_) {
+        return { error: 'XLSX 읽기 도구를 불러오지 못했습니다. 파일을 CSV 로 저장해서 올려주세요.' };
+      }
+      const book = XLSXlib.read(new Uint8Array(buffer), { type: 'array' });
+      const sheetName = book.SheetNames && book.SheetNames[0];
+      const sheet = sheetName ? book.Sheets[sheetName] : null;
+      if (!sheet) return { error: '시트를 찾지 못했습니다. 다른 파일로 시도해주세요.' };
+      matrix = XLSXlib.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '', blankrows: false });
+    } else {
+      const text = decodeTextBytes(buffer);
+      matrix = parseCsvText(text, sniffDelimiter(text));
+    }
+  } catch (_) {
+    return { error: '파일을 읽지 못했습니다. 다른 파일로 시도해주세요.' };
+  }
+
+  if (!matrix || matrix.length < 2) {
+    return { error: '읽을 수 있는 거래 행이 없습니다. 머리글과 거래 행이 있는 파일인지 확인해주세요.' };
+  }
+  return { matrix };
+}
+
+/* 날짜와 (금액 또는 입금) 열을 자동으로 찾았는지. 못 찾으면 사용자가 열을 직접 골라야 한다. */
+function uploadMappingReady(upload) {
+  if (!upload || !upload.map) return false;
+  return upload.map.date >= 0 && (upload.map.amount >= 0 || upload.map.deposit >= 0);
+}
+
+async function handleSpendingFile(file) {
+  state.spending.upload = null;
 
   const slot = document.getElementById('spendingMapping');
   if (slot) {
@@ -2593,38 +2673,11 @@ async function handleSpendingFile(file) {
     slot.appendChild(h('p', { class: 'loading-text' }, '파일을 읽는 중...'));
   }
 
-  let matrix = null;
-  try {
-    const buffer = await readFileAsArrayBuffer(file);
-    if (isXlsx) {
-      let XLSXlib = null;
-      try {
-        XLSXlib = await loadSheetJs();
-      } catch (_) {
-        setUploadNotice('XLSX 읽기 도구를 불러오지 못했습니다. 파일을 CSV 로 저장해서 올려주세요.', true);
-        return;
-      }
-      const book = XLSXlib.read(new Uint8Array(buffer), { type: 'array' });
-      const sheetName = book.SheetNames && book.SheetNames[0];
-      const sheet = sheetName ? book.Sheets[sheetName] : null;
-      if (!sheet) { setUploadNotice('시트를 찾지 못했습니다. 다른 파일로 시도해주세요.', true); return; }
-      matrix = XLSXlib.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '', blankrows: false });
-    } else {
-      const text = decodeTextBytes(buffer);
-      matrix = parseCsvText(text, sniffDelimiter(text));
-    }
-  } catch (_) {
-    setUploadNotice('파일을 읽지 못했습니다. 다른 파일로 시도해주세요.', true);
-    return;
-  }
+  const read = await readTransactionFileMatrix(file);
+  if (read.error) { setUploadNotice(read.error, true); return; }
 
-  if (!matrix || matrix.length < 2) {
-    setUploadNotice('읽을 수 있는 거래 행이 없습니다. 머리글과 거래 행이 있는 파일인지 확인해주세요.', true);
-    return;
-  }
-
-  const upload = buildUploadState(name, matrix);
-  if (upload.map.date < 0 || (upload.map.amount < 0 && upload.map.deposit < 0)) {
+  const upload = buildUploadState(String(file.name || ''), read.matrix);
+  if (!uploadMappingReady(upload)) {
     upload.notice = '날짜와 금액 열을 자동으로 찾지 못했습니다. 아래에서 열을 직접 지정해주세요.';
     upload.noticeError = false;
   }
@@ -3982,6 +4035,7 @@ function buildNodeCard(stage) {
   card.appendChild(top);
 
   if (stage.detail) card.appendChild(h('p', { class: 'node-detail' }, stage.detail));
+  /* 모델명 등 기술 정보(stage.tech)는 화면에 표시하지 않는다(PMO 지시). */
 
   if (Array.isArray(stage.steps) && stage.steps.length) {
     const ul = h('ul', { class: 'node-steps' });
@@ -4004,8 +4058,8 @@ function traceTotalSeconds(trace) {
 function buildTraceSummary(trace, model) {
   const list = Array.isArray(trace) ? trace.filter(Boolean) : [];
   if (!list.length) return null;
-  const parts = [`생각 과정 ${list.length}단계`, `${traceTotalSeconds(list).toFixed(1)}초`];
-  if (model) parts.push(`Gemini ${model}`);
+  /* 모델명은 응답 배지에 이미 보이므로 요약 줄에는 단계 수와 시간만 쓴다. */
+  const parts = [`${list.length}단계로 생각했어요`, `${traceTotalSeconds(list).toFixed(1)}초`];
 
   const details = h('details', { class: 'node-group is-collapsed' });
   details.appendChild(h('summary', { class: 'node-group-summary' }, parts.join(' · ')));
@@ -4019,8 +4073,8 @@ function buildTraceSummary(trace, model) {
 function buildLiveNodeGroup() {
   const wrap = h('div', { class: 'node-group is-live' });
   const head = h('div', { class: 'node-group-head' });
-  head.appendChild(h('span', { class: 'node-group-title' }, '생각 과정'));
-  const countEl = h('span', { class: 'node-group-count' }, '사용한 노드 0개');
+  head.appendChild(h('span', { class: 'node-group-title' }, '생각하는 중'));
+  const countEl = h('span', { class: 'node-group-count' }, '0단계');
   head.appendChild(countEl);
   wrap.appendChild(head);
   const cards = h('div', { class: 'node-cards', role: 'status', 'aria-live': 'polite' });
@@ -4032,7 +4086,7 @@ function buildLiveNodeGroup() {
   const redraw = () => {
     clearNode(cards);
     order.forEach((id) => cards.appendChild(buildNodeCard(byId[id])));
-    countEl.textContent = `사용한 노드 ${order.length}개`;
+    countEl.textContent = `${order.length}단계`;
   };
 
   return {
@@ -4323,16 +4377,16 @@ function buildKbReplyCard(msg) {
 
 /* ---- 13-7. 말풍선 ---- */
 
-function buildPendingRow() {
+function buildPendingRow(text) {
   const dots = h('span', { class: 'chat-pending-dots', 'aria-hidden': 'true' }, h('i', {}), h('i', {}), h('i', {}));
-  return h('div', { class: 'chat-pending', role: 'status', 'aria-live': 'polite' }, dots, h('span', {}, '응답을 쓰는 중'));
+  return h('div', { class: 'chat-pending', role: 'status', 'aria-live': 'polite' },
+    dots, h('span', {}, text || '응답을 쓰는 중'));
 }
 
 function replyBadgeRow(msg) {
   const row = h('div', { class: 'chat-reply-meta' });
   if (msg.llm_used) {
     row.appendChild(badge('AI 응답', 'badge-accent'));
-    if (msg.model) row.appendChild(h('span', { class: 'chat-model-name' }, msg.model));
   } else {
     row.appendChild(badge('규칙 기반 응답', 'badge-rule'));
   }
@@ -4387,6 +4441,8 @@ function renderChatTranscript(scrollToEnd) {
   state.chat.messages.forEach((msg) => {
     if (msg.role === 'user') {
       wrap.appendChild(h('div', { class: 'chat-bubble-row from-user' }, h('div', { class: 'chat-bubble user' }, msg.text)));
+    } else if (msg.role === 'attach-map') {
+      wrap.appendChild(h('div', { class: 'chat-bubble-row from-reply' }, buildAttachMappingCard(msg)));
     } else if (msg.role === 'reply') {
       wrap.appendChild(buildReplyRow(msg, { typing: false }));
     } else {
@@ -4482,6 +4538,134 @@ async function performChatSend(text) {
   finishChatReply(row, group, reply);
 }
 
+/* ---- 13-8-1. 거래내역 파일 첨부 (SPEC 2.12) ----
+   입력 카드의 "+" 로 고른 파일을 소비 패턴 화면과 같은 파서·열 자동 매핑으로 읽는다.
+   원본 파일은 서버로 보내지 않고 정규화한 거래 행만 POST /api/chat/attach 로 보낸다. */
+
+const CHAT_ATTACH_FAIL_TEXT = '파일을 분석하지 못했어요. 소비 패턴 화면에서 다시 시도해 주세요.';
+
+function attachTransactionFile(file) {
+  if (!file || state.chat.pending) return;
+  state.chat.queuedAttach = file;
+  setChatPending(true);
+
+  /* 큰 파일은 읽는 데 시간이 걸리므로 먼저 자리표시를 세운다. */
+  const row = h('div', { class: 'chat-bubble-row from-reply is-live' });
+  row.appendChild(buildPendingRow('파일을 읽는 중이에요'));
+  state.chat.liveRow = row;
+
+  if (currentRouteFromHash() !== 'chat') {
+    navigateTo('chat');  // renderChat 이 그린 뒤 이어서 보낸다
+    return;
+  }
+  renderChatTranscript(true);
+  flushQueuedChatAttach();
+}
+
+function flushQueuedChatAttach() {
+  const file = state.chat.queuedAttach;
+  if (!file) return;
+  state.chat.queuedAttach = null;
+  performChatAttach(file);
+}
+
+/* 오류 말풍선 한 줄로 끝낸다(진행 중이던 자리표시는 지운다). */
+function failChatAttach(row, text) {
+  if (row && row.parentNode) row.parentNode.removeChild(row);
+  state.chat.liveRow = null;
+  state.chat.messages.push({ role: 'error', text });
+  setChatPending(false);
+  renderChatTranscript(true);
+}
+
+/* 정규화한 행에서 첫 날짜와 끝 날짜를 찾는다(파일이 날짜순이 아닐 수 있다). */
+function transactionDateRange(rows) {
+  let first = null;
+  let last = null;
+  (rows || []).forEach((r) => {
+    const d = r && r.date;
+    if (!d) return;
+    if (first === null || d < first) first = d;
+    if (last === null || d > last) last = d;
+  });
+  return { first, last };
+}
+
+function attachBubbleText(fileName, rows) {
+  const range = transactionDateRange(rows);
+  const count = `${rows.length.toLocaleString('ko-KR')}행`;
+  const period = range.first && range.last ? `, ${range.first}~${range.last}` : '';
+  return `파일 첨부: ${fileName} (${count}${period})`;
+}
+
+async function performChatAttach(file) {
+  const seq = state.chat.streamSeq + 1;
+  state.chat.streamSeq = seq;  // 진행 중이던 다른 요청 결과는 버린다
+  const row = state.chat.liveRow;
+  const fileName = String((file && file.name) || '파일');
+
+  const read = await readTransactionFileMatrix(file);
+  if (seq !== state.chat.streamSeq) return;
+  if (read.error) { failChatAttach(row, read.error); return; }
+
+  const upload = buildUploadState(fileName, read.matrix);
+  const parsed = uploadMappingReady(upload) ? normalizeUploadRows(upload) : { rows: [] };
+
+  if (!uploadMappingReady(upload) || !parsed.rows.length) {
+    /* 자동 매핑 실패: 파싱 결과를 넘겨받은 소비 패턴 화면에서 열을 직접 고르게 한다. */
+    const mapped = uploadMappingReady(upload);
+    upload.notice = mapped
+      ? '보낼 수 있는 거래 행을 찾지 못했습니다. 아래에서 열을 직접 지정해주세요.'
+      : '날짜와 금액 열을 자동으로 찾지 못했습니다. 아래에서 열을 직접 지정해주세요.';
+    upload.noticeError = false;
+    if (row && row.parentNode) row.parentNode.removeChild(row);
+    state.chat.liveRow = null;
+    state.chat.messages.push({
+      role: 'attach-map',
+      upload,
+      text: mapped
+        ? `${fileName}에서 보낼 수 있는 거래 행을 찾지 못했어요. 열을 직접 지정하면 분석할 수 있어요.`
+        : `${fileName}에서 날짜와 금액 열을 자동으로 찾지 못했어요.`,
+    });
+    setChatPending(false);
+    renderChatTranscript(true);
+    return;
+  }
+
+  const rows = parsed.rows;
+  state.chat.messages.push({ role: 'user', text: attachBubbleText(fileName, rows) });
+  if (row) {
+    clearNode(row);
+    row.appendChild(buildPendingRow());
+  }
+  renderChatTranscript(true);
+
+  const res = await Api.chatAttach(state.chat.chatId, fileName, rows, upload.months || 3);
+  if (seq !== state.chat.streamSeq) return;
+  if (!res.ok) { failChatAttach(row, CHAT_ATTACH_FAIL_TEXT); return; }
+
+  /* 스트림이 없으므로 노드 카드는 응답의 trace 로 접힌 요약만 그린다. */
+  finishChatReply(row, { stages: () => [] }, res.data || {});
+}
+
+/* 대화 스레드에 들어가는 안내 카드. 버튼을 누르면 소비 패턴 화면의 열 지정 단계로 간다. */
+function buildAttachMappingCard(msg) {
+  const card = h('div', { class: 'inline-action-card' });
+  card.appendChild(h('div', { class: 'inline-action-head' },
+    h('span', { class: 'inline-action-kicker' }, '첨부 파일'),
+    h('span', { class: 'inline-action-title' }, '열을 지정해야 해요')));
+  card.appendChild(h('p', { class: 'inline-action-text' }, msg.text));
+  card.appendChild(h('div', { class: 'inline-action-foot' }, h('button', {
+    type: 'button', class: 'btn btn-primary btn-sm', 'aria-label': '소비 패턴 화면에서 열 지정하기',
+    onClick: () => {
+      state.spending.upload = msg.upload;
+      state.spending.focusMapping = true;
+      navigateTo('spending');
+    },
+  }, '소비 패턴 화면에서 열 지정하기')));
+  return card;
+}
+
 function finishChatReply(row, group, reply) {
   if (reply.chat_id) state.chat.chatId = reply.chat_id;
 
@@ -4549,7 +4733,6 @@ function buildChatHeader() {
   head.appendChild(h('h1', { class: 'chat-head-title', id: 'chatHeadTitle' }, chatTitleText()));
 
   const right = h('div', { class: 'chat-head-right' });
-  right.appendChild(h('span', { class: 'chat-model-label' }, CHAT_MODEL_LABEL));
   right.appendChild(h('span', { class: 'avatar chat-head-avatar', 'aria-hidden': 'true' }, profileInitial()));
   head.appendChild(right);
   return head;
@@ -4589,6 +4772,7 @@ function renderChat() {
   renderResourcePanel();
   scrollChatToEnd();
   flushQueuedChatSend();
+  flushQueuedChatAttach();
 }
 
 /* 사이드바 "최근"에서 고른 대화를 대화 화면으로 불러온다. */
@@ -4622,6 +4806,7 @@ async function openChat(chatId) {
   }
   state.chat.pending = false;
   state.chat.queuedSend = null;
+  state.chat.queuedAttach = null;
   state.chat.liveRow = null;
   navigateTo('chat');
   renderChatTranscript(true);
@@ -4637,6 +4822,7 @@ function startNewChat() {
   state.chat.title = '';
   state.chat.resources = [];
   state.chat.queuedSend = null;
+  state.chat.queuedAttach = null;
   state.chat.liveRow = null;
   navigateTo('home');
   renderRecentList();

@@ -669,6 +669,8 @@ button { cursor: pointer; background: none; border: none; }
 }
 .round-btn-outline:hover { border-color: var(--accent); color: var(--accent); }
 .round-btn-outline:active { background: var(--accent-light); }
+.round-btn-outline:disabled { opacity: .45; cursor: default; }
+.round-btn-outline:disabled:hover { border-color: var(--border); color: var(--muted); }
 
 .mode-badge {
   background: var(--accent-light);
@@ -1948,6 +1950,7 @@ table.data-table tfoot td {
   border-radius: 999px; padding: 2px var(--sp-2); flex: none;
 }
 .inline-action-title { font-size: 13px; font-weight: 600; }
+.inline-action-text { font-size: 12.5px; line-height: 1.6; color: var(--muted); word-break: keep-all; }
 .prep-rows { display: flex; flex-direction: column; gap: 3px; }
 .prep-row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3); font-size: 12.5px; }
 .prep-label { color: var(--muted); display: inline-flex; align-items: center; gap: var(--sp-1); }
@@ -2289,4 +2292,7 @@ button.resource-open:hover .resource-title { color: var(--accent); }
 /* Google 검색 제안(외부 검색 그라운딩) 격리 프레임 */
 .search-suggestions-card { padding: var(--sp-2) var(--sp-3); }
 .search-suggestions-frame { display: block; width: 100%; height: 76px; border: 0; background: transparent; }
+
+/* 노드 카드의 기술 정보 줄(모델명·소요 시간) */
+.node-tech { margin: 2px 0 0; font-size: 11px; color: var(--color-muted, #6B7280); letter-spacing: -0.01em; }
 

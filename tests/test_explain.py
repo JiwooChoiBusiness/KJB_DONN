@@ -7,12 +7,19 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import pytest
 
 from app.api import routes as routes_module
+from app.core.capacity import compute_capacity
+from app.core.schedule import build_schedule
+from app.data import policy, synthetic
 from app.llm import slotfill
 from app.llm.provider import LLMResult, LLMUnavailable
+from app.models import ActionCard
+from app.services import actions as actions_service
+from app.services import explain as explain_service
 from tests.test_api import _FIXTURE_COMPANIES, _FakeUnavailableProvider, _clear_session, client
 
 # ---------------------------------------------------------------------------
@@ -132,11 +139,11 @@ class _FakeExplainProvider:
         self.last_slots = slots
         placeholders = slots.get("placeholders", {})
         if template_id == "action_card_v1":
-            data = {"summary": "이번 안내를 확인했어요. 지금 상황에 맞게 살펴보세요."}
+            data = {"summary": "지금 상황 때문에 이번 안내를 확인했어요. 여건에 맞게 계속 살펴보세요."}
         elif "label_a" not in placeholders:
             data = {"summary": "지금은 참고할 상품이 없어요.", "reasons": []}
         else:
-            summary = "{label_a} 조건을 확인했어요. 금리는 {rate_a}이고 총이자는 {total_a}예요."
+            summary = "{label_a} 조건이 금리 {rate_a}이라서 총이자 {total_a}로 유리해요. 조건을 확인해 보세요."
             reasons = []
             for letter in ("a", "b", "c"):
                 if f"label_{letter}" in placeholders:
@@ -364,4 +371,149 @@ def test_fill_drops_duplicated_unit_after_placeholder():
     assert slotfill.fill("금리 {r}%로", {"r": "5.47%"}) == "금리 5.47%로"
     # 단위가 아닌 글자는 건드리지 않는다
     assert slotfill.fill("{n} 개월치", {"n": "3개"}) == "3개 개월치"
+
+
+# ---------------------------------------------------------------------------
+# (g) 행동 카드 설명 품질(2026-09-06 PMO 지적: "말도 안 되는 답변")
+# ---------------------------------------------------------------------------
+
+# 실제 화면에서 나온 문장(gemini-3.7-flash, R0 안전 모드 카드). 라벨 없이 플레이스홀더만
+# 나열했고 빈말("상태를 고려해", "관련 내용을")도 섞여 있었다.
+_REAL_WORLD_BAD_SENTENCE = (
+    "현재 {net_monthly}이나 {debt_service_ratio} 상태를 고려해 공적 상담을 먼저 살펴보세요. "
+    "새로운 대출을 진행하기 전에 안전 모드 관련 내용을 먼저 확인해 보세요."
+)
+
+_GOOD_SENTENCE = (
+    "이번 달 남는 돈이 {net_monthly}이라서 금리 {target_rate} 대출에 추가로 갚으면 "
+    "{months_saved} 빨리 끝나고 이자 {interest_saved}을 아낄 수 있어요. "
+    "여유 자금이 생기면 이 대출부터 갚는 것을 확인해 보세요."
+)
+
+
+def _r2_like_card() -> ActionCard:
+    """실제 R2(추가 상환) 카드와 같은 종류의 숫자를 담되, 검증 대상 플레이스홀더
+    이름(net_monthly/target_rate/months_saved/interest_saved)을 직접 지정한 카드.
+
+    실제 app/core/rules.py의 R2는 net_monthly 대신 extra_monthly 키를 쓰므로, 문서에서
+    준 예시 문장을 그대로 검증하려면 카드를 직접 구성해야 한다.
+    """
+    return ActionCard(
+        id="test-r2-like",
+        rule_id="R2",
+        title="최고금리 대출부터 추가 상환하세요",
+        summary="테스트용 기본 요약",
+        numbers={
+            "net_monthly": 300_000,
+            "target_rate": 12.5,
+            "months_saved": 4,
+            "interest_saved": 210_000,
+        },
+        safe_mode=False,
+    )
+
+
+def test_action_explain_safe_mode_card_never_calls_llm_and_uses_template():
+    """R0(안전 모드) 카드는 위기 관련 문장이라 LLM을 호출하지 않고 항상 템플릿을 쓴다."""
+    profile = synthetic.get_persona("P5")  # 연체 신호 페르소나 -> R0 발동
+    params = policy.load_policy_params()
+    today = date.today()
+    cards = actions_service._raw_actions(profile, params, today=today)
+    r0_card = next(c for c in cards if c.safe_mode)
+    assert r0_card.rule_id == "R0"
+
+    class _CountingProvider:
+        def __init__(self):
+            self.calls = 0
+
+        def available(self) -> bool:
+            return True
+
+        def explain(self, *args, **kwargs):  # noqa: ANN001, D401
+            self.calls += 1
+            raise AssertionError("safe_mode 카드는 LLM을 호출하면 안 된다")
+
+    provider = _CountingProvider()
+    result = explain_service.explain_action(r0_card.id, provider, profile, params, today=today, refresh=True)
+
+    assert result is not None
+    assert result.source == "template"
+    assert result.llm_used is False
+    assert result.model is None
+    assert provider.calls == 0
+    assert "safe_mode_template" in result.problems
+    assert result.summary == r0_card.summary
+
+
+def test_action_explain_rejects_real_world_bad_sentence_on_regular_card(monkeypatch):
+    """R0가 아닌 일반 카드(R2 등)에서도 라벨 없는 플레이스홀더 나열/빈말 문장은
+    템플릿으로 떨어져야 한다(problems에 unlabeled_placeholder 또는 vague_phrase)."""
+    profile = synthetic.get_persona("P1")
+    params = policy.load_policy_params()
+    today = date.today()
+    cards = actions_service._raw_actions(profile, params, today=today)
+    card = next(c for c in cards if not c.safe_mode)
+
+    class _BadTextProvider:
+        def available(self) -> bool:
+            return True
+
+        def explain(self, slots, template_id, system, schema=None):  # noqa: ANN001
+            data = {"summary": _REAL_WORLD_BAD_SENTENCE}
+            return LLMResult(data=data, text=json.dumps(data, ensure_ascii=False),
+                              model="fake", key_index=0, latency_ms=1, usage={})
+
+    result = explain_service.explain_action(
+        card.id, _BadTextProvider(), profile, params, today=today, refresh=True,
+    )
+    assert result is not None
+    assert result.source == "template"
+    joined = " ".join(result.problems)
+    assert "unlabeled_placeholder" in joined or "vague_phrase" in joined
+
+
+def test_action_slots_process_text_rejects_bad_sentence_but_accepts_good_one():
+    """action_slots + _process_text 단위로 직접 검증: 나쁜 문장은 실패, 좋은 문장은 통과."""
+    profile = synthetic.get_persona("P1")
+    schedules = [build_schedule(loan) for loan in profile.loans]
+    capacity = compute_capacity(profile, schedules)
+    card = _r2_like_card()
+
+    facts, placeholders, values = explain_service.action_slots(card, profile, capacity)
+    allowed = set(placeholders.keys())
+
+    filled_bad, problems_bad = explain_service._process_text(
+        _REAL_WORLD_BAD_SENTENCE, allowed, [], values, max_chars=300, max_sentences=3, location="summary",
+    )
+    assert filled_bad is None
+    assert any("unlabeled_placeholder" in p or "vague_phrase" in p for p in problems_bad)
+
+    filled_good, problems_good = explain_service._process_text(
+        _GOOD_SENTENCE, allowed, [], values, max_chars=300, max_sentences=3, location="summary",
+    )
+    assert problems_good == []
+    assert filled_good is not None
+    assert "{" not in filled_good
+
+
+def test_compare_summary_unlabeled_placeholder_check():
+    """compare 요약 스타일 문장의 unlabeled 검사: 라벨 없이 값만 나열하면 실패,
+    라벨과 함께 쓰면 통과."""
+    allowed = {"rate_a", "total_a"}
+    values = {"rate_a": "5.47%", "total_a": "2,855,688원"}
+
+    filled_bad, problems_bad = explain_service._process_text(
+        "{rate_a}과 {total_a}를 보면 첫 번째예요", allowed, [], values,
+        max_chars=140, max_sentences=1, location="reason_a",
+    )
+    assert filled_bad is None
+    assert any("unlabeled_placeholder" in p for p in problems_bad)
+
+    filled_good, problems_good = explain_service._process_text(
+        "금리 {rate_a}, 총이자 {total_a}로 첫 번째예요", allowed, [], values,
+        max_chars=140, max_sentences=1, location="reason_a",
+    )
+    assert problems_good == []
+    assert filled_good is not None
+    assert "{" not in filled_good
 

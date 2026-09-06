@@ -454,6 +454,13 @@ data: <json 한 줄>
 - 여러 노드가 필요한 질문(예 "내 상황에서 금리인하요구권 쓸 수 있어?")은 주 의도 노드(debt_data+calc)와 kb 노드를 함께 실행하고 리소스를 합친다.
 - 러너 골든 질문에 direct/external 사례를 추가하고, external은 네트워크 테스트(`DONN_NETWORK_TESTS=1`)로만 실호출한다. 단위 테스트는 그라운딩 응답을 모킹한다.
 
+### 2.12 대화창 파일 첨부: 거래내역을 올리면 소비 패턴 분석이 답변으로 온다 (PMO 결정 2026-09-06)
+
+- 화면: 입력 카드의 "+"는 파일 첨부 버튼이다(aria-label "거래내역 파일 첨부", `accept=".csv,.xlsx,.xls"`, 숨긴 `<input type="file">`). 파일을 고르면 브라우저가 소비 패턴 화면과 같은 파서·열 자동 매핑으로 정규화한다(원본 파일은 서버로 보내지 않는다, 최대 행 수는 `SPENDING_MAX_ROWS`). 자동 매핑에 실패하면 대화에 안내 카드("열을 지정해야 해요")와 버튼 "소비 패턴 화면에서 열 지정하기"(파싱 결과를 `state`에 넘겨 이동)를 보여준다. 성공하면 사용자 말풍선 "파일 첨부: {파일명} ({n}행, {첫 날짜}~{끝 날짜})"을 그리고 `POST /api/chat/attach`를 호출해 응답을 일반 답변처럼 렌더링한다(노드 카드는 `stage` 이벤트 대신 응답의 `trace`로 접힌 요약을 그린다). 새 대화가 아니면 현재 `chat_id`를 함께 보낸다.
+- API: `POST /api/chat/attach`, body `ChatAttachRequest{chat_id?: str, filename: str(최대 120자), months?: int = 3, transactions: list[Transaction]}`(`transactions`는 `/api/spending/analyze`와 같은 형식·상한). 동작: `/api/spending/analyze`와 같은 분석과 저장(요약·피처만 저장, 원본 미저장) → `ChatReply(route="internal", answer_format="markdown", llm_used=False, trace=[파일 확인, 소비 패턴 계산, 마지막 점검]의 done 항목, resources=[calc "소비 패턴 분석"(detail "{기간}, 거래 {n}건"), profile], chips=[소비 패턴 자세히 보기(intent spending)], action={"type":"open_view","payload":{"view":"spending"}})`. 대화 로그에는 사용자 메시지 "파일 첨부: {mask_pii(파일명)[:60]} ({n}행)"과 응답을 저장한다. LLM 호출 없음, 호출 제한 대상 아님.
+- 답변 마크다운: 요약 1문장(최근 {개월}개월 월평균 지출 {원}, 소득 대비 {%}) → `**핵심**` 목록 3~5개(상위 카테고리 2개와 비중, 정기 결제 {n}건 합계 {원}, 급증 항목 1개, 생애 이벤트 신호 1개, 해당 없으면 생략) → 마지막 줄 "원본 거래내역은 저장하지 않고 요약만 남겨요." 숫자는 모두 `app/core/spending.py` 계산값이며 문장은 코드 템플릿이다(상품·회사명 없음, 가맹점명은 카테고리로만).
+- 테스트: 합성 거래내역(`synthetic`의 CSV 행)을 `/api/chat/attach`로 보내 200·markdown·resources·대화 로그 저장·`GET /api/spending`에 요약이 남는지, 파일명 PII 마스킹, 행 수 상한 초과 422. 러너는 페르소나 1명에 attach 1회 soft 검사.
+
 ## 3. 화면 규격 (web/)
 
 - 단일 페이지, 빌드 없음. `index.html`, `app.js`, `styles.css`. 글꼴은 Pretendard(jsdelivr CDN, 오프라인이면 system-ui·"Malgun Gothic" 폴백). 그 외 외부 CDN 의존 없음.
@@ -543,4 +550,5 @@ python run.py 3676       # Claude Code 테스트용
 - (답변 경로·리소스) 2.11절 추가. `app/models.py`에 `ChatResource` 신설, `ChatReply`에 `route`, `resources`, `answer_format` 추가(기본값이라 기존 호출 호환).
 - (공개 데모 보강) 브라우저별 세션: `app/main.py` 미들웨어가 쿠키 `donn_sid`(HttpOnly, SameSite=Lax, 30일, https면 Secure)를 발급하고 요청 동안 `app.services.session.current_sid()`(ContextVar)에 묶는다. 프로필 저장 키 `current_profile:{sid}`, `chats.profile_id`는 `{sid}:{profile_id}`로 저장하되 API 응답은 접두사 없이 돌려준다. `decisions.sid` 컬럼(마이그레이션)으로 결정 기록·재현·설명이 세션별로 격리된다. `spending_features`도 `{sid}:{profile_id}` 키. 호출 제한: `POST /api/chat`, `/api/chat/stream`, `/api/compare/{id}/explain`, `/api/actions/{id}/explain`에 sid별 5분 슬라이딩 윈도(`DONN_RATE_LIMIT_PER_5MIN` 기본 20)와 전체 합산(`DONN_RATE_LIMIT_GLOBAL_PER_5MIN` 기본 150), 초과 시 429. 0이면 무제한(테스트·러너).
 - (검토 게이트 2차) `app/services/compare.py::prepare_context`는 `term_months`를 1~600으로, `amount`는 양수만 채택하며 채팅 compare 분기는 검증 실패 시 안내 문장으로 답한다(500 금지). `app/services/insights.py::get_banned_terms`는 빈 결과·예외를 캐시하지 않고 `invalidate_banned_terms()`가 시드·실 적재 뒤 호출된다. 외부 검색 질의는 숫자 토큰을 제거한 뒤 보내고(남으면 검색 포기), external 요약은 회사명 패턴 검사와 "(수치는 확인 필요)" 부기를 거친다. `ChatRequest.message`는 최대 2000자. `app/data/db.py::get_conn`은 WAL과 busy_timeout(10초)을 켠다. 2.11 라우팅 보강: faq는 발화에 문서 키워드가 있으면 그 문서로 internal, 없으면 점수가 임계값을 넘고 시점성 질문이 아닐 때만 internal, 그 밖은 external. 인사·도움말은 LLM 분류와 무관하게 규칙이 direct면 direct.
-
+- (생각 과정 문구·설명 품질) 2.9의 stage dict에 `tech: str`(선택, 모델명·소요 초·사유 코드 같은 기술 정보 한 줄)을 추가하고 `label`·`detail`은 사용자 말로 쓴다(예: "무엇이 필요한지 파악 · 공시 비교로 이해했어요", 기술 정보는 `tech`에 "Gemini gemini-3.8-flash · 3.0초"). 화면은 `tech`를 작은 회색 줄로만 보여준다. 2.8 행동 카드 설명: `safe_mode` 카드(R0)는 LLM을 쓰지 않고 항상 템플릿. LLM 문장 검증에 `unlabeled_placeholder`(플레이스홀더 앞 20자 안에 맥락어 없음), `not_informative`(이유 연결어와 행동 동사 부재), `vague_phrase`(빈말)를 추가해 실패하면 템플릿으로 간다(2026-09-06 화면 실측: "현재 -1,450,608원이나 95% 상태를 고려해..." 같은 문장 차단).
+- (대화창 파일 첨부) 2.12절 추가. `POST /api/chat/attach`, `ChatAttachRequest` 신설. 입력 카드 "+"는 새 대화가 아니라 파일 첨부. 모델명은 화면 어디에도 표시하지 않고(배지는 "AI 응답"/"규칙 기반 응답"만), 입력 카드의 "모드: M0 공시 비교" 배지는 제거.

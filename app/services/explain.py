@@ -90,6 +90,131 @@ ACTION_SCHEMA: dict[str, Any] = {
     "required": ["summary"],
 }
 
+# 행동 카드 설명(action_card_v1) 전용 시스템 프롬프트(2026-09-06 PMO 지적: 실제 화면에서
+# "현재 -1,450,608원이나 95% 상태를 고려해..." 같이 라벨 없는 플레이스홀더 나열이
+# 나왔다). EXPLAIN_SYSTEM의 공통 규칙에 3문장 구조와 라벨 동반 요구, 숫자 없는 좋은
+# 문장 예시(R2 추가 상환, R4 비상금, R3 대환 비교)를 더한다.
+ACTION_EXPLAIN_SYSTEM = EXPLAIN_SYSTEM + (
+    "\n규칙 8(구조): summary는 반드시 세 문장입니다. 문장 1은 확인된 사실을 라벨과 값으로 "
+    "말합니다(예: 이번 달 남는 돈이 {net_monthly}이고 상환 비율이 {debt_service_ratio}라서). "
+    "문장 2는 그 사실이 왜 중요한지 gist를 풀어서 설명합니다. 문장 3은 지금 할 일 한 가지를 "
+    "카드 제목의 행동을 풀어써서 말합니다(상품명·회사명 없이). "
+    "규칙 9(라벨 동반): placeholders 목록의 각 항목은 \"키: 라벨\" 형식입니다. 문장에서 그 "
+    "플레이스홀더를 쓸 때는 반드시 라벨에 해당하는 말과 함께 쓰세요(예: 라벨이 \"이번 달 "
+    "남는 돈\"이면 \"이번 달 남는 돈이 {net_monthly}\"처럼 쓰고, 라벨 없이 \"{net_monthly}이나\" "
+    "처럼 값만 나열하지 마세요). "
+    "좋은 예시 세 개(숫자 없이 플레이스홀더를 그대로 쓴 문장, 실제로는 이렇게 라벨과 함께 씁니다):\n"
+    "1) 이번 달 남는 돈이 {net_monthly}이라서 금리 {target_rate} 대출에 추가로 갚으면 "
+    "{months_saved} 빨리 끝나고 이자 {interest_saved}을 아낄 수 있어요. 여유 자금이 생기면 "
+    "이 대출부터 갚는 것을 확인해 보세요.\n"
+    "2) 지금 비상금이 목표보다 {gap}만큼 모자라서 갑자기 돈이 필요할 때 대응하기 어려워요. "
+    "매달 조금씩이라도 비상금부터 채우는 계획을 준비해 보세요.\n"
+    "3) 지금 대출 금리가 {current_rate}로 낮지 않은 편이라서 다른 조건과 비교해볼 필요가 "
+    "있어요. 공시된 다른 상품의 금리와 조건을 비교해 보세요."
+)
+
+# ---------------------------------------------------------------------------
+# 설명 문장 품질 검증 (2026-09-06 PMO 지적, compare·action·chat_compare 모두 적용)
+# ---------------------------------------------------------------------------
+
+# 플레이스홀더별 "이 근처에 있어야 자연스러운" 맥락어. 각 플레이스홀더 앞뒤 20자
+# (공백 제거 후) 안에 이 중 하나도 없으면 라벨 없이 값만 나열한 것으로 본다
+# (`unlabeled_placeholder`). label_a/b/c는 이미 라벨 그 자체라 검사 대상이 아니다.
+# 표에 없는 키는 검사를 생략한다.
+PLACEHOLDER_CONTEXT: dict[str, tuple[str, ...]] = {
+    "net_monthly": ("남는돈", "여력", "여유"),
+    "debt_service_ratio": ("상환비율", "비율"),
+    "interest_saved": ("이자", "절감", "아낄"),
+    "months_saved": ("개월", "단축", "빨리"),
+    "new_months": ("개월", "기간"),
+    "extra_monthly": ("추가상환", "추가", "더갚"),
+    "target_rate": ("금리",),
+    "current_rate": ("금리",),
+    "rate": ("금리",),
+    "emergency_fund": ("비상금", "비상자금", "부족", "목표"),
+    "target_emergency_fund": ("비상금", "비상자금", "부족", "목표"),
+    "gap": ("비상금", "비상자금", "부족", "목표"),
+    "balance": ("잔액",),
+    "payoff_amount": ("정리", "금액"),
+    "monthly_interest_saving": ("이자", "절감"),
+    "prepay_fee": ("수수료",),
+    "breakeven_months": ("개월", "회수", "손익"),
+    "saving_rate": ("저축률", "저축"),
+    "min_saving_rate": ("저축률", "저축"),
+    "coverage_ratio": ("충당률", "충당"),
+    "min_coverage_ratio": ("충당률", "충당"),
+    "guaranteed_income": ("확정소득", "소득"),
+    "essential_expense": ("지출", "생활비"),
+    "monthly_income_x2": ("월소득", "두배"),
+    "remaining_months": ("개월", "남은", "거치"),
+    "grace_months": ("개월", "남은", "거치"),
+    "cost": ("비용", "무료"),
+    "amount": ("금액", "원을", "빌리"),
+    "term_months": ("기간", "동안", "개월"),
+    "max_rate": ("상한", "이하", "금리"),
+    "candidates_total": ("상품", "중", "후보"),
+    "shown_count": ("상위", "골랐", "개를"),
+    "rate_a": ("금리",), "rate_b": ("금리",), "rate_c": ("금리",),
+    "monthly_a": ("납입", "월"), "monthly_b": ("납입", "월"), "monthly_c": ("납입", "월"),
+    "total_a": ("총이자", "이자"), "total_b": ("총이자", "이자"), "total_c": ("총이자", "이자"),
+    "vs_a": ("절감", "줄", "더들", "차이", "아낄"),
+    "vs_b": ("절감", "줄", "더들", "차이", "아낄"),
+    "vs_c": ("절감", "줄", "더들", "차이", "아낄"),
+}
+
+# 각 플레이스홀더 앞/뒤로 살펴볼 문자 수(공백 제거 후). 한국어 어순상 설명어가 값
+# 앞이 아니라 뒤에 오는 경우도 흔해(예: "{months_saved} 빨리 끝나고") 앞뒤 모두 본다.
+_CONTEXT_WINDOW_CHARS = 20
+
+_REASON_CONNECTORS = ("라서", "때문", "므로", "이라", "니까", "덕분", "탓", "이어서", "아서", "어서")
+_ACTION_VERBS = (
+    "확인", "상담", "살펴", "문의", "비교", "저축", "상환", "갚", "채우", "준비",
+    "신청", "검토", "점검", "조정", "줄이",
+)
+_VAGUE_PHRASES = ("상태를 고려해", "관련 내용을", "관련 사항을", "고려해 보세요", "참고해 보세요")
+
+_WS_ONLY_RE = re.compile(r"\s+")
+
+
+def _unlabeled_placeholder_names(text: str) -> list[str]:
+    """text 안에서 맥락어 없이(라벨 없이) 값만 나열된 플레이스홀더 이름 목록.
+
+    PLACEHOLDER_CONTEXT에 없는 키는 검사하지 않는다(표에 없는 키는 검사 생략).
+    """
+    names: list[str] = []
+    for match in slotfill.PLACEHOLDER_RE.finditer(text):
+        name = match.group(1)
+        context_words = PLACEHOLDER_CONTEXT.get(name)
+        if not context_words:
+            continue
+        before = _WS_ONLY_RE.sub("", text[: match.start()])[-_CONTEXT_WINDOW_CHARS:]
+        after = _WS_ONLY_RE.sub("", text[match.end():])[:_CONTEXT_WINDOW_CHARS]
+        if not any(word in before or word in after for word in context_words):
+            names.append(name)
+    return names
+
+
+def _extra_quality_problems(text: str, *, location: str) -> list[str]:
+    """slotfill.validate 이후에 추가로 거는 품질 검사(2026-09-06 PMO 지적 반영).
+
+    (a) unlabeled_placeholder: 플레이스홀더 근처에 맥락어가 하나도 없음.
+    (b) not_informative: summary에 이유 연결어와 행동 동사가 둘 다 있어야 한다(둘 중
+        하나라도 없으면 실패). 항목 이유(reason_a/b/c)는 원래 문장이 짧고 사실
+        나열형이라 이 검사는 summary에만 건다.
+    (c) vague_phrase: "상태를 고려해" 같은 빈말이 있으면 실패(위치 무관).
+    """
+    problems: list[str] = []
+    if _unlabeled_placeholder_names(text):
+        problems.append("unlabeled_placeholder")
+    if location == "summary":
+        has_connector = any(c in text for c in _REASON_CONNECTORS)
+        has_verb = any(v in text for v in _ACTION_VERBS)
+        if not (has_connector and has_verb):
+            problems.append("not_informative")
+    if any(p in text for p in _VAGUE_PHRASES):
+        problems.append("vague_phrase")
+    return problems
+
 # R0~R10 규칙 요지(숫자 없는 한 문장). app/core/rules.py의 각 규칙 조건을 그대로 요약한다.
 # R7은 존재하지 않는 규칙 번호다(rules.py에 R0,R1,R2,R3,R4,R5,R6,R8,R9,R10만 있다).
 RULE_GIST: dict[str, str] = {
@@ -284,7 +409,10 @@ def action_slots(card: ActionCard, profile: UserProfile, capacity: Capacity) -> 
         label = _action_number_label(key)
         if label is None or _DIGIT_RE.search(label):
             continue  # 라벨을 모르거나 라벨 자체에 숫자가 있으면 LLM에 노출하지 않는다(D4)
-        placeholders[key] = label
+        # 2026-09-06 PMO 지적: LLM이 라벨 없이 플레이스홀더만 나열하는 문제(예: "현재
+        # {net_monthly}이나 {debt_service_ratio} 상태를 고려해")가 있었다. 플레이스홀더
+        # 설명 자체에 "반드시 라벨과 함께 쓸 것"을 못박아 각 항목마다 반복 상기시킨다.
+        placeholders[key] = f"{label}(반드시 라벨과 함께 쓸 것)"
         values[key] = actions_service.format_action_number(key, value)
 
     return facts, placeholders, values
@@ -297,7 +425,7 @@ def action_slots(card: ActionCard, profile: UserProfile, capacity: Capacity) -> 
 
 def _call_llm_explain(
     provider: Any, facts: dict[str, Any], placeholders: dict[str, str], template_id: str, schema: dict,
-    *, deadline_seconds: Optional[float] = None,
+    *, system: str = EXPLAIN_SYSTEM, deadline_seconds: Optional[float] = None,
 ) -> tuple[Optional[dict], Optional[str], int, list[str]]:
     """LLM 호출 1회를 시도한다. (data, model, latency_ms, problems)를 돌려준다.
 
@@ -306,7 +434,9 @@ def _call_llm_explain(
     호출 전 단계는 포함하지 않는다). `deadline_seconds`를 생략하면 provider.explain에
     그 인자를 아예 넘기지 않는다(기존 테스트 더블처럼 그 키워드를 모르는 provider와도
     호환되도록). 넘길 때는 SPEC 2.9의 대화 화면 설명(`explain_chat_compare`)처럼 provider
-    기본값보다 짧은 체인 상한을 강제하고 싶을 때만 지정한다.
+    기본값보다 짧은 체인 상한을 강제하고 싶을 때만 지정한다. `system`을 생략하면 공용
+    EXPLAIN_SYSTEM을 쓰고, action_card_v1처럼 구조화된 지시가 필요하면 호출부가
+    ACTION_EXPLAIN_SYSTEM 등을 넘긴다.
     """
     if not hasattr(provider, "explain") or not provider.available():
         return None, None, 0, ["llm_unavailable"]
@@ -323,7 +453,7 @@ def _call_llm_explain(
 
     started = time.monotonic()
     try:
-        result = provider.explain(payload, template_id, EXPLAIN_SYSTEM, **kwargs)
+        result = provider.explain(payload, template_id, system, **kwargs)
     except LLMUnavailable:
         latency_ms = int((time.monotonic() - started) * 1000)
         return None, None, latency_ms, ["llm_unavailable"]
@@ -356,6 +486,7 @@ def _process_text(
         return None, [f"{location}:empty"]
     sanitized = slotfill.sanitize(raw)
     problems = slotfill.validate(sanitized, allowed, banned, max_chars=max_chars, max_sentences=max_sentences)
+    problems = problems + _extra_quality_problems(sanitized, location=location)
     if problems:
         return None, [f"{location}:{p}" for p in problems]
     try:
@@ -616,13 +747,37 @@ def explain_action(
     facts, placeholders, values = action_slots(card, profile, capacity)
     allowed = set(placeholders.keys())
 
+    # 2026-09-06 PMO 지적("말도 안 되는 답변"): 안전 모드(R0) 카드는 위기 상황 문장이라
+    # 결정론 원칙(SPEC 0.1)을 지켜 LLM을 아예 호출하지 않고 항상 카드 템플릿을 쓴다.
+    # provider.explain은 이 분기에서 한 번도 불리지 않는다.
+    if card.safe_mode:
+        summary_text, item_reasons = _template_action(card)
+        summary_text, item_reasons = _guard_template(summary_text, item_reasons, banned)
+        explain_result = ExplainResult(
+            kind="action",
+            ref_id=ref_id,
+            summary=summary_text,
+            item_reasons=item_reasons,
+            source="template",
+            llm_used=False,
+            model=None,
+            latency_ms=0,
+            template_id="action_card_v1",
+            prompt_version=PROMPT_VERSION,
+            problems=["safe_mode_template"],
+            cached=False,
+            created_at=datetime.now(),
+        )
+        _save_explanation(explain_result)
+        return explain_result
+
     data, model, latency_ms, problems = _call_llm_explain(
-        provider, facts, placeholders, "action_card_v1", ACTION_SCHEMA,
+        provider, facts, placeholders, "action_card_v1", ACTION_SCHEMA, system=ACTION_EXPLAIN_SYSTEM,
     )
 
     all_problems: list[str] = list(problems)
-    summary_text: Optional[str] = None
-    item_reasons: dict[str, str] = {}
+    summary_text = None
+    item_reasons = {}
 
     if data is not None:
         summary_text, summary_problems = _process_text(

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-06T21:52:15",
+  "generated_at": "2026-09-06T21:48:49",
   "llm_mode": "rule",
   "judge_enabled": false,
   "judge_skipped_reason": "",
@@ -85,7 +85,7 @@
           "name": "scenarios-kinds",
           "ok": true,
           "hard": true,
-          "detail": "{'favorable', 'base', 'adverse'}"
+          "detail": "{'base', 'adverse', 'favorable'}"
         },
         {
           "name": "scenarios-finite",
@@ -355,91 +355,91 @@
       "timings_ms": [
         {
           "label": "POST /api/session/persona/{id}",
-          "ms": 58.15
+          "ms": 77.69
         },
         {
           "label": "GET /api/home",
-          "ms": 34.55
+          "ms": 48.92
         },
         {
           "label": "GET /api/actions",
-          "ms": 24.01
+          "ms": 29.24
         },
         {
           "label": "GET /api/scenarios",
-          "ms": 22.86
+          "ms": 29.47
         },
         {
           "label": "GET /api/lifecycle",
-          "ms": 26.31
+          "ms": 35.24
         },
         {
           "label": "POST /api/spending/analyze-synthetic",
-          "ms": 23.69
+          "ms": 25.48
         },
         {
           "label": "GET /api/spending",
-          "ms": 13.58
+          "ms": 15.65
         },
         {
           "label": "POST /api/compare/prepare",
-          "ms": 7.98
+          "ms": 9.93
         },
         {
           "label": "POST /api/compare/run (1)",
-          "ms": 46.59
+          "ms": 51.99
         },
         {
           "label": "POST /api/compare/run (2)",
-          "ms": 47.68
+          "ms": 57.68
         },
         {
           "label": "POST /api/decisions/{id}/replay",
-          "ms": 37.8
+          "ms": 45.27
         },
         {
           "label": "POST /api/compare/{id}/explain",
-          "ms": 27.91
+          "ms": 30.32
         },
         {
           "label": "POST /api/chat [P1-Q1]",
-          "ms": 108.78
+          "ms": 121.99
         },
         {
           "label": "POST /api/chat [P1-Q2]",
-          "ms": 58.52
+          "ms": 66.29
         },
         {
           "label": "POST /api/chat [P1-Q3]",
-          "ms": 93.08
+          "ms": 102.55
         },
         {
           "label": "POST /api/chat [P1-Q4]",
-          "ms": 71.68
+          "ms": 75.79
         },
         {
           "label": "POST /api/chat [P1-Q5]",
-          "ms": 51.72
+          "ms": 62.38
         },
         {
           "label": "POST /api/chat [P1-Q6]",
-          "ms": 83.74
+          "ms": 102.34
         },
         {
           "label": "POST /api/chat [P1-Q7]",
-          "ms": 72.09
+          "ms": 77.36
         },
         {
           "label": "POST /api/chat [P1-Q8]",
-          "ms": 65.34
+          "ms": 72.07
         },
         {
           "label": "POST /api/chat [P1-Q9]",
-          "ms": 52.22
+          "ms": 66.7
         },
         {
           "label": "POST /api/chat [P1-Q10]",
-          "ms": 64.08
+          "ms": 71.17
         }
       ],
       "result_hash_1": "ad5e1b004a05b958fa84aeaa28dd1d104c1d673526c5c9b29ee158bddf7adf44",
@@ -455,7 +455,7 @@
           "action_type": "prepare_compare",
           "passed": true,
           "detail": "",
-          "ms": 108.78,
+          "ms": 121.99,
           "judge": null
         },
         {
@@ -465,7 +465,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 58.52,
+          "ms": 66.29,
           "judge": null
         },
         {
@@ -475,7 +475,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 93.08,
+          "ms": 102.55,
           "judge": null
         },
         {
@@ -485,7 +485,7 @@
           "action_type": "open_kb",
           "passed": true,
           "detail": "",
-          "ms": 71.68,
+          "ms": 75.79,
           "judge": null
         },
         {
@@ -495,7 +495,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 51.72,
+          "ms": 62.38,
           "judge": null
         },
         {
@@ -505,7 +505,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 83.74,
+          "ms": 102.34,
           "judge": null
         },
         {
@@ -515,7 +515,7 @@
           "action_type": "prepare_compare",
           "passed": true,
           "detail": "",
-          "ms": 72.09,
+          "ms": 77.36,
           "judge": null
         },
         {
@@ -525,7 +525,7 @@
           "action_type": "open_kb",
           "passed": true,
           "detail": "",
-          "ms": 65.34,
+          "ms": 72.07,
           "judge": null
         },
         {
@@ -535,7 +535,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 52.22,
+          "ms": 66.7,
           "judge": null
         },
         {
@@ -545,7 +545,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 64.08,
+          "ms": 71.17,
           "judge": null
         }
       ]
@@ -630,7 +630,7 @@
           "name": "scenarios-kinds",
           "ok": true,
           "hard": true,
-          "detail": "{'favorable', 'base', 'adverse'}"
+          "detail": "{'base', 'adverse', 'favorable'}"
         },
         {
           "name": "scenarios-finite",
@@ -900,91 +900,91 @@
       "timings_ms": [
         {
           "label": "POST /api/session/persona/{id}",
-          "ms": 17.41
+          "ms": 16.87
         },
         {
           "label": "GET /api/home",
-          "ms": 39.76
+          "ms": 46.62
         },
         {
           "label": "GET /api/actions",
-          "ms": 26.18
+          "ms": 28.93
         },
         {
           "label": "GET /api/scenarios",
-          "ms": 24.19
+          "ms": 27.39
         },
         {
           "label": "GET /api/lifecycle",
-          "ms": 32.5
+          "ms": 34.16
         },
         {
           "label": "POST /api/spending/analyze-synthetic",
-          "ms": 25.1
+          "ms": 27.32
         },
         {
           "label": "GET /api/spending",
-          "ms": 14.6
+          "ms": 15.93
         },
         {
           "label": "POST /api/compare/prepare",
-          "ms": 8.15
+          "ms": 11.19
         },
         {
           "label": "POST /api/compare/run (1)",
-          "ms": 45.52
+          "ms": 54.55
         },
         {
           "label": "POST /api/compare/run (2)",
-          "ms": 46.97
+          "ms": 56.99
         },
         {
           "label": "POST /api/decisions/{id}/replay",
-          "ms": 36.24
+          "ms": 43.35
         },
         {
           "label": "POST /api/compare/{id}/explain",
-          "ms": 27.73
+          "ms": 31.39
         },
         {
           "label": "POST /api/chat [P2-Q1]",
-          "ms": 84.22
+          "ms": 88.11
         },
         {
           "label": "POST /api/chat [P2-Q2]",
-          "ms": 56.02
+          "ms": 58.72
         },
         {
           "label": "POST /api/chat [P2-Q3]",
-          "ms": 104.47
+          "ms": 112.98
         },
         {
           "label": "POST /api/chat [P2-Q4]",
-          "ms": 72.41
+          "ms": 95.32
         },
         {
           "label": "POST /api/chat [P2-Q5]",
-          "ms": 62.79
+          "ms": 70.51
         },
         {
           "label": "POST /api/chat [P2-Q6]",
-          "ms": 79.77
+          "ms": 94.21
         },
         {
           "label": "POST /api/chat [P2-Q7]",
-          "ms": 75.01
+          "ms": 100.74
         },
         {
           "label": "POST /api/chat [P2-Q8]",
-          "ms": 69.57
+          "ms": 87.72
         },
         {
           "label": "POST /api/chat [P2-Q9]",
-          "ms": 57.12
+          "ms": 71.45
         },
         {
           "label": "POST /api/chat [P2-Q10]",
-          "ms": 68.66
+          "ms": 90.25
         }
       ],
       "result_hash_1": "56148e2a33b789ed0b5268a2807404dcd60d0feb4f9fbfbf4a63d86c28555f58",
@@ -1000,7 +1000,7 @@
           "action_type": "prepare_compare",
           "passed": true,
           "detail": "",
-          "ms": 84.22,
+          "ms": 88.11,
           "judge": null
         },
         {
@@ -1010,7 +1010,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 56.02,
+          "ms": 58.72,
           "judge": null
         },
         {
@@ -1020,7 +1020,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 104.47,
+          "ms": 112.98,
           "judge": null
         },
         {
@@ -1030,7 +1030,7 @@
           "action_type": "open_kb",
           "passed": true,
           "detail": "",
-          "ms": 72.41,
+          "ms": 95.32,
           "judge": null
         },
         {
@@ -1040,7 +1040,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 62.79,
+          "ms": 70.51,
           "judge": null
         },
         {
@@ -1050,7 +1050,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 79.77,
+          "ms": 94.21,
           "judge": null
         },
         {
@@ -1060,7 +1060,7 @@
           "action_type": "prepare_compare",
           "passed": true,
           "detail": "",
-          "ms": 75.01,
+          "ms": 100.74,
           "judge": null
         },
         {
@@ -1070,7 +1070,7 @@
           "action_type": "open_kb",
           "passed": true,
           "detail": "",
-          "ms": 69.57,
+          "ms": 87.72,
           "judge": null
         },
         {
@@ -1080,7 +1080,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 57.12,
+          "ms": 71.45,
           "judge": null
         },
         {
@@ -1090,7 +1090,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 68.66,
+          "ms": 90.25,
           "judge": null
         }
       ]
@@ -1175,7 +1175,7 @@
           "name": "scenarios-kinds",
           "ok": true,
           "hard": true,
-          "detail": "{'favorable', 'base', 'adverse'}"
+          "detail": "{'base', 'adverse', 'favorable'}"
         },
         {
           "name": "scenarios-finite",
@@ -1445,91 +1445,91 @@
       "timings_ms": [
         {
           "label": "POST /api/session/persona/{id}",
-          "ms": 18.42
+          "ms": 21.84
         },
         {
           "label": "GET /api/home",
-          "ms": 39.93
+          "ms": 54.76
         },
         {
           "label": "GET /api/actions",
-          "ms": 26.84
+          "ms": 32.78
         },
         {
           "label": "GET /api/scenarios",
-          "ms": 26.19
+          "ms": 31.75
         },
         {
           "label": "GET /api/lifecycle",
-          "ms": 29.0
+          "ms": 35.36
         },
         {
           "label": "POST /api/spending/analyze-synthetic",
-          "ms": 24.54
+          "ms": 29.84
         },
         {
           "label": "GET /api/spending",
-          "ms": 14.63
+          "ms": 19.57
         },
         {
           "label": "POST /api/compare/prepare",
-          "ms": 10.86
+          "ms": 12.27
         },
         {
           "label": "POST /api/compare/run (1)",
-          "ms": 51.23
+          "ms": 67.32
         },
         {
           "label": "POST /api/compare/run (2)",
-          "ms": 52.08
+          "ms": 65.77
         },
         {
           "label": "POST /api/decisions/{id}/replay",
-          "ms": 43.78
+          "ms": 60.53
         },
         {
           "label": "POST /api/compare/{id}/explain",
-          "ms": 29.35
+          "ms": 43.24
         },
         {
           "label": "POST /api/chat [P3-Q1]",
-          "ms": 224.0
+          "ms": 107.15
         },
         {
           "label": "POST /api/chat [P3-Q2]",
-          "ms": 59.81
+          "ms": 75.5
         },
         {
           "label": "POST /api/chat [P3-Q3]",
-          "ms": 97.1
+          "ms": 122.33
         },
         {
           "label": "POST /api/chat [P3-Q4]",
-          "ms": 73.63
+          "ms": 105.52
         },
         {
           "label": "POST /api/chat [P3-Q5]",
-          "ms": 58.79
+          "ms": 75.4
         },
         {
           "label": "POST /api/chat [P3-Q6]",
-          "ms": 92.31
+          "ms": 117.35
         },
         {
           "label": "POST /api/chat [P3-Q7]",
-          "ms": 94.32
+          "ms": 142.62
         },
         {
           "label": "POST /api/chat [P3-Q8]",
-          "ms": 77.71
+          "ms": 106.53
         },
         {
           "label": "POST /api/chat [P3-Q9]",
-          "ms": 57.33
+          "ms": 75.14
         },
         {
           "label": "POST /api/chat [P3-Q10]",
-          "ms": 71.01
+          "ms": 87.08
         }
       ],
       "result_hash_1": "ad7ed7ec70c485a27005ca9a661103bd5d8e10e1feebed2c398e09bacd2b1a3c",
@@ -1545,7 +1545,7 @@
           "action_type": "prepare_compare",
           "passed": true,
           "detail": "",
-          "ms": 224.0,
+          "ms": 107.15,
           "judge": null
         },
         {
@@ -1555,7 +1555,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 59.81,
+          "ms": 75.5,
           "judge": null
         },
         {
@@ -1565,7 +1565,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 97.1,
+          "ms": 122.33,
           "judge": null
         },
         {
@@ -1575,7 +1575,7 @@
           "action_type": "open_kb",
           "passed": true,
           "detail": "",
-          "ms": 73.63,
+          "ms": 105.52,
           "judge": null
         },
         {
@@ -1585,7 +1585,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 58.79,
+          "ms": 75.4,
           "judge": null
         },
         {
@@ -1595,7 +1595,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 92.31,
+          "ms": 117.35,
           "judge": null
         },
         {
@@ -1605,7 +1605,7 @@
           "action_type": "prepare_compare",
           "passed": true,
           "detail": "",
-          "ms": 94.32,
+          "ms": 142.62,
           "judge": null
         },
         {
@@ -1615,7 +1615,7 @@
           "action_type": "open_kb",
           "passed": true,
           "detail": "",
-          "ms": 77.71,
+          "ms": 106.53,
           "judge": null
         },
         {
@@ -1625,7 +1625,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 57.33,
+          "ms": 75.14,
           "judge": null
         },
         {
@@ -1635,7 +1635,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 71.01,
+          "ms": 87.08,
           "judge": null
         }
       ]
@@ -1720,7 +1720,7 @@
           "name": "scenarios-kinds",
           "ok": true,
           "hard": true,
-          "detail": "{'favorable', 'base', 'adverse'}"
+          "detail": "{'base', 'adverse', 'favorable'}"
         },
         {
           "name": "scenarios-finite",
@@ -1990,91 +1990,91 @@
       "timings_ms": [
         {
           "label": "POST /api/session/persona/{id}",
-          "ms": 17.92
+          "ms": 20.82
         },
         {
           "label": "GET /api/home",
-          "ms": 41.19
+          "ms": 54.89
         },
         {
           "label": "GET /api/actions",
-          "ms": 27.51
+          "ms": 36.43
         },
         {
           "label": "GET /api/scenarios",
-          "ms": 24.79
+          "ms": 34.79
         },
         {
           "label": "GET /api/lifecycle",
-          "ms": 30.16
+          "ms": 39.9
         },
         {
           "label": "POST /api/spending/analyze-synthetic",
-          "ms": 26.32
+          "ms": 32.36
         },
         {
           "label": "GET /api/spending",
-          "ms": 15.83
+          "ms": 20.99
         },
         {
           "label": "POST /api/compare/prepare",
-          "ms": 9.67
+          "ms": 13.02
         },
         {
           "label": "POST /api/compare/run (1)",
-          "ms": 51.83
+          "ms": 68.08
         },
         {
           "label": "POST /api/compare/run (2)",
-          "ms": 52.96
+          "ms": 71.46
         },
         {
           "label": "POST /api/decisions/{id}/replay",
-          "ms": 45.46
+          "ms": 55.74
         },
         {
           "label": "POST /api/compare/{id}/explain",
-          "ms": 30.17
+          "ms": 36.49
         },
         {
           "label": "POST /api/chat [P4-Q1]",
-          "ms": 80.03
+          "ms": 243.38
         },
         {
           "label": "POST /api/chat [P4-Q2]",
-          "ms": 55.19
+          "ms": 70.83
         },
         {
           "label": "POST /api/chat [P4-Q3]",
-          "ms": 97.84
+          "ms": 120.38
         },
         {
           "label": "POST /api/chat [P4-Q4]",
-          "ms": 70.51
+          "ms": 90.32
         },
         {
           "label": "POST /api/chat [P4-Q5]",
-          "ms": 61.28
+          "ms": 73.68
         },
         {
           "label": "POST /api/chat [P4-Q6]",
-          "ms": 89.44
+          "ms": 123.08
         },
         {
           "label": "POST /api/chat [P4-Q7]",
-          "ms": 74.87
+          "ms": 89.52
         },
         {
           "label": "POST /api/chat [P4-Q8]",
-          "ms": 68.22
+          "ms": 85.16
         },
         {
           "label": "POST /api/chat [P4-Q9]",
-          "ms": 54.68
+          "ms": 75.6
         },
         {
           "label": "POST /api/chat [P4-Q10]",
-          "ms": 68.83
+          "ms": 81.09
         }
       ],
       "result_hash_1": "123ee21689681952c68d9bd4d480a88f59374a195217dd77b5a38122c91d956a",
@@ -2090,7 +2090,7 @@
           "action_type": "prepare_compare",
           "passed": true,
           "detail": "",
-          "ms": 80.03,
+          "ms": 243.38,
           "judge": null
         },
         {
@@ -2100,7 +2100,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 55.19,
+          "ms": 70.83,
           "judge": null
         },
         {
@@ -2110,7 +2110,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 97.84,
+          "ms": 120.38,
           "judge": null
         },
         {
@@ -2120,7 +2120,7 @@
           "action_type": "open_kb",
           "passed": true,
           "detail": "",
-          "ms": 70.51,
+          "ms": 90.32,
           "judge": null
         },
         {
@@ -2130,7 +2130,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 61.28,
+          "ms": 73.68,
           "judge": null
         },
         {
@@ -2140,7 +2140,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 89.44,
+          "ms": 123.08,
           "judge": null
         },
         {
@@ -2150,7 +2150,7 @@
           "action_type": "prepare_compare",
           "passed": true,
           "detail": "",
-          "ms": 74.87,
+          "ms": 89.52,
           "judge": null
         },
         {
@@ -2160,7 +2160,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 68.22,
+          "ms": 85.16,
           "judge": null
         },
         {
@@ -2170,7 +2170,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 54.68,
+          "ms": 75.6,
           "judge": null
         },
         {
@@ -2180,7 +2180,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 68.83,
+          "ms": 81.09,
           "judge": null
         }
       ]
@@ -2265,7 +2265,7 @@
           "name": "scenarios-kinds",
           "ok": true,
           "hard": true,
-          "detail": "{'favorable', 'base', 'adverse'}"
+          "detail": "{'base', 'adverse', 'favorable'}"
         },
         {
           "name": "scenarios-finite",
@@ -2559,95 +2559,95 @@
       "timings_ms": [
         {
           "label": "POST /api/session/persona/{id}",
-          "ms": 17.68
+          "ms": 21.91
         },
         {
           "label": "GET /api/home",
-          "ms": 39.7
+          "ms": 47.38
         },
         {
           "label": "GET /api/actions",
-          "ms": 26.94
+          "ms": 36.95
         },
         {
           "label": "GET /api/scenarios",
-          "ms": 27.59
+          "ms": 32.76
         },
         {
           "label": "GET /api/lifecycle",
-          "ms": 27.96
+          "ms": 35.71
         },
         {
           "label": "POST /api/spending/analyze-synthetic",
-          "ms": 78.72
+          "ms": 31.92
         },
         {
           "label": "GET /api/spending",
-          "ms": 14.79
+          "ms": 17.03
         },
         {
           "label": "POST /api/compare/prepare",
-          "ms": 9.73
+          "ms": 13.16
         },
         {
           "label": "POST /api/compare/run (1)",
-          "ms": 49.64
+          "ms": 61.08
         },
         {
           "label": "POST /api/compare/run (2)",
-          "ms": 46.96
+          "ms": 62.97
         },
         {
           "label": "POST /api/decisions/{id}/replay",
-          "ms": 40.23
+          "ms": 48.56
         },
         {
           "label": "POST /api/compare/{id}/explain",
-          "ms": 30.45
+          "ms": 37.03
         },
         {
           "label": "POST /api/chat [P5-Q1]",
-          "ms": 78.2
+          "ms": 90.93
         },
         {
           "label": "POST /api/chat [P5-Q2]",
-          "ms": 54.98
+          "ms": 66.2
         },
         {
           "label": "POST /api/chat [P5-Q3]",
-          "ms": 102.36
+          "ms": 150.38
         },
         {
           "label": "POST /api/chat [P5-Q4]",
-          "ms": 80.12
+          "ms": 151.93
         },
         {
           "label": "POST /api/chat [P5-Q5]",
-          "ms": 59.51
+          "ms": 127.18
         },
         {
           "label": "POST /api/chat [P5-Q6]",
-          "ms": 94.0
+          "ms": 160.5
         },
         {
           "label": "POST /api/chat [P5-Q7]",
-          "ms": 95.67
+          "ms": 124.11
         },
         {
           "label": "POST /api/chat [P5-Q8]",
-          "ms": 88.91
+          "ms": 107.34
         },
         {
           "label": "POST /api/chat [P5-Q9]",
-          "ms": 66.67
+          "ms": 96.49
         },
         {
           "label": "POST /api/chat [P5-Q10]",
-          "ms": 65.25
+          "ms": 88.2
         },
         {
           "label": "POST /api/chat [P5-Q11]",
-          "ms": 75.59
+          "ms": 97.32
         }
       ],
       "result_hash_1": "acaac6a37ed288012579757506e661153287aa52f92802027d0e166a7dbf3102",
@@ -2663,7 +2663,7 @@
           "action_type": "prepare_compare",
           "passed": true,
           "detail": "",
-          "ms": 78.2,
+          "ms": 90.93,
           "judge": null
         },
         {
@@ -2673,7 +2673,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 54.98,
+          "ms": 66.2,
           "judge": null
         },
         {
@@ -2683,7 +2683,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 102.36,
+          "ms": 150.38,
           "judge": null
         },
         {
@@ -2693,7 +2693,7 @@
           "action_type": "open_kb",
           "passed": true,
           "detail": "",
-          "ms": 80.12,
+          "ms": 151.93,
           "judge": null
         },
         {
@@ -2703,7 +2703,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 59.51,
+          "ms": 127.18,
           "judge": null
         },
         {
@@ -2713,7 +2713,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 94.0,
+          "ms": 160.5,
           "judge": null
         },
         {
@@ -2723,7 +2723,7 @@
           "action_type": "prepare_compare",
           "passed": true,
           "detail": "",
-          "ms": 95.67,
+          "ms": 124.11,
           "judge": null
         },
         {
@@ -2733,7 +2733,7 @@
           "action_type": "open_kb",
           "passed": true,
           "detail": "",
-          "ms": 88.91,
+          "ms": 107.34,
           "judge": null
         },
         {
@@ -2743,7 +2743,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 66.67,
+          "ms": 96.49,
           "judge": null
         },
         {
@@ -2753,7 +2753,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 65.25,
+          "ms": 88.2,
           "judge": null
         },
         {
@@ -2763,7 +2763,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 75.59,
+          "ms": 97.32,
           "judge": null
         }
       ]
@@ -2848,7 +2848,7 @@
           "name": "scenarios-kinds",
           "ok": true,
           "hard": true,
-          "detail": "{'favorable', 'base', 'adverse'}"
+          "detail": "{'base', 'adverse', 'favorable'}"
         },
         {
           "name": "scenarios-finite",
@@ -3118,91 +3118,91 @@
       "timings_ms": [
         {
           "label": "POST /api/session/persona/{id}",
-          "ms": 19.57
+          "ms": 27.59
         },
         {
           "label": "GET /api/home",
-          "ms": 45.39
+          "ms": 60.17
         },
         {
           "label": "GET /api/actions",
-          "ms": 29.65
+          "ms": 48.03
         },
         {
           "label": "GET /api/scenarios",
-          "ms": 28.33
+          "ms": 41.39
         },
         {
           "label": "GET /api/lifecycle",
-          "ms": 33.88
+          "ms": 62.87
         },
         {
           "label": "POST /api/spending/analyze-synthetic",
-          "ms": 28.4
+          "ms": 40.21
         },
         {
           "label": "GET /api/spending",
-          "ms": 18.97
+          "ms": 20.64
         },
         {
           "label": "POST /api/compare/prepare",
-          "ms": 10.01
+          "ms": 13.8
         },
         {
           "label": "POST /api/compare/run (1)",
-          "ms": 73.41
+          "ms": 91.65
         },
         {
           "label": "POST /api/compare/run (2)",
-          "ms": 59.12
+          "ms": 112.08
         },
         {
           "label": "POST /api/decisions/{id}/replay",
-          "ms": 46.78
+          "ms": 65.07
         },
         {
           "label": "POST /api/compare/{id}/explain",
-          "ms": 32.67
+          "ms": 37.96
         },
         {
           "label": "POST /api/chat [P6-Q1]",
-          "ms": 85.26
+          "ms": 94.29
         },
         {
           "label": "POST /api/chat [P6-Q2]",
-          "ms": 60.72
+          "ms": 98.45
         },
         {
           "label": "POST /api/chat [P6-Q3]",
-          "ms": 127.66
+          "ms": 137.56
         },
         {
           "label": "POST /api/chat [P6-Q4]",
-          "ms": 78.97
+          "ms": 106.22
         },
         {
           "label": "POST /api/chat [P6-Q5]",
-          "ms": 60.21
+          "ms": 75.81
         },
         {
           "label": "POST /api/chat [P6-Q6]",
-          "ms": 92.74
+          "ms": 129.37
         },
         {
           "label": "POST /api/chat [P6-Q7]",
-          "ms": 80.69
+          "ms": 119.63
         },
         {
           "label": "POST /api/chat [P6-Q8]",
-          "ms": 75.43
+          "ms": 114.12
         },
         {
           "label": "POST /api/chat [P6-Q9]",
-          "ms": 59.68
+          "ms": 92.58
         },
         {
           "label": "POST /api/chat [P6-Q10]",
-          "ms": 69.57
+          "ms": 122.89
         }
       ],
       "result_hash_1": "8c88e38770a2141e20fb7db19b9754fa9eeb40df2095cf95880be12e9c6e191c",
@@ -3218,7 +3218,7 @@
           "action_type": "prepare_compare",
           "passed": true,
           "detail": "",
-          "ms": 85.26,
+          "ms": 94.29,
           "judge": null
         },
         {
@@ -3228,7 +3228,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 60.72,
+          "ms": 98.45,
           "judge": null
         },
         {
@@ -3238,7 +3238,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 127.66,
+          "ms": 137.56,
           "judge": null
         },
         {
@@ -3248,7 +3248,7 @@
           "action_type": "open_kb",
           "passed": true,
           "detail": "",
-          "ms": 78.97,
+          "ms": 106.22,
           "judge": null
         },
         {
@@ -3258,7 +3258,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 60.21,
+          "ms": 75.81,
           "judge": null
         },
         {
@@ -3268,7 +3268,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 92.74,
+          "ms": 129.37,
           "judge": null
         },
         {
@@ -3278,7 +3278,7 @@
           "action_type": "prepare_compare",
           "passed": true,
           "detail": "",
-          "ms": 80.69,
+          "ms": 119.63,
           "judge": null
         },
         {
@@ -3288,7 +3288,7 @@
           "action_type": "open_kb",
           "passed": true,
           "detail": "",
-          "ms": 75.43,
+          "ms": 114.12,
           "judge": null
         },
         {
@@ -3298,7 +3298,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 59.68,
+          "ms": 92.58,
           "judge": null
         },
         {
@@ -3308,7 +3308,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 69.57,
+          "ms": 122.89,
           "judge": null
         }
       ]
@@ -3393,7 +3393,7 @@
           "name": "scenarios-kinds",
           "ok": true,
           "hard": true,
-          "detail": "{'favorable', 'base', 'adverse'}"
+          "detail": "{'base', 'adverse', 'favorable'}"
         },
         {
           "name": "scenarios-finite",
@@ -3687,95 +3687,95 @@
       "timings_ms": [
         {
           "label": "POST /api/session/persona/{id}",
-          "ms": 18.37
+          "ms": 27.75
         },
         {
           "label": "GET /api/home",
-          "ms": 43.3
+          "ms": 59.46
         },
         {
           "label": "GET /api/actions",
-          "ms": 27.46
+          "ms": 41.13
         },
         {
           "label": "GET /api/scenarios",
-          "ms": 26.52
+          "ms": 41.87
         },
         {
           "label": "GET /api/lifecycle",
-          "ms": 31.19
+          "ms": 48.33
         },
         {
           "label": "POST /api/spending/analyze-synthetic",
-          "ms": 25.31
+          "ms": 37.52
         },
         {
           "label": "GET /api/spending",
-          "ms": 16.78
+          "ms": 24.15
         },
         {
           "label": "POST /api/compare/prepare",
-          "ms": 11.06
+          "ms": 15.62
         },
         {
           "label": "POST /api/compare/run (1)",
-          "ms": 58.52
+          "ms": 78.27
         },
         {
           "label": "POST /api/compare/run (2)",
-          "ms": 62.74
+          "ms": 175.66
         },
         {
           "label": "POST /api/decisions/{id}/replay",
-          "ms": 53.39
+          "ms": 165.78
         },
         {
           "label": "POST /api/compare/{id}/explain",
-          "ms": 30.62
+          "ms": 88.56
         },
         {
           "label": "POST /api/chat [P7-Q1]",
-          "ms": 81.57
+          "ms": 235.82
         },
         {
           "label": "POST /api/chat [P7-Q2]",
-          "ms": 58.7
+          "ms": 98.43
         },
         {
           "label": "POST /api/chat [P7-Q3]",
-          "ms": 98.74
+          "ms": 222.9
         },
         {
           "label": "POST /api/chat [P7-Q4]",
-          "ms": 76.17
+          "ms": 135.06
         },
         {
           "label": "POST /api/chat [P7-Q5]",
-          "ms": 56.3
+          "ms": 107.48
         },
         {
           "label": "POST /api/chat [P7-Q6]",
-          "ms": 96.11
+          "ms": 184.27
         },
         {
           "label": "POST /api/chat [P7-Q7]",
-          "ms": 81.35
+          "ms": 181.62
         },
         {
           "label": "POST /api/chat [P7-Q8]",
-          "ms": 69.97
+          "ms": 138.3
         },
         {
           "label": "POST /api/chat [P7-Q9]",
-          "ms": 57.8
+          "ms": 89.17
         },
         {
           "label": "POST /api/chat [P7-Q10]",
-          "ms": 64.77
+          "ms": 91.7
         },
         {
           "label": "POST /api/chat [P7-Q11]",
-          "ms": 67.58
+          "ms": 109.48
         }
       ],
       "result_hash_1": "2f2ceb5158b4c7fc205eeb7141b8e0575aaf7579fe61d3cf3312721bcede051e",
@@ -3791,7 +3791,7 @@
           "action_type": "prepare_compare",
           "passed": true,
           "detail": "",
-          "ms": 81.57,
+          "ms": 235.82,
           "judge": null
         },
         {
@@ -3801,7 +3801,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 58.7,
+          "ms": 98.43,
           "judge": null
         },
         {
@@ -3811,7 +3811,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 98.74,
+          "ms": 222.9,
           "judge": null
         },
         {
@@ -3821,7 +3821,7 @@
           "action_type": "open_kb",
           "passed": true,
           "detail": "",
-          "ms": 76.17,
+          "ms": 135.06,
           "judge": null
         },
         {
@@ -3831,7 +3831,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 56.3,
+          "ms": 107.48,
           "judge": null
         },
         {
@@ -3841,7 +3841,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 96.11,
+          "ms": 184.27,
           "judge": null
         },
         {
@@ -3851,7 +3851,7 @@
           "action_type": "prepare_compare",
           "passed": true,
           "detail": "",
-          "ms": 81.35,
+          "ms": 181.62,
           "judge": null
         },
         {
@@ -3861,7 +3861,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 69.97,
+          "ms": 138.3,
           "judge": null
         },
         {
@@ -3871,7 +3871,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 57.8,
+          "ms": 89.17,
           "judge": null
         },
         {
@@ -3881,7 +3881,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 64.77,
+          "ms": 91.7,
           "judge": null
         },
         {
@@ -3891,7 +3891,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 67.58,
+          "ms": 109.48,
           "judge": null
         }
       ]
@@ -3976,7 +3976,7 @@
           "name": "scenarios-kinds",
           "ok": true,
           "hard": true,
-          "detail": "{'favorable', 'base', 'adverse'}"
+          "detail": "{'base', 'adverse', 'favorable'}"
         },
         {
           "name": "scenarios-finite",
@@ -4246,91 +4246,91 @@
       "timings_ms": [
         {
           "label": "POST /api/session/persona/{id}",
-          "ms": 18.31
+          "ms": 26.6
         },
         {
           "label": "GET /api/home",
-          "ms": 41.34
+          "ms": 53.87
         },
         {
           "label": "GET /api/actions",
-          "ms": 27.57
+          "ms": 37.18
         },
         {
           "label": "GET /api/scenarios",
-          "ms": 26.03
+          "ms": 35.08
         },
         {
           "label": "GET /api/lifecycle",
-          "ms": 30.29
+          "ms": 38.74
         },
         {
           "label": "POST /api/spending/analyze-synthetic",
-          "ms": 26.19
+          "ms": 31.24
         },
         {
           "label": "GET /api/spending",
-          "ms": 15.02
+          "ms": 22.42
         },
         {
           "label": "POST /api/compare/prepare",
-          "ms": 9.57
+          "ms": 15.53
         },
         {
           "label": "POST /api/compare/run (1)",
-          "ms": 51.27
+          "ms": 68.46
         },
         {
           "label": "POST /api/compare/run (2)",
-          "ms": 48.72
+          "ms": 64.41
         },
         {
           "label": "POST /api/decisions/{id}/replay",
-          "ms": 39.65
+          "ms": 52.38
         },
         {
           "label": "POST /api/compare/{id}/explain",
-          "ms": 30.71
+          "ms": 39.19
         },
         {
           "label": "POST /api/chat [P8-Q1]",
-          "ms": 81.2
+          "ms": 110.16
         },
         {
           "label": "POST /api/chat [P8-Q2]",
-          "ms": 58.31
+          "ms": 89.32
         },
         {
           "label": "POST /api/chat [P8-Q3]",
-          "ms": 120.16
+          "ms": 156.9
         },
         {
           "label": "POST /api/chat [P8-Q4]",
-          "ms": 76.59
+          "ms": 111.03
         },
         {
           "label": "POST /api/chat [P8-Q5]",
-          "ms": 62.55
+          "ms": 79.18
         },
         {
           "label": "POST /api/chat [P8-Q6]",
-          "ms": 89.48
+          "ms": 140.35
         },
         {
           "label": "POST /api/chat [P8-Q7]",
-          "ms": 79.5
+          "ms": 166.48
         },
         {
           "label": "POST /api/chat [P8-Q8]",
-          "ms": 68.87
+          "ms": 125.09
         },
         {
           "label": "POST /api/chat [P8-Q9]",
-          "ms": 227.63
+          "ms": 97.52
         },
         {
           "label": "POST /api/chat [P8-Q10]",
-          "ms": 67.0
+          "ms": 106.87
         }
       ],
       "result_hash_1": "2eeb7320ec135cc74e0d4efd94d3bed5ad5a9c6339c09040cfda52bbbaca9a74",
@@ -4346,7 +4346,7 @@
           "action_type": "prepare_compare",
           "passed": true,
           "detail": "",
-          "ms": 81.2,
+          "ms": 110.16,
           "judge": null
         },
         {
@@ -4356,7 +4356,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 58.31,
+          "ms": 89.32,
           "judge": null
         },
         {
@@ -4366,7 +4366,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 120.16,
+          "ms": 156.9,
           "judge": null
         },
         {
@@ -4376,7 +4376,7 @@
           "action_type": "open_kb",
           "passed": true,
           "detail": "",
-          "ms": 76.59,
+          "ms": 111.03,
           "judge": null
         },
         {
@@ -4386,7 +4386,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 62.55,
+          "ms": 79.18,
           "judge": null
         },
         {
@@ -4396,7 +4396,7 @@
           "action_type": "open_view",
           "passed": true,
           "detail": "",
-          "ms": 89.48,
+          "ms": 140.35,
           "judge": null
         },
         {
@@ -4406,7 +4406,7 @@
           "action_type": "prepare_compare",
           "passed": true,
           "detail": "",
-          "ms": 79.5,
+          "ms": 166.48,
           "judge": null
         },
         {
@@ -4416,7 +4416,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 68.87,
+          "ms": 125.09,
           "judge": null
         },
         {
@@ -4426,7 +4426,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 227.63,
+          "ms": 97.52,
           "judge": null
         },
         {
@@ -4436,7 +4436,7 @@
           "action_type": null,
           "passed": true,
           "detail": "",
-          "ms": 67.0,
+          "ms": 106.87,
           "judge": null
         }
       ]
