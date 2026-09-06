@@ -57,13 +57,13 @@ def compute_ratios(
         liquidity_months = None
         flags["liquidity_months"] = "na"
         interpretations["liquidity_months"] = (
-            "자산 정보나 월 생활비 정보가 없어 유동성비율을 계산할 수 없습니다."
+            "자산 정보나 월 생활비 정보가 없어 유동성비율을 계산할 수 없어요."
         )
     else:
         liquidity_months = assets.liquid / monthly_expense
         interpretations["liquidity_months"] = (
             f"유동자산 {assets.liquid:,}원은 월 생활비 {monthly_expense:,}원의 "
-            f"{liquidity_months:.1f}개월분입니다."
+            f"{liquidity_months:.1f}개월분이에요."
         )
         min_months = thresholds_for_stage.get("min_liquidity_months")
         if min_months is not None:
@@ -76,13 +76,13 @@ def compute_ratios(
     if annual_income <= 0:
         saving_rate = None
         flags["saving_rate"] = "na"
-        interpretations["saving_rate"] = "소득 정보가 없어 저축률을 계산할 수 없습니다."
+        interpretations["saving_rate"] = "소득 정보가 없어 저축률을 계산할 수 없어요."
     else:
         annual_saving = annual_income - (monthly_expense * 12) - annual_debt_service
         saving_rate = annual_saving / annual_income
         interpretations["saving_rate"] = (
             f"연 소득 {annual_income:,}원 중 저축 가능액은 {annual_saving:,}원으로 "
-            f"저축률은 {saving_rate * 100:.1f}%입니다."
+            f"저축률은 {saving_rate * 100:.1f}%예요."
         )
         min_rate = thresholds_for_stage.get("min_saving_rate")
         if min_rate is not None:
@@ -95,12 +95,12 @@ def compute_ratios(
     if assets is None or total_assets <= 0:
         debt_ratio = None
         flags["debt_ratio"] = "na"
-        interpretations["debt_ratio"] = "자산 정보가 없어 부채비율을 계산할 수 없습니다."
+        interpretations["debt_ratio"] = "자산 정보가 없어 부채비율을 계산할 수 없어요."
     else:
         debt_ratio = total_debt / total_assets
         interpretations["debt_ratio"] = (
             f"총자산 {total_assets:,}원 중 총부채 {total_debt:,}원으로 부채비율은 "
-            f"{debt_ratio * 100:.1f}%입니다."
+            f"{debt_ratio * 100:.1f}%예요."
         )
         flags["debt_ratio"] = "ok"
 
@@ -108,12 +108,12 @@ def compute_ratios(
     if annual_income <= 0:
         debt_service_ratio = None
         flags["debt_service_ratio"] = "na"
-        interpretations["debt_service_ratio"] = "소득 정보가 없어 원리금상환비율을 계산할 수 없습니다."
+        interpretations["debt_service_ratio"] = "소득 정보가 없어 원리금상환비율을 계산할 수 없어요."
     else:
         debt_service_ratio = annual_debt_service / annual_income
         interpretations["debt_service_ratio"] = (
             f"연 소득 {annual_income:,}원 대비 연간 원리금상환액 {annual_debt_service:,}원으로 "
-            f"원리금상환비율은 {debt_service_ratio * 100:.1f}%입니다."
+            f"원리금상환비율은 {debt_service_ratio * 100:.1f}%예요."
         )
         max_ratio = thresholds_for_stage.get("max_debt_service_ratio")
         if max_ratio is not None:
@@ -127,13 +127,13 @@ def compute_ratios(
         investment_ratio = None
         flags["investment_ratio"] = "na"
         interpretations["investment_ratio"] = (
-            "자산 정보가 없거나 순자산이 0 이하라 투자자산비율을 계산할 수 없습니다."
+            "자산 정보가 없거나 순자산이 0 이하면 투자자산비율을 계산할 수 없어요."
         )
     else:
         investment_ratio = assets.investment / net_worth
         interpretations["investment_ratio"] = (
             f"순자산 {net_worth:,}원 중 투자자산 {assets.investment:,}원으로 "
-            f"투자자산비율은 {investment_ratio * 100:.1f}%입니다."
+            f"투자자산비율은 {investment_ratio * 100:.1f}%예요."
         )
         flags["investment_ratio"] = "ok"
 

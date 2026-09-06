@@ -77,12 +77,12 @@ _FAMILY_GOAL_WINDOW_DAYS = 730  # 2년
 
 def _age_band_stage(age: Optional[int]) -> tuple[LifeStage, str]:
     if age is None:
-        return LifeStage.EARLY_CAREER, "나이 정보가 없어 사회초년기를 기본값으로 사용했습니다."
+        return LifeStage.EARLY_CAREER, "나이 정보가 없어 사회초년기를 기본값으로 사용했어요."
     for lo, hi, stage in _AGE_BANDS:
         if lo <= age <= hi:
             band_label = f"{lo}~{hi}세" if hi < 200 else f"{lo}세 이상"
-            return stage, f"나이 {age}세는 {LIFE_STAGE_LABELS_KR[stage]} 연령대({band_label})입니다."
-    return LifeStage.LATE_RETIREMENT, f"나이 {age}세는 후기은퇴기 연령대입니다."
+            return stage, f"나이 {age}세는 {LIFE_STAGE_LABELS_KR[stage]} 연령대({band_label})예요."
+    return LifeStage.LATE_RETIREMENT, f"나이 {age}세는 후기은퇴기 연령대예요."
 
 
 def _find_family_goal(profile: UserProfile, today: date) -> Optional[str]:
@@ -94,7 +94,7 @@ def _find_family_goal(profile: UserProfile, today: date) -> Optional[str]:
         days = (g.target_date - today).days
         if 0 <= days <= _FAMILY_GOAL_WINDOW_DAYS:
             if best is None or days < best[0]:
-                best = (days, f"{g.label}(목표일까지 {days}일 남음) 목표가 있어 가족형성기 우선순위를 반영합니다.")
+                best = (days, f"{g.label}(목표일까지 {days}일 남음) 목표가 있어 가족형성기 우선순위를 반영해요.")
     return best[1] if best else None
 
 
@@ -129,7 +129,7 @@ def classify_stage(profile: UserProfile, *, today: date) -> LifeStageResult:
 
     if profile.dependents and profile.dependents >= 1 and stage == LifeStage.EARLY_CAREER:
         stage = LifeStage.FAMILY_FORMATION
-        reasons.append(f"부양가족 {profile.dependents}명이 있어 가족형성기 우선순위를 함께 반영합니다.")
+        reasons.append(f"부양가족 {profile.dependents}명이 있어 가족형성기 우선순위를 함께 반영해요.")
 
     family_goal_reason = _find_family_goal(profile, today)
     if family_goal_reason is not None:
@@ -138,11 +138,11 @@ def classify_stage(profile: UserProfile, *, today: date) -> LifeStageResult:
 
     if "retirement_near" in profile.flags:
         stage = _floor_stage(stage, LifeStage.PRE_RETIREMENT)
-        reasons.append("은퇴가 가깝다는 신호(retirement_near)가 있어 은퇴준비기 우선순위를 반영합니다.")
+        reasons.append("은퇴가 가깝다는 신호가 있어 은퇴준비기 우선순위를 반영해요.")
 
     if profile.income_type == "none" and profile.age is not None and profile.age >= 55:
         stage = _floor_stage(stage, LifeStage.RETIREMENT_TRANSITION)
-        reasons.append("55세 이상이며 현재 소득이 없어 은퇴전환기로 판단했습니다.")
+        reasons.append("55세 이상이며 현재 소득이 없어 은퇴전환기로 판단했어요.")
 
     if profile.life_stage_override:
         try:
@@ -152,7 +152,7 @@ def classify_stage(profile: UserProfile, *, today: date) -> LifeStageResult:
         if override_stage is not None:
             stage = override_stage
             reasons.append(
-                f"사용자가 지정한 생애 단계({LIFE_STAGE_LABELS_KR[override_stage]})를 자동 판정보다 우선 적용했습니다."
+                f"사용자가 지정한 생애 단계({LIFE_STAGE_LABELS_KR[override_stage]})를 자동 판정보다 우선 적용했어요."
             )
 
     priorities, avoid, accounts_note = stage_priorities(stage)
@@ -175,40 +175,40 @@ _STAGE_CONTENT: dict[LifeStage, tuple[list[str], list[str], str]] = {
         ["비상자금 마련", "학자금·신용대출 관리", "국민연금 가입기간 확보"],
         ["생활자금을 IRP에 과도하게 묶어두기"],
         "연금계좌(IRP·연금저축)는 장기 노후 자금, ISA는 중기 목적자금, 일반 계좌는 생활 유동성 "
-        "용도로 역할을 나눠볼 수 있습니다. DC형 퇴직연금이 있다면 운용 현황을 확인해보고, 소액으로 "
-        "연금저축·IRP 가입 여부를 살펴볼 수 있습니다.",
+        "용도로 역할을 나눠볼 수 있어요. DC형 퇴직연금이 있다면 운용 현황을 확인해보고, 소액으로 "
+        "연금저축·IRP 가입 여부를 살펴볼 수 있어요.",
     ),
     LifeStage.FAMILY_FORMATION: (
         ["주거·출산·육아 자금 준비", "노후 저축과 병행하기"],
         ["주택 자금 마련에 비상자금과 연금자산을 모두 투입하기"],
         "ISA는 결혼·주거 등 중기 목적자금으로, 연금계좌는 은퇴 전용으로 구분해서 관리하는 것을 "
-        "살펴볼 수 있습니다.",
+        "살펴볼 수 있어요.",
     ),
     LifeStage.ASSET_BUILDING: (
         ["소득 증가분 저축 늘리기", "교육비 지출 상한 정하기"],
         ["자녀 학비 지원을 이유로 은퇴 저축을 장기간 중단하기"],
         "DC형 퇴직연금·IRP·연금저축 납입을 늘리는 방법을 검토해볼 수 있고, ISA는 만기 시 연금계좌로 "
-        "옮기는 방법(연금계좌 이체)도 비교해볼 수 있습니다.",
+        "옮기는 방법(연금계좌 이체)도 비교해볼 수 있어요.",
     ),
     LifeStage.PRE_RETIREMENT: (
         ["퇴직 시점과 국민연금 개시 전 소득공백 계산", "안정자산 비중을 계획적으로 늘리기"],
         ["퇴직 직전에 투자 위험을 급격히 높이기"],
-        "퇴직급여 수령 방법(일시금 또는 연금)을 미리 비교해보는 시기입니다.",
+        "퇴직급여 수령 방법(일시금 또는 연금)을 미리 비교해보는 시기예요.",
     ),
     LifeStage.RETIREMENT_TRANSITION: (
         ["퇴직급여·재취업 소득·연금을 월 현금흐름으로 연결", "국민연금 수급 개시 시점 결정"],
         ["퇴직금을 한 번에 소비하거나 한 곳에 집중 투자하기"],
-        "IRP 연금 수령 방식과 생활비 용도별 자금 구분(버킷)을 살펴보는 시기입니다.",
+        "IRP 연금 수령 방식과 생활비 용도별 자금 구분(버킷)을 살펴보는 시기예요.",
     ),
     LifeStage.ACTIVE_RETIREMENT: (
         ["생활비·여행·의료비 균형 관리"],
         ["자산 가격이 오른 시기에 생활수준을 영구적으로 높이기"],
-        "종신소득(국민연금 등)을 필수 생활비에 먼저 연결하고, 주택연금 같은 제도를 살펴볼 수 있습니다.",
+        "종신소득(국민연금 등)을 필수 생활비에 먼저 연결하고, 주택연금 같은 제도를 살펴볼 수 있어요.",
     ),
     LifeStage.LATE_RETIREMENT: (
         ["간병·주거·의사결정 지원 준비"],
         ["구조가 복잡하거나 위험이 높은 상품을 다수 유지하기"],
-        "자동이체 방식의 현금흐름과 의료비·상속 관련 자금 구조를 단순하게 정리해두는 것이 도움이 됩니다.",
+        "자동이체 방식의 현금흐름과 의료비·상속 관련 자금 구조를 단순하게 정리해두면 도움이 돼요.",
     ),
 }
 
@@ -245,8 +245,8 @@ def glide_path_reference(age: Optional[int]) -> dict[str, Any]:
     return {
         "age": a,
         "growth_asset_pct": round(pct, 1),
-        "label": "참고 모델(TDF 글라이드패스 교육용 예시)",
-        "note": "운용사·상품별 실제 비중은 다를 수 있으며 특정 자산배분 비중을 권하지 않습니다.",
+        "label": "참고 모델(생애주기 자산배분 교육용 예시)",
+        "note": "운용사·상품별 실제 비중은 다를 수 있고, 특정 자산배분 비중을 권하지 않아요.",
     }
 
 

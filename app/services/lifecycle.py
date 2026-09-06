@@ -90,10 +90,10 @@ def build_lifecycle_view(
     assumptions.append(f"생애 단계 판정 근거: {' '.join(stage_result.reasons)}")
     if stage_thresholds:
         note = stage_thresholds.get("note", "")
-        verify = "확인 필요" if stage_thresholds.get("needs_verification", True) else "확인됨"
-        assumptions.append(f"{stage_result.label} 재무비율 기준값 출처: {note} ({verify})")
+        tail = " (확인 필요)" if stage_thresholds.get("needs_verification", True) else ""
+        assumptions.append(f"{stage_result.label} 재무비율 기준값 출처: {note}{tail}")
     else:
-        assumptions.append(f"{stage_result.label}에 대한 생애 단계별 임계값이 설정되어 있지 않습니다.")
+        assumptions.append(f"{stage_result.label}에 대한 생애 단계별 기준값이 아직 없어요.")
 
     seen = set(assumptions)
     for proj in retirement:
@@ -104,7 +104,8 @@ def build_lifecycle_view(
 
     assumptions.append(glide["note"])
     assumptions.append(
-        "순자산 경로는 연 단위 근사이며, 부채 잔액은 현재 원리금상환액을 기준으로 선형 근사했습니다."
+        "순자산 경로는 연 단위로 어림한 값이에요. 부채 잔액은 지금의 원리금상환액을 기준으로 "
+        "매년 비슷한 속도로 줄어든다고 가정했어요."
     )
 
     return LifecycleView(

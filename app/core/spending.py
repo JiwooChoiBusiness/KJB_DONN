@@ -542,7 +542,7 @@ def build_spending_cards(
             chip=_spending_chip("chip-spending-ic05", "소비 패턴 보기", "spending",
                                 {"life_event": top_event.kind}),
             source_rule="IC05",
-            explain="결혼·출산·소득 변화 등 생애 이벤트 프록시 규칙(문서 4.4절)으로 감지했습니다.",
+            explain="결혼·출산·소득 변화 같은 생애 이벤트 신호를 거래 내역과 프로필 정보로 감지했어요.",
         ))
 
     # IC01 소비 급증 카테고리
@@ -561,8 +561,8 @@ def build_spending_cards(
             chip=_spending_chip("chip-spending-ic01", "소비 패턴 보기", "spending",
                                 {"category": top.category.value}),
             source_rule="IC01",
-            explain=f"최근 {summary.months}개월 카테고리별 월별 집계에서 전월 대비 30% 이상, "
-                    "5만원 이상 늘어난 카테고리를 찾았습니다.",
+            explain=f"최근 {summary.months}개월 동안 카테고리별 지출을 월별로 모아 봤을 때, 전월보다 "
+                    "30% 이상, 5만원 이상 늘어난 카테고리를 찾았어요.",
         ))
 
     # IC06 소득 불규칙. 급여 입금이 아예 관측되지 않은 경우(summary.income_deposits == 0)는
@@ -576,7 +576,7 @@ def build_spending_cards(
             evidence={"소득 규칙성": f"{round(features.income_regularity * 100)}%"},
             chip=_spending_chip("chip-spending-ic06", "소비 패턴 보기", "spending", {"view": "income"}),
             source_rule="IC06",
-            explain="최근 급여 입금 합계를 프로필에 등록된 월소득 대비 비율로 계산했습니다.",
+            explain="최근 급여 입금 합계를 등록하신 월소득과 비교한 비율이에요.",
         ))
 
     # IC04 저축 여력(수입 - 지출 - 상환)
@@ -596,7 +596,7 @@ def build_spending_cards(
             chip=_spending_chip("chip-spending-ic04", "시나리오로 확인하기", "scenario",
                                 {"extra_repayment_amount": max(cap, 0)}),
             source_rule="IC04",
-            explain="등록된 월소득(또는 급여 입금 합계)에서 최근 월평균 지출을 뺀 값입니다.",
+            explain="등록된 월소득(또는 급여 입금 합계)에서 최근 월평균 지출을 뺀 값이에요.",
         ))
 
     # IC03 고정지출 비율
@@ -611,7 +611,7 @@ def build_spending_cards(
             chip=_spending_chip("chip-spending-ic03", "시나리오로 확인하기", "scenario",
                                 {"discretionary_cut_pct": 10}),
             source_rule="IC03",
-            explain="고정지출(주거·통신·구독·보험·대출상환) 합계를 총지출로 나눈 값입니다.",
+            explain="고정지출(주거·통신·구독·보험·대출상환) 합계를 총지출로 나눈 값이에요.",
         ))
 
     # IC02 구독 합계
@@ -625,7 +625,7 @@ def build_spending_cards(
                       "월 합계": f"{features.subscription_total:,}원"},
             chip=_spending_chip("chip-spending-ic02", "소비 패턴 보기", "spending", {"view": "subscriptions"}),
             source_rule="IC02",
-            explain="같은 가맹점에서 비슷한 금액이 인접한 두 달 이상 반복된 결제를 모았습니다.",
+            explain="같은 가맹점에서 비슷한 금액이 인접한 두 달 이상 반복된 결제를 모았어요.",
         ))
 
     return cards

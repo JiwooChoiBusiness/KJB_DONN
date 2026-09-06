@@ -92,7 +92,7 @@ def test_classify_stage_52_retirement_near_flag_is_pre_retirement():
     profile = make_profile(age=52, flags=["retirement_near"])
     result = classify_stage(profile, today=TODAY)
     assert result.stage == LifeStage.PRE_RETIREMENT
-    assert any("retirement_near" in r for r in result.reasons)
+    assert any("은퇴가 가깝다" in r for r in result.reasons)
 
 
 def test_classify_stage_58_no_income_is_retirement_transition():

@@ -514,7 +514,7 @@ def test_r4_uses_stage_threshold_months_when_thresholds_given():
     cards_with_thresholds = evaluate_rules(profile, [], cap, params, today=TODAY, thresholds=STAGE_THRESHOLDS)
     r4 = next(c for c in cards_with_thresholds if c.rule_id == "R4")
     assert r4.numbers["target_emergency_fund"] == 1_000_000 * 6
-    assert "thresholds" in r4.assumptions[0]
+    assert "생애 단계" in r4.assumptions[0]
 
 
 def test_r8_fires_when_saving_rate_below_stage_minimum():

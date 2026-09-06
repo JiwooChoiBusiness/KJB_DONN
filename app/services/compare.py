@@ -58,6 +58,24 @@ _DEFAULT_LENDER_GROUPS = [LenderGroup.BANK.value, LenderGroup.SAVINGS_BANK.value
 _NO_RANKING_CATEGORIES = (ProductCategory.DEPOSIT, ProductCategory.SAVING)
 NO_RANKING_CATEGORY_MESSAGE = "예·적금은 순위 비교 대상이 아닙니다. 공시 열람만 제공합니다."
 
+# CompareContext.estimated_fields의 영문 키를 화면 안내 문장에 쓸 한글 라벨로 바꾼다.
+# 목록에 없는 키(채팅 경로 등에서 넘어온 값)는 원문 그대로 보여준다(방어적 처리).
+_ESTIMATED_FIELD_LABELS_KR: dict[str, str] = {
+    "amount": "금액",
+    "term_months": "기간",
+    "category": "카테고리",
+    "credit_band": "신용 구간",
+    "repay_method": "상환방식",
+    "target_loan_id": "대상 대출",
+}
+
+
+def _format_disclosure_month(raw: str) -> str:
+    """"202608" 같은 YYYYMM 문자열을 "2026년 8월"로 바꾼다. 형식이 다르면 원문 그대로 둔다."""
+    if len(raw) == 6 and raw.isdigit():
+        return f"{raw[:4]}년 {int(raw[4:6])}월"
+    return raw
+
 
 def _pick_target_loan(
     profile: Optional[UserProfile], target_loan_id: Optional[str]
@@ -215,19 +233,22 @@ def run_compare(ctx: CompareContext, profile: Optional[UserProfile], *, today: d
     items = ranking.rank(eligible_products, ctx, params, current_total_interest=current_total_interest)
 
     disclosure_months = sorted({p.disclosure_month for p in eligible_products if p.disclosure_month})
-    disclosure_month_text = ", ".join(disclosure_months) if disclosure_months else "확인 필요"
+    disclosure_month_text = (
+        ", ".join(_format_disclosure_month(m) for m in disclosure_months)
+        if disclosure_months else "확인 필요"
+    )
 
     assumptions = [
-        f"상품 스냅샷 ID: {snapshot_label or '확인 필요'}",
-        f"공시 기준월: {disclosure_month_text}",
-        "금액은 원 단위 반올림(사사오입, round half up) 기준으로 계산했습니다.",
-        "공시된 금리는 신청 시점의 공시 기준값이며, 실제 승인 금리와 한도는 금융회사 심사 결과에 "
-        "따라 달라질 수 있습니다.",
+        f"공시 자료 기준: {disclosure_month_text}",
+        "금액은 원 단위로 반올림했어요.",
+        "공시된 금리는 신청 시점의 공시 기준값이고, 실제 승인 금리와 한도는 금융회사 심사 결과에 "
+        "따라 달라질 수 있어요.",
     ]
     if ctx.estimated_fields:
+        labels = [_ESTIMATED_FIELD_LABELS_KR.get(f, f) for f in ctx.estimated_fields]
         assumptions.append(
-            f"다음 값은 프로필/대출 정보로 추정했습니다: {', '.join(ctx.estimated_fields)} "
-            "(조건 확인 화면에서 직접 수정할 수 있습니다)."
+            f"다음 조건은 등록된 정보로 추정했어요: {', '.join(labels)}. "
+            "조건 확인 화면에서 바꿀 수 있어요."
         )
 
     versions: dict[str, str] = {

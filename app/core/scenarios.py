@@ -165,19 +165,19 @@ def _run_one(
 
     assumptions: list[str] = []
     if scenario == Scenario.BASE:
-        assumptions.append("기준 시나리오: 현재 금리와 지출 조건을 그대로 유지한다고 가정합니다.")
+        assumptions.append("기준 시나리오는 지금의 금리와 지출 조건을 그대로 유지한다고 가정했어요.")
         variable_expenses = profile.variable_expenses
     elif scenario == Scenario.ADVERSE:
-        verify_note = "확인 필요" if stress_add_needs_verification else "확인됨"
+        confirm_tail = " (확인 필요)" if stress_add_needs_verification else ""
         assumptions.append(
-            f"악화 시나리오: 변동금리 대출 금리를 연 {stress_add:.4g}%p 올리고"
-            f"(policy: stress_variable_rate_add_pct, {verify_note}) 변동지출을 5% 늘린다고 가정합니다."
+            f"악화 시나리오는 변동금리 대출 금리를 연 {stress_add:.4g}%p 올리고{confirm_tail}, "
+            "변동지출도 5% 늘어난다고 가정했어요."
         )
         variable_expenses = _round_won(Decimal(profile.variable_expenses) * ADVERSE_VARIABLE_EXPENSE_MULTIPLIER)
     else:
         assumptions.append(
-            "완화 시나리오: 변동금리 대출 금리를 연 0.5%p 내리고 "
-            "매월 여유자금의 50%를 최고금리 대출에 추가 상환한다고 가정합니다."
+            "완화 시나리오는 변동금리 대출 금리를 연 0.5%p 내리고, "
+            "매월 여유자금의 절반을 최고금리 대출에 추가로 상환한다고 가정했어요."
         )
         variable_expenses = profile.variable_expenses
 
@@ -196,7 +196,7 @@ def _run_one(
         if goal_by_month:
             assumptions.append(
                 "목표(결혼·출산·주택 등)의 목표 금액(저축분 차감)과 목표 시점부터의 소득 변화율을 "
-                "현금흐름에 반영했습니다."
+                "현금흐름에 반영했어요."
             )
 
     points: list[CashflowPoint] = []

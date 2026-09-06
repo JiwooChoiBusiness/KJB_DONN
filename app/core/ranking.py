@@ -193,4 +193,4 @@ def sort_explain(ctx: CompareContext) -> str:
         basis = "금리가 낮은 순"
     else:
         basis = "총이자가 적은 순"
-    return f"대출금액 {ctx.amount:,}원, 기간 {ctx.term_months}개월 기준으로 {basis}으로 정렬했습니다."
+    return f"대출금액 {ctx.amount:,}원, 기간 {ctx.term_months}개월 기준으로 {basis}으로 정렬했어요."

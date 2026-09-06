@@ -238,7 +238,7 @@ def test_retirement_gap_projection_assumptions_mention_verification():
     results = retirement_gap_projection(profile, _params(), today=date(2026, 9, 6))
     for r in results:
         assert r.assumptions
-        assert any("national_pension_a_value" in a for a in r.assumptions)
+        assert any("A값" in a for a in r.assumptions)
 
 
 def test_retirement_gap_projection_assumptions_state_real_terms_unit():

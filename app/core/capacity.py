@@ -34,12 +34,12 @@ def compute_capacity(profile: UserProfile, schedules: list[LoanSchedule]) -> Cap
         if debt_service > 0:
             explanation = (
                 f"소득 정보가 없거나 0원인데 월 부채 상환액은 {debt_service:,}원이라 "
-                "상환 여력을 확인할 수 없습니다."
+                "상환 여력을 확인할 수 없어요."
             )
         else:
-            explanation = "소득 정보가 없어 가용 여력을 계산할 수 없습니다. 월소득을 입력하면 정확히 계산해드려요."
+            explanation = "소득 정보가 없어 가용 여력을 계산할 수 없어요. 월소득을 입력하면 정확히 계산해드려요."
         assumptions = [
-            "월소득 정보가 없거나 0원이라 소득 대비 비율 대신 보수적인 기본값(정보 부족)으로 판정했습니다.",
+            "월소득 정보가 없거나 0원이면 소득 대비 비율 대신 보수적인 기본값(정보 부족)으로 판정해요.",
         ]
         return Capacity(
             band=band,
@@ -65,17 +65,17 @@ def compute_capacity(profile: UserProfile, schedules: list[LoanSchedule]) -> Cap
     if net >= 0:
         explanation = (
             f"이번 달 소득 {income:,}원에서 고정·변동지출과 부채 상환액 {debt_service:,}원"
-            f"({ratio_pct}%)을 빼면 {net:,}원이 남습니다."
+            f"({ratio_pct}%)을 빼면 {net:,}원이 남아요."
         )
     else:
         explanation = (
             f"이번 달 소득 {income:,}원보다 고정·변동지출과 부채 상환액 {debt_service:,}원"
-            f"({ratio_pct}%)이 많아 {abs(net):,}원이 부족합니다."
+            f"({ratio_pct}%)이 많아서 {abs(net):,}원이 부족해요."
         )
 
     assumptions = [
-        "월 부채 상환액은 각 대출 스케줄의 1회차 납입액 합계입니다.",
-        "상환비율은 부채 상환액을 월소득으로 나눈 값입니다.",
+        "월 부채 상환액은 각 대출의 첫 회차 납입액을 모두 더한 값이에요.",
+        "상환비율은 부채 상환액을 월소득으로 나눈 값이에요.",
     ]
 
     return Capacity(

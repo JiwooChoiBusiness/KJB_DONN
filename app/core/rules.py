@@ -54,8 +54,9 @@ def _sorted_loans(profile: UserProfile) -> list[Loan]:
     return sorted(profile.loans, key=lambda l: l.id)
 
 
-def _verify_note(needs_verification: bool) -> str:
-    return "확인 필요" if needs_verification else "확인됨"
+def _confirm_tail(needs_verification: bool) -> str:
+    """needs_verification이 True일 때만 사람이 읽는 확인 필요 표시를 문장 끝에 붙인다."""
+    return " (확인 필요)" if needs_verification else ""
 
 
 def _rule_r0(profile: UserProfile, capacity: Capacity) -> Optional[ActionCard]:
@@ -80,8 +81,8 @@ def _rule_r0(profile: UserProfile, capacity: Capacity) -> Optional[ActionCard]:
             "debt_service_ratio": capacity.debt_service_ratio,
             "net_monthly": capacity.net_monthly,
         },
-        assumptions=["안전 모드 판단 기준: 연체 신호, 상환비율 70% 이상, 또는 이번 달 남는 돈이 음수 중 하나 이상 해당"],
-        caveats=["이 안내는 상담 신청을 돕기 위한 정보이며 특정 상품 가입을 유도하지 않습니다."],
+        assumptions=["연체 신호가 있거나, 상환비율이 70% 이상이거나, 이번 달 남는 돈이 마이너스이면 안전 모드로 안내해요."],
+        caveats=["이 안내는 상담 신청을 돕는 정보이고, 특정 상품 가입을 권하지 않아요."],
         steps=[_COUNSELING_STEP],
         priority=0,
         safe_mode=True,
@@ -112,8 +113,8 @@ def _rule_r5(loan: Loan, capacity: Capacity, schedule_by_loan: dict[str, LoanSch
             "grace_months": loan.grace_months,
             "net_monthly": capacity.net_monthly,
         },
-        assumptions=["정리 금액은 현재 스케줄의 마지막 회차 납입액 기준입니다."],
-        caveats=["실제 정리 시점 금리와 잔액에 따라 금액이 달라질 수 있습니다."],
+        assumptions=["정리 금액은 지금 상환 스케줄의 마지막 회차 납입액을 기준으로 어림했어요."],
+        caveats=["실제 정리 시점의 금리와 잔액에 따라 금액이 달라질 수 있어요."],
         steps=["만기 전 상환 계획(재대출, 일시 상환, 거치 연장 여부)을 미리 확인하세요."],
         priority=10,
         safe_mode=False,
@@ -134,10 +135,10 @@ def _rule_r4(
     if thresholds and thresholds.get("min_liquidity_months") is not None:
         months = thresholds["min_liquidity_months"]
         needs_verification = bool(thresholds.get("needs_verification", True))
-        source_note = f"생애 단계 기준 비상자금 {months:g}개월분 (thresholds, {_verify_note(needs_verification)})"
+        source_note = f"생애 단계 기준으로 비상자금 {months:g}개월분을 안내 기준으로 썼어요{_confirm_tail(needs_verification)}."
     else:
         months, needs_verification = _policy(params, "emergency_fund_months", 1)
-        source_note = f"policy: emergency_fund_months={months}개월 ({_verify_note(needs_verification)})"
+        source_note = f"비상자금 안내 기준은 생활비 {months:g}개월분이에요{_confirm_tail(needs_verification)}."
 
     target = round(profile.fixed_expenses * months)
     if profile.emergency_fund >= target:
@@ -195,7 +196,7 @@ def _rule_r8(profile: UserProfile, capacity: Capacity, thresholds: Optional[dict
         title="저축률을 끌어올려보세요",
         summary=summary,
         numbers={"saving_rate": saving_rate, "min_saving_rate": min_rate},
-        assumptions=[f"생애 단계 기준 최소 저축률 {min_pct}% (thresholds, {_verify_note(needs_verification)})"],
+        assumptions=[f"생애 단계 기준으로 최소 저축률 {min_pct}%를 안내 기준으로 썼어요{_confirm_tail(needs_verification)}."],
         caveats=[],
         steps=["매월 일정 금액이 자동으로 저축 계좌에 이체되도록 자동이체를 설정해보세요."],
         priority=55,
@@ -245,8 +246,8 @@ def _rule_r9(
         title="원리금상환비율이 높습니다",
         summary=summary,
         numbers={"debt_service_ratio": capacity.debt_service_ratio, "max_debt_service_ratio": max_ratio},
-        assumptions=[f"원리금상환비율 기준 {max_pct}% (thresholds, {_verify_note(needs_verification)})"],
-        caveats=["실제 승인 금리와 한도는 금융회사 심사에 따라 다를 수 있습니다."],
+        assumptions=[f"생애 단계 기준으로 원리금상환비율 {max_pct}%를 안내 기준으로 썼어요{_confirm_tail(needs_verification)}."],
+        caveats=["실제 승인 금리와 한도는 금융회사 심사에 따라 달라질 수 있어요."],
         steps=["상환 구조(만기 연장, 대환 등)를 점검해보세요."],
         priority=25,
         safe_mode=False,
@@ -272,7 +273,7 @@ def _rule_r10(
     pension = profile.assets.pension if profile.assets is not None else PensionAssets()
     if pension.expected_national_pension_monthly is not None:
         guaranteed = pension.expected_national_pension_monthly
-        source_note = "프로필에 입력된 국민연금 예상액을 사용했습니다."
+        source_note = "국민연금 예상액은 직접 입력한 값을 그대로 사용했어요."
     else:
         a_value, a_needs_verification = _policy(params, "national_pension_a_value", 3_190_000)
         guaranteed = national_pension_estimate(
@@ -280,8 +281,8 @@ def _rule_r10(
             pension.national_pension_months_paid,
         )
         source_note = (
-            f"policy: national_pension_a_value={a_value:,}원 ({_verify_note(a_needs_verification)})으로 "
-            "추정한 국민연금 예상액입니다."
+            f"국민연금 예상액은 공단 기준값(A값 {a_value:,}원)과 가입 기간으로 어림한 값이에요"
+            f"{_confirm_tail(a_needs_verification)}."
         )
 
     ratio = coverage_ratio(guaranteed, essential_expense)
@@ -308,10 +309,10 @@ def _rule_r10(
         summary=summary,
         numbers={"coverage_ratio": ratio, "essential_expense": essential_expense, "guaranteed_income": guaranteed},
         assumptions=[
-            f"노후소득 충당률 기준 {min_pct}% 이상 (thresholds, {_verify_note(needs_verification)})",
+            f"생애 단계 기준으로 노후소득 충당률 {min_pct}% 이상을 안내 기준으로 썼어요{_confirm_tail(needs_verification)}.",
             source_note,
         ],
-        caveats=["실제 연금 수급액은 국민연금공단 조회 결과와 다를 수 있습니다."],
+        caveats=["실제 연금 수급액은 국민연금공단 조회 결과와 다를 수 있어요."],
         steps=["노후자금 시뮬레이션 화면에서 낙관·기준·비관 시나리오를 확인해보세요."],
         priority=35,
         safe_mode=False,
@@ -339,7 +340,7 @@ def _rule_r6(loan: Loan, profile: UserProfile) -> Optional[ActionCard]:
             "rate": loan.annual_rate,
             "monthly_income_x2": profile.monthly_income * 2,
         },
-        assumptions=["고금리 소액 기준: 금리 연 12% 이상이며 잔액이 월소득의 2배 이하"],
+        assumptions=["고금리 소액 기준은 금리 연 12% 이상이고 잔액이 월소득의 2배 이하예요."],
         caveats=[],
         steps=["여유자금이 생기면 이 대출부터 우선 상환하세요."],
         priority=30,
@@ -370,7 +371,7 @@ def _rule_r2(profile: UserProfile, capacity: Capacity, priority: int) -> Optiona
             "interest_saved": effect["interest_saved"],
             "new_months": effect["new_months"],
         },
-        assumptions=["월 여력 전액을 매월 동일하게 추가 상환한다고 가정했습니다."],
+        assumptions=["월 여력 전액을 매월 동일하게 추가 상환한다고 가정했어요."],
         caveats=["중도상환수수료가 있는 대출은 수수료를 먼저 확인하세요."],
         steps=["이번 달부터 여유자금을 해당 대출 원금 상환에 우선 배정하세요."],
         priority=priority,
@@ -398,8 +399,8 @@ def _rule_r1(loan: Loan, profile: UserProfile, params: PolicyParams) -> Optional
         title="금리인하요구권을 신청해보세요",
         summary=summary,
         numbers={"current_rate": loan.annual_rate, "balance": loan.balance, "cost": 0},
-        assumptions=[f"policy: rate_cut_request_min_rate={min_rate}% ({_verify_note(needs_verification)})"],
-        caveats=["심사 결과에 따라 인하가 거절될 수 있습니다."],
+        assumptions=[f"금리인하요구권 안내 기준: 대출 금리 연 {min_rate}% 이상이에요{_confirm_tail(needs_verification)}."],
+        caveats=["심사 결과에 따라 인하가 거절될 수 있어요."],
         steps=[
             "1. 소득 증가 또는 고용 변동 증빙 서류를 준비하세요.",
             "2. 대출 취급 금융회사 창구 또는 앱에서 금리인하요구권을 신청하세요.",
@@ -454,11 +455,11 @@ def _rule_r3(loan: Loan, params: PolicyParams, today: date) -> Optional[ActionCa
             "breakeven_months": breakeven_months,
         },
         assumptions=[
-            f"policy: refi_rate_gap_min_pct={refi_gap}%p ({_verify_note(needs_verification)}), "
-            "이 값만큼 금리가 낮아진다고 가정해 월 이자 절감을 추정했습니다.",
-            "중도상환수수료는 loan.py의 prepay_fee 계산값입니다.",
+            f"다른 상품 금리가 지금보다 연 {refi_gap}%p 낮아진다고 가정해 월 이자 절감을 어림했어요"
+            f"{_confirm_tail(needs_verification)}.",
+            "중도상환수수료는 남은 기간과 수수료율로 어림한 값이에요.",
         ],
-        caveats=["실제 승인 금리와 한도는 금융회사 심사에 따라 다를 수 있습니다."],
+        caveats=["실제 승인 금리와 한도는 금융회사 심사에 따라 달라질 수 있어요."],
         steps=[],
         priority=60,
         safe_mode=False,

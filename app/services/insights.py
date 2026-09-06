@@ -15,6 +15,9 @@ from app.core import spending as spending_core
 from app.data import products
 from app.llm import guardrails
 from app.models import (
+    ActionCard,
+    Capacity,
+    CapacityBand,
     Chip,
     HomePayload,
     InsightCard,
@@ -42,6 +45,61 @@ _LOAN_TYPE_LABELS_KR: dict[str, str] = {
     "policy": "정책상품대출",
     "other": "기타 대출",
 }
+
+_CAPACITY_BAND_LABELS_KR: dict[CapacityBand, str] = {
+    CapacityBand.COMFORTABLE: "여유",
+    CapacityBand.OK: "보통",
+    CapacityBand.TIGHT: "빠듯",
+    CapacityBand.NEGATIVE: "부족",
+}
+
+
+def _action_explain(action: ActionCard, capacity: Capacity) -> str:
+    """행동 카드가 왜 나왔는지 규칙 번호·enum 이름 없이 사람이 읽는 말로 설명한다.
+
+    카드의 numbers(app/services/actions.py가 이미 한글 라벨로 포맷한 값)와 capacity를
+    근거로 규칙별 문장을 만든다. 아직 매핑이 없는 새 규칙은 맨 아래 일반 문장으로 안전하게
+    처리한다(카드 생성 자체가 막히지 않도록).
+    """
+    n = action.numbers
+    band_label = _CAPACITY_BAND_LABELS_KR.get(capacity.band, "보통")
+    rid = action.rule_id
+    if rid == "R0":
+        ratio = n.get("상환 비율", "")
+        net = n.get("이번 달 남는 돈", "")
+        return f"부채 상환 비율({ratio})과 이번 달 남는 돈({net})을 보고, 공적 상담부터 받도록 안내했어요."
+    if rid == "R1":
+        rate = n.get("현재 금리", "")
+        return f"대출 금리({rate})가 신청 기준 이상이고, 소득이나 고용이 좋아진 신호가 있어서 안내했어요."
+    if rid == "R2":
+        saved = n.get("절감 이자", "")
+        months_saved = n.get("단축 개월", "")
+        return (
+            f"이번 달 남는 돈을 금리가 가장 높은 대출에 모아 갚으면 {months_saved} 빨리 끝나고, "
+            f"이자({saved})를 아낄 수 있어서 안내했어요."
+        )
+    if rid == "R3":
+        gap = n.get("가정 금리차", "")
+        return f"남은 기간이 길고 금리가 {gap} 정도 낮아질 여지가 있어 보여서, 다른 상품 금리와 비교해보도록 안내했어요."
+    if rid == "R4":
+        return f"비상금이 생활비 기준보다 적어서 먼저 채우도록 안내했어요. 이번 달 남는 돈은 {capacity.net_monthly:,}원이에요."
+    if rid == "R5":
+        return "만기나 거치가 곧 끝나는 대출이 있어서 미리 확인하도록 안내했어요."
+    if rid == "R6":
+        rate = n.get("금리", "")
+        return f"금리({rate})가 높은데 잔액은 크지 않은 대출이 있어서 먼저 줄이도록 안내했어요."
+    if rid == "R8":
+        rate = n.get("저축률", "")
+        min_rate = n.get("최소 저축률 기준", "")
+        return f"저축률({rate})이 생애 단계 기준({min_rate})보다 낮아서 저축 계획을 세워보도록 안내했어요."
+    if rid == "R9":
+        ratio = n.get("상환 비율", "")
+        return f"이번 달 여력이 {band_label} 단계이고, 원리금상환비율({ratio})이 생애 단계 기준보다 높아서 상환 구조 점검을 안내했어요."
+    if rid == "R10":
+        coverage = n.get("노후소득 충당률", "")
+        return f"나이와 예상 노후소득을 보면 필수지출을 충당하는 비율({coverage})이 생애 단계 기준보다 낮아서 안내했어요."
+    return f"등록된 대출 정보와 이번 달 여력({band_label} 단계)를 근거로 안내했어요."
+
 
 # R0/R5/R6는 위험·경보성 규칙이라 카드 톤을 negative로 잡는다. R1/R2/R3/R4는
 # 개선을 제안하는 규칙이라 neutral로 둔다(코드 기반의 결정론적 분류, LLM 미사용).
@@ -125,8 +183,8 @@ def _safe_sentence(text: str, banned: list[str], fallback: str) -> str:
 
 def _guard_card(card: InsightCard, banned: list[str]) -> InsightCard:
     title = _safe_sentence(card.title, banned, "안내")
-    body = _safe_sentence(card.body, banned, "표시할 수 없는 내용이 감지되어 일반 안내로 대체했습니다.")
-    explain_fallback = "규칙 기반 계산 결과입니다." if card.explain else ""
+    body = _safe_sentence(card.body, banned, "표시할 수 없는 내용이 있어 일반 안내로 바꿨어요.")
+    explain_fallback = "계산 결과를 바탕으로 한 안내예요." if card.explain else ""
     explain = _safe_sentence(card.explain, banned, explain_fallback)
     if title != card.title or body != card.body or explain != card.explain:
         card = card.model_copy(update={"title": title, "body": body, "explain": explain})
@@ -142,15 +200,18 @@ def _onboarding_cards(product_stats: dict) -> list[InsightCard]:
         title="부채를 등록하면 이렇게 계산돼요",
         body=(
             f"예를 들어 신용대출 30,000,000원, 금리 연 6.0%, 36개월이라면 월 상환액은 약 "
-            f"{example_payment:,}원입니다. 내 대출을 등록하면 실제 숫자로 다시 계산해드려요."
+            f"{example_payment:,}원이에요. 내 대출을 등록하면 실제 숫자로 다시 계산해드려요."
         ),
         evidence={"예시 금액": "30,000,000원", "예시 금리": "6.0%", "예시 월 상환액": f"{example_payment:,}원"},
         chip=Chip(id="chip-onboarding-debts", text="내 부채 입력하기", tier=0, intent="onboarding", params={}),
         source_rule="onboarding",
-        explain="실제 값이 아니라 계산 엔진(app.core.schedule)으로 만든 예시 가정입니다.",
+        explain=(
+            f"실제 내 대출이 아니라 예시 조건(3,000만 원, 연 6.0%, 36개월)으로 원리금균등 월 상환액을 "
+            "계산해 본 거예요. 내 대출을 등록하면 같은 방식으로 실제 숫자를 보여드려요."
+        ),
     )
     total_products = int(product_stats.get("total_products") or 0)
-    products_note = f" 지금 비교할 수 있는 공시 상품은 {total_products:,}개입니다." if total_products > 0 else ""
+    products_note = f" 지금 비교할 수 있는 공시 상품은 {total_products:,}개예요." if total_products > 0 else ""
     card2 = InsightCard(
         id="card-onboarding-personas",
         kind="onboarding",
@@ -163,7 +224,7 @@ def _onboarding_cards(product_stats: dict) -> list[InsightCard]:
         evidence={"데모 페르소나 수": "8명", "비교 가능 상품 수": f"{total_products:,}개"},
         chip=Chip(id="chip-onboarding-personas", text="페르소나 선택하러 가기", tier=0, intent="onboarding", params={}),
         source_rule="onboarding",
-        explain="등록된 데모 페르소나 수와 상품 스냅샷 통계(app.data.products.stats)를 안내합니다.",
+        explain="데모용 가상 인물 8명과 지금 비교할 수 있는 공시 상품 수를 알려드리는 안내예요.",
     )
     return [card1, card2]
 
@@ -188,10 +249,10 @@ def _debt_summary_card(profile: UserProfile, schedules: list[LoanSchedule]) -> I
     if profile.loans:
         body = (
             f"현재 등록된 대출 {len(profile.loans)}건의 총잔액은 {total_balance:,}원이고, "
-            f"이번 달 원리금 합계는 {monthly_total:,}원입니다."
+            f"이번 달 원리금 합계는 {monthly_total:,}원이에요."
         )
     else:
-        body = "아직 등록된 대출이 없습니다. 대출을 등록하면 총잔액과 월 상환액을 계산해드려요."
+        body = "아직 등록된 대출이 없어요. 대출을 등록하면 총잔액과 월 상환액을 계산해드려요."
     return InsightCard(
         id="card-debt-summary",
         kind="debt",
@@ -205,7 +266,7 @@ def _debt_summary_card(profile: UserProfile, schedules: list[LoanSchedule]) -> I
         },
         chip=Chip(id="chip-debt-schedule", text="상환표 보기", tier=1, intent="schedule", params={}),
         source_rule="debt_summary",
-        explain="보유 대출별 상환 스케줄(app.core.schedule)을 계산해 합산했습니다.",
+        explain="등록한 대출마다 상환표를 만든 뒤 이번 달 원리금과 앞으로 낼 이자를 모두 더했어요.",
     )
 
 
@@ -216,9 +277,9 @@ def _progress_card(profile: UserProfile, schedules: list[LoanSchedule]) -> Optio
     loan_obj = next((l for l in profile.loans if l.id == soonest.loan_id), None)
     label = _LOAN_TYPE_LABELS_KR.get(loan_obj.loan_type.value, "대출") if loan_obj else "대출"
     if soonest.months <= 0:
-        body = f"{label}은(는) 이미 상환이 끝났거나 이번 달 안에 정리됩니다."
+        body = f"{label}은(는) 이미 상환이 끝났거나 이번 달 안에 정리돼요."
     else:
-        body = f"{label}이(가) {soonest.months}개월 후 상환 완료될 예정입니다(현재 조건 유지 시)."
+        body = f"{label}이(가) {soonest.months}개월 후 상환 완료될 예정이에요(지금 조건을 유지한다면요)."
     return InsightCard(
         id="card-progress-soonest",
         kind="progress",
@@ -231,7 +292,7 @@ def _progress_card(profile: UserProfile, schedules: list[LoanSchedule]) -> Optio
             params={"target_loan_id": soonest.loan_id},
         ),
         source_rule="progress_soonest",
-        explain="각 대출의 상환 스케줄에서 남은 회차가 가장 적은 대출을 찾았습니다.",
+        explain="각 대출의 상환표에서 남은 회차가 가장 적은 대출을 찾았어요.",
     )
 
 
@@ -248,7 +309,7 @@ def _goal_progress_card(profile: UserProfile) -> Optional[InsightCard]:
     pct = min(round(goal.saved_amount / goal.target_amount * 100), 100)
     label = _GOAL_KIND_LABELS_KR.get(goal.kind, "목표 자금")
     body = (
-        f"목표 {label}의 {pct}% 확보({goal.saved_amount:,}원 / {goal.target_amount:,}원)."
+        f"목표 {label} 금액의 {pct}%를 모았어요({goal.saved_amount:,}원 / {goal.target_amount:,}원)."
     )
     return InsightCard(
         id=f"card-goal-{goal.id}",
@@ -259,7 +320,7 @@ def _goal_progress_card(profile: UserProfile) -> Optional[InsightCard]:
         evidence={"목표 금액": f"{goal.target_amount:,}원", "모은 금액": f"{goal.saved_amount:,}원", "진행률": f"{pct}%"},
         chip=Chip(id="chip-goal-lifecycle", text="생애 흐름 보기", tier=1, intent="lifecycle", params={}),
         source_rule="goal_progress",
-        explain="가장 우선순위가 높은 목표(Goal.priority, target_date 순)의 저축 진행률을 계산했습니다.",
+        explain="등록한 목표 중 우선순위가 가장 높은 목표를 골라 저축 진행률을 계산했어요.",
     )
 
 
@@ -317,7 +378,7 @@ def build_home(
             evidence=dict(top_action.numbers),  # actions.list_actions에서 이미 한글 라벨로 포맷됨
             chip=top_action.chip,
             source_rule=top_action.rule_id,
-            explain=f"{top_action.rule_id} 규칙이 대출 정보와 이번 달 여력({capacity.band.value})을 근거로 판단했습니다.",
+            explain=_action_explain(top_action, capacity),
         ))
 
     base_cards.append(_debt_summary_card(profile, schedules))
@@ -342,11 +403,11 @@ def build_home(
             kind="progress",
             tone="neutral",
             title="지금 할 수 있는 것부터 정리해봐요",
-            body=f"이번 달 남는 돈은 {capacity.net_monthly:,}원입니다. 위 안내부터 하나씩 확인해보세요.",
+            body=f"이번 달 남는 돈은 {capacity.net_monthly:,}원이에요. 위 안내부터 하나씩 확인해보세요.",
             evidence={"이번 달 남는 돈": f"{capacity.net_monthly:,}원"},
             chip=None,
             source_rule="balance_rule",
-            explain="부정적인 톤의 카드만 있을 때 균형을 맞추기 위해 추가된 안내입니다.",
+            explain="경고성 안내만 있으면 부담스러울 수 있어서, 지금 바로 할 수 있는 일 하나를 함께 보여드려요.",
         ))
 
     # P5: 저장된 소비 패턴 분석이 있으면 최대 2장을 더한다. 홈 카드는 최대 3장(SPEC 3장)
