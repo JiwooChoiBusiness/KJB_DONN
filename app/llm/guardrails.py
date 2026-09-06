@@ -82,9 +82,20 @@ _INTENT_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
     ("compare", ("비교", "공시", "대환", "갈아타")),
 ]
 
+# SPEC 2.11 direct 경로: 인사·잡담·"할 수 있는 일" 문의처럼 자료가 필요 없는 발화.
+# 가장 먼저 검사하되(_detect_intent 참고), 부채 주제어(_DEBT_TOPIC_TOKENS, 아래 위기
+# 신호 절에서 정의)가 함께 있으면 direct로 보지 않는다(예: "빚 때문에 힘든데 고마워요"는
+# direct가 아니다). _DEBT_TOPIC_TOKENS는 이 파일 아래쪽에서 정의되지만, 모듈 전역이라
+# _detect_intent가 실제로 호출되는 시점(모듈 로드 완료 후)에는 항상 존재한다.
+_DIRECT_KEYWORDS = ("안녕", "반가", "고마", "뭐 할 수 있", "뭘 할 수", "도움말", "사용법")
+
 # P7 생애주기 층(SPEC 2.7): retirement(노후·연금·은퇴), saving(저축률·자동이체),
 # liquidity(비상금·비상자금)는 app/api/routes.py가 재무비율·노후자금 격차 수치를 채워 답한다.
-_VALID_INTENTS = {"compare", "schedule", "scenario", "action", "faq", "spending", "retirement", "saving", "liquidity"}
+# direct(SPEC 2.11)는 자료 없이 답할 수 있는 인사·잡담·사용법 문의다.
+_VALID_INTENTS = {
+    "compare", "schedule", "scenario", "action", "faq", "spending",
+    "retirement", "saving", "liquidity", "direct",
+}
 
 # 카테고리 키워드. "신용대출"이 "신용"보다 먼저 오도록(더 구체적인 것을 먼저)
 # 순서를 유지한다.
@@ -123,6 +134,8 @@ _EXCLUDE_RE2 = re.compile(r"([가-힣A-Za-z0-9]{1,12}?)(?:는|은|을|를)?\s*�
 
 
 def _detect_intent(text: str) -> Optional[str]:
+    if any(k in text for k in _DIRECT_KEYWORDS) and not any(k in text for k in _DEBT_TOPIC_TOKENS):
+        return "direct"
     for intent, keywords in _INTENT_KEYWORDS:
         if any(k in text for k in keywords):
             return intent

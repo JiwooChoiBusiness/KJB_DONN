@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     action_json TEXT,
     chips_json  TEXT,
     trace_json  TEXT,
+    meta_json   TEXT,
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id, id);
@@ -127,6 +128,15 @@ def _migrate_chat_messages_trace_json(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def _migrate_chat_messages_meta_json(conn: sqlite3.Connection) -> None:
+    """기존 DB에 chat_messages.meta_json이 없으면 추가한다(SPEC 2.11: 답변 메시지의
+    route/resources/answer_format/model을 한 컬럼에 JSON으로 저장한다)."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(chat_messages)").fetchall()}
+    if "meta_json" not in cols:
+        conn.execute("ALTER TABLE chat_messages ADD COLUMN meta_json TEXT")
+        conn.commit()
+
+
 def init_db(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
     """스키마를 만든다(이미 있으면 무시). 사용한 커넥션을 반환한다.
 
@@ -136,4 +146,5 @@ def init_db(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
     c.executescript(SCHEMA_SQL)
     c.commit()
     _migrate_chat_messages_trace_json(c)
+    _migrate_chat_messages_meta_json(c)
     return c

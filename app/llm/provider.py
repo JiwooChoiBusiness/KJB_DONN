@@ -67,3 +67,15 @@ class LLMProvider(Protocol):
     def health(self) -> dict:
         """진단 정보(가용 여부, 모델 체인, 키 개수 등). 키 값 자체는 절대 포함하지 않는다."""
         ...
+
+    def search_answer(self, question: str, system: str, *, deadline_seconds: Optional[float] = None) -> LLMResult:
+        """Google 검색 그라운딩(SPEC 2.11 external 경로)으로 질문에 답한다.
+
+        `question`은 호출자가 이미 `guardrails.mask_pii`로 마스킹한 발화여야 한다(D4).
+        `LLMResult.text`에 답변 문장을, `LLMResult.data`에 `{"sources": [...], "queries": [...],
+        "search_entry_point_html": str}`(groundingMetadata 파싱 결과)를 채운다. 그라운딩
+        메타데이터가 없으면 `data["sources"]`는 빈 리스트다. 이 메서드는 선택 사항이라
+        모든 구현체가 제공하지 않을 수 있다(호출부는 `getattr(provider, "search_answer", None)`로
+        존재를 확인한 뒤 호출한다, 테스트 더블 호환).
+        """
+        ...

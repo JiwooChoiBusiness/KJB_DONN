@@ -6,6 +6,7 @@
 from .search import (
     DEFAULT_KB_DIR,
     DISCLAIMER,
+    MIN_SCORE,
     REQUIRED_SECTIONS,
     KbDoc,
     KbHit,
@@ -25,4 +26,5 @@ __all__ = [
     "DISCLAIMER",
     "DEFAULT_KB_DIR",
     "REQUIRED_SECTIONS",
+    "MIN_SCORE",
 ]

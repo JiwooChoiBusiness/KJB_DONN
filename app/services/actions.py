@@ -56,6 +56,7 @@ _RATIO_PCT_LABELS: dict[str, str] = {
     "min_saving_rate": "최소 저축률 기준",  # R8
     "coverage_ratio": "노후소득 충당률",    # R10
     "min_coverage_ratio": "최소 충당률 기준",  # R10
+    "max_debt_service_ratio": "원리금상환비율 기준",  # R9 (2026-09-06 리뷰: 라벨 누락)
 }
 
 

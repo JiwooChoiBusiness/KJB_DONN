@@ -21,3 +21,5 @@ model_cooldown_seconds: 120           # 500/503이 2회 반복된 모델은 120�
 model_failure_threshold: 2
 endpoint: https://generativelanguage.googleapis.com/v1beta
 data_grade_policy: "G3 금지. 개인신용정보 파생 수치는 외부 LLM으로 전송하지 않는다 (D4)"
+external_search_enabled: true         # SPEC 2.11 external 경로: Gemini Google 검색 그라운딩 사용 여부
+external_deadline_seconds: 12         # 외부 검색 응답 전용 체인 상한, 초과/실패 시 공식 안내 링크로 폴백

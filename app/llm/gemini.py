@@ -42,6 +42,27 @@ def _load_yaml_config(path: str = DEFAULT_CONFIG_PATH) -> dict:
     return yaml.safe_load(text) or {}
 
 
+def _extract_grounding(raw: dict) -> dict[str, Any]:
+    """candidates[0].groundingMetadata에서 웹 출처/검색어/검색 제안 HTML을 뽑는다(SPEC 2.11
+    external 경로). 그라운딩이 오지 않은 응답(예: 검색이 필요 없다고 모델이 판단)에도
+    안전하게 빈 값을 돌려준다."""
+    try:
+        candidates = raw.get("candidates") or []
+        meta = (candidates[0].get("groundingMetadata") or {}) if candidates else {}
+    except (AttributeError, IndexError, TypeError):
+        meta = {}
+    sources: list[dict[str, str]] = []
+    for chunk in meta.get("groundingChunks") or []:
+        web = (chunk or {}).get("web") or {}
+        uri = web.get("uri") or ""
+        if not uri:
+            continue
+        sources.append({"uri": uri, "title": web.get("title") or uri})
+    queries = [q for q in (meta.get("webSearchQueries") or []) if q]
+    entry_point_html = ((meta.get("searchEntryPoint") or {}).get("renderedContent")) or ""
+    return {"sources": sources, "queries": queries, "search_entry_point_html": entry_point_html}
+
+
 def _extract_text(raw: dict) -> str:
     """candidates[0].content.parts[0].text를 안전하게 꺼낸다(없으면 빈 문자열)."""
     try:
@@ -79,6 +100,9 @@ class GeminiProvider:
         # config/llm.yaml에서 이 키를 직접 읽어 provider.explain(..., deadline_seconds=...)로
         # 넘기지만, health()/진단용으로 인스턴스에도 보관해 둔다.
         self.chat_explain_deadline_seconds = cfg.get("chat_explain_deadline_seconds", 8)
+        # SPEC 2.11 external 경로(Google 검색 그라운딩) 전용 체인 상한과 기능 스위치.
+        self.external_search_enabled = cfg.get("external_search_enabled", True)
+        self.external_deadline_seconds = cfg.get("external_deadline_seconds", 12)
         self.model_cooldown_seconds = cfg.get("model_cooldown_seconds", 120)  # 500/503이 반복된 모델은 잠시 건너뜀
         self.model_failure_threshold = cfg.get("model_failure_threshold", 2)  # 체인 전체 상한. 넘기면 규칙 파서 폴백
         # 429를 받은 (key_index) -> 쿨다운 해제 시각(time.monotonic() 기준). 프로세스
@@ -280,6 +304,37 @@ class GeminiProvider:
                 data = parsed
         return LLMResult(
             data=data,
+            text=text_out,
+            model=raw.get("modelVersion") or model,
+            key_index=key_index,
+            latency_ms=latency_ms,
+            usage=raw.get("usageMetadata") or {},
+        )
+
+    def search_answer(
+        self, question: str, system: str, *, deadline_seconds: Optional[float] = None,
+    ) -> LLMResult:
+        """Google 검색 그라운딩으로 답한다(SPEC 2.11 external 경로).
+
+        JSON 모드를 쓰지 않는다(`generationConfig`에 `responseMimeType`/`responseSchema`를
+        넣지 않는다. `tools`와 JSON 스키마를 함께 쓰면 Gemini가 400을 돌려준다는 것이
+        실측 결과다). `LLMResult.text`는 자유 텍스트 답변, `LLMResult.data`는
+        `{"sources": [...], "queries": [...], "search_entry_point_html": str}`
+        (groundingMetadata 파싱 결과, 없으면 빈 값). D4: `question`은 호출자가 이미
+        `guardrails.mask_pii`로 마스킹한 발화여야 한다.
+        """
+        body = {
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": question}]}],
+            "generationConfig": {"temperature": self.temperature},
+            "tools": [{"google_search": {}}],
+        }
+        effective_deadline = self.external_deadline_seconds if deadline_seconds is None else deadline_seconds
+        raw, model, key_index, latency_ms = self._run_chain(body, deadline_seconds=effective_deadline)
+        text_out = _extract_text(raw)
+        grounding = _extract_grounding(raw)
+        return LLMResult(
+            data=grounding,
             text=text_out,
             model=raw.get("modelVersion") or model,
             key_index=key_index,

@@ -42,6 +42,7 @@ from app.models import (
     ENGINE_VERSION,
     ActionCard,
     ChatReply,
+    ChatResource,
     Chip,
     CompareContext,
     CompareResult,
@@ -58,6 +59,7 @@ from app.models import (
     UserProfile,
 )
 from app.services import actions as actions_service
+from app.services import answer as answer_service
 from app.services import compare as compare_service
 from app.services import decisions as decisions_service
 from app.services import explain as explain_service
@@ -411,7 +413,7 @@ _CHAT_EXTRACT_SCHEMA: dict[str, Any] = {
     "properties": {
         "intent": {"type": "STRING", "enum": [
             "compare", "schedule", "scenario", "action", "faq", "spending",
-            "retirement", "saving", "liquidity",
+            "retirement", "saving", "liquidity", "direct",
         ]},
         "category": {"type": "STRING", "enum": ["deposit", "saving", "mortgage", "jeonse", "credit", "policy"]},
         "amount": {"type": "INTEGER"},
@@ -430,7 +432,23 @@ _CATEGORY_LABELS_KR = {
 
 _VALID_CHAT_INTENTS = {
     "compare", "schedule", "scenario", "action", "faq", "spending",
-    "retirement", "saving", "liquidity",
+    "retirement", "saving", "liquidity", "direct",
+}
+
+# SPEC 2.11: internal 경로인데 faq가 아닌 의도들. 이 의도들은 발화에 제도 키워드(KB
+# 검색 점수 임계값 이상 히트)가 있으면 kb 노드도 함께 실행해 리소스와 칩을 덧붙인다.
+_MULTI_NODE_ELIGIBLE_INTENTS = {
+    "compare", "action", "schedule", "scenario", "retirement", "saving", "liquidity",
+}
+
+# SPEC 2.11: 시점성 질문 키워드. faq인데 KB 히트가 없고 이 키워드가 있으면 external로 보낸다.
+_TIME_SENSITIVE_KEYWORDS = ("최신", "요즘", "지금", "현재", "올해", "뉴스", "발표", "기준금리")
+
+# 생애주기 채팅 의도별로 리소스 패널에 곁들일 정책 기준값(config/policy_params.yaml 키).
+_LIFECYCLE_POLICY_KEYS: dict[str, list[str]] = {
+    "retirement": ["national_pension_start_age"],
+    "saving": [],
+    "liquidity": ["emergency_fund_months"],
 }
 
 
@@ -608,21 +626,31 @@ _STAGE_LABELS: dict[str, str] = {
     "compute": "계산 엔진",
     "explain": "설명 작성",
     "check": "응답 점검",
+    # SPEC 2.11: 답변 경로·노드 카드용 신규 노드 id.
+    "debt_data": "내 부채 자료",
+    "calc": "계산 엔진",
+    "kb": "제도 안내",
+    "products": "공시 자료",
+    "external": "외부 검색",
+    "direct": "직접 답변",
 }
 
 _INTENT_LABELS_KR: dict[str, str] = {
     "compare": "공시 비교", "schedule": "상환표", "scenario": "시나리오", "action": "행동 제안",
     "faq": "제도 안내", "spending": "소비 패턴", "retirement": "노후자금", "saving": "저축률",
-    "liquidity": "비상자금",
+    "liquidity": "비상자금", "direct": "일반 안내",
 }
 
 
 class _StageEmitter:
-    """파이프라인 단계 이벤트 방출/기록(SPEC 2.9). `emit`이 없으면 trace만 쌓는다.
+    """파이프라인 단계 이벤트 방출/기록(SPEC 2.9, 노드 카드는 SPEC 2.11). `emit`이 없으면
+    trace만 쌓는다.
 
     같은 stage id로 `start` 뒤 종료 상태(done/fallback/skip)가 하나 온다. 저장되는
     `trace`(=`ChatReply.trace`)에는 종료 상태만 남기고, `start`는 실시간 스트림에만
-    보낸다(스트리밍 화면의 "진행 중" 표시용).
+    보낸다(스트리밍 화면의 "진행 중" 표시용). `steps`(사람이 읽는 단계 문장)와
+    `resource_refs`(해당 `ChatResource.ref` 목록)는 SPEC 2.11 노드 카드용 추가 필드로,
+    모든 이벤트에 항상 존재한다(없으면 빈 리스트).
     """
 
     def __init__(self, emit: Optional[Callable[[dict[str, Any]], None]]):
@@ -632,12 +660,21 @@ class _StageEmitter:
 
     def start(self, stage_id: str) -> None:
         self._started_at[stage_id] = time.monotonic()
-        self._send({"id": stage_id, "label": _STAGE_LABELS[stage_id], "status": "start", "detail": "", "ms": 0})
+        self._send({
+            "id": stage_id, "label": _STAGE_LABELS[stage_id], "status": "start", "detail": "", "ms": 0,
+            "steps": [], "resource_refs": [],
+        })
 
-    def finish(self, stage_id: str, status: str, detail: str) -> None:
+    def finish(
+        self, stage_id: str, status: str, detail: str,
+        *, steps: Optional[list[str]] = None, resource_refs: Optional[list[str]] = None,
+    ) -> None:
         started = self._started_at.get(stage_id)
         ms = int((time.monotonic() - started) * 1000) if started is not None else 0
-        event = {"id": stage_id, "label": _STAGE_LABELS[stage_id], "status": status, "detail": detail, "ms": ms}
+        event = {
+            "id": stage_id, "label": _STAGE_LABELS[stage_id], "status": status, "detail": detail, "ms": ms,
+            "steps": list(steps) if steps else [], "resource_refs": list(resource_refs) if resource_refs else [],
+        }
         self.trace.append(event)
         self._send(event)
 
@@ -662,6 +699,10 @@ class _ChatBuildResult:
     llm_used: bool
     trace: list[dict[str, Any]] = field(default_factory=list)
     model: Optional[str] = None
+    # SPEC 2.11: 답변 경로, 근거 리소스, 답변 형식.
+    route: str = "internal"
+    resources: list[ChatResource] = field(default_factory=list)
+    answer_format: str = "text"
 
 
 def _build_chat_reply(
@@ -673,6 +714,7 @@ def _build_chat_reply(
     수치·판단 자체는 기존과 동일한 코드 경로(규칙 파서/코드 계산)로 만든다. LLM은 의도
     추출(intent 단계)과 문장 설명(explain 단계)에만 관여한다."""
     stages = _StageEmitter(emit)
+    banned = insights_service.get_banned_terms()
 
     # ---- guard: PII 마스킹 + 위기 신호 확인 ----
     stages.start("guard")
@@ -686,13 +728,12 @@ def _build_chat_reply(
         stages.finish("explain", "skip", "규칙 문장")
         text, chips, action = _crisis_reply(crisis, session_service.get_profile())
         stages.start("check")
-        banned = insights_service.get_banned_terms()
         if guardrails.check_text(text, banned):
             stages.finish("check", "fallback", "금칙어 감지로 기본 안내로 대체")
             text = "안내 문구를 표시할 수 없어 기본 안내로 대체했습니다. 메뉴에서 원하는 화면을 선택해주세요."
         else:
             stages.finish("check", "done", "상품명·회사명·권유 표현 없음 확인")
-        return _ChatBuildResult(text, chips, action, False, stages.trace, None)
+        return _ChatBuildResult(text, chips, action, False, stages.trace, None, route="safety")
     stages.finish("guard", "done", "개인정보 마스킹 완료")
 
     # ---- intent: 의도·조건 추출 ----
@@ -733,8 +774,37 @@ def _build_chat_reply(
     action: Optional[dict[str, Any]] = None
     explain_model: Optional[str] = None
     explain_llm_used = False
+    # SPEC 2.11: 답변 경로, 근거 리소스, 답변 형식. faq가 아닌 의도는 전부 internal이다.
+    route = "internal"
+    resources: list[ChatResource] = []
+    answer_format = "text"
+    _static_faq_chips = [
+        Chip(id="chip-chat-faq-compare", text="공시 비교하기", tier=1, intent="compare", params={}),
+        Chip(id="chip-chat-faq-debts", text="내 부채 보기", tier=1, intent="schedule", params={}),
+        Chip(id="chip-chat-faq-spending", text="소비 패턴 보기", tier=1, intent="spending", params={}),
+    ]
 
-    if intent == "compare":
+    if intent == "direct":
+        # SPEC 2.11: 자료가 필요 없는 질문(인사, 할 수 있는 일 문의, 잡담). 개인 수치도
+        # 프로필도 참조하지 않는다.
+        stages.start("direct")
+        text, direct_llm_used, direct_model, direct_latency_ms, direct_problems = (
+            answer_service.build_direct_answer(_llm_provider, banned)
+        )
+        if direct_llm_used:
+            stages.finish("direct", "done", f"Gemini {direct_model}, {direct_latency_ms}ms",
+                          steps=["DONN이 할 수 있는 일을 안내했어요."])
+        else:
+            first_problem = direct_problems[0] if direct_problems else "llm_unavailable"
+            stages.finish("direct", "fallback", f"고정 안내 문장 사용({first_problem})",
+                          steps=["DONN이 할 수 있는 일을 안내했어요."])
+        reply_text = text
+        route = "direct"
+        explain_llm_used = direct_llm_used
+        explain_model = direct_model
+        chips.extend(_static_faq_chips)
+
+    elif intent == "compare":
         stages.start("compute")
         params = _clean_compare_params(slots)
         followup_changed: list[str] = []
@@ -756,14 +826,20 @@ def _build_chat_reply(
             stages.start("explain")
             stages.finish("explain", "skip", "규칙 문장")
         else:
+            resources.extend(answer_service.profile_resources(profile))
+            products_res = answer_service.products_resource(ctx.category)
+            resources.append(products_res)
+            compute_steps = [f"{products_res.title}을 조건에 맞춰 준비했어요."]
             followup_labels = [_FOLLOWUP_LABELS.get(k, k) for k in followup_changed]
             if followup_labels:
-                stages.finish("compute", "done", f"이전 조건에서 {', '.join(followup_labels)}만 변경")
+                stages.finish("compute", "done", f"이전 조건에서 {', '.join(followup_labels)}만 변경",
+                              steps=compute_steps, resource_refs=[r.ref for r in resources])
             else:
                 stages.finish(
                     "compute", "done",
                     f"비교 조건 준비: {category_label}, 금액 {ctx.amount:,}원, "
                     f"기간 {ctx.term_months}개월(추정 {len(ctx.estimated_fields)}개)",
+                    steps=compute_steps, resource_refs=[r.ref for r in resources],
                 )
             stages.start("explain")
             explain_result = explain_service.explain_chat_compare(ctx, followup_labels, _llm_provider)
@@ -777,7 +853,12 @@ def _build_chat_reply(
 
     elif intent in ("schedule", "scenario"):
         stages.start("compute")
-        stages.finish("compute", "done", "화면 안내")
+        resources.extend(answer_service.profile_resources(profile))
+        if resources:
+            stages.finish("compute", "done", "화면 안내", steps=["내 부채 자료를 참조했어요."],
+                          resource_refs=[r.ref for r in resources])
+        else:
+            stages.finish("compute", "done", "화면 안내")
         reply_text = "내 부채 화면에서 상환표와 시나리오를 확인할 수 있어요."
         action = {"type": "open_view", "payload": {"view": "debts"}}
         chips.append(Chip(id=f"chip-chat-{intent}", text="내 부채로 이동", tier=1, intent=intent, params={}))
@@ -786,7 +867,12 @@ def _build_chat_reply(
 
     elif intent == "spending":
         stages.start("compute")
-        stages.finish("compute", "done", "화면 안내")
+        resources.extend(answer_service.profile_resources(profile))
+        if resources:
+            stages.finish("compute", "done", "화면 안내", steps=["내 부채 자료를 참조했어요."],
+                          resource_refs=[r.ref for r in resources])
+        else:
+            stages.finish("compute", "done", "화면 안내")
         reply_text = "소비 패턴 화면에서 합성 거래내역을 확인할 수 있어요."
         action = {"type": "open_view", "payload": {"view": "spending"}}
         stages.start("explain")
@@ -794,8 +880,18 @@ def _build_chat_reply(
 
     elif intent in ("retirement", "saving", "liquidity"):
         stages.start("compute")
+        resources.extend(answer_service.profile_resources(profile))
+        if profile is not None:
+            policy_keys = _LIFECYCLE_POLICY_KEYS.get(intent, [])
+            if policy_keys:
+                resources.extend(answer_service.policy_resources(policy.load_policy_params(), policy_keys))
         reply_text, chips, action = _build_lifecycle_chat_reply(intent, profile)
-        stages.finish("compute", "done", "재무비율·노후자금 계산")
+        if profile is not None:
+            stages.finish("compute", "done", "재무비율·노후자금 계산",
+                          steps=["재무비율과 노후자금 격차를 계산했어요."],
+                          resource_refs=[r.ref for r in resources])
+        else:
+            stages.finish("compute", "done", "재무비율·노후자금 계산")
         stages.start("explain")
         stages.finish("explain", "skip", "규칙 문장")
 
@@ -812,11 +908,15 @@ def _build_chat_reply(
             stages.start("explain")
             stages.finish("explain", "skip", "규칙 문장")
         else:
+            resources.extend(answer_service.profile_resources(profile))
             params_policy = policy.load_policy_params()
             cards = actions_service.list_actions(profile, params_policy, today=date.today())
             if cards:
                 top = cards[0]
-                stages.finish("compute", "done", f"행동 규칙 평가: {len(cards)}건, 최우선 {top.title}")
+                resources.append(answer_service.calc_resource("행동 카드", top.id, top.title))
+                stages.finish("compute", "done", f"행동 규칙 평가: {len(cards)}건, 최우선 {top.title}",
+                              steps=[f"행동 규칙 {len(cards)}건을 평가해 최우선 카드를 골랐어요."],
+                              resource_refs=[r.ref for r in resources])
                 if top.chip is not None:
                     chips.append(top.chip)
                 stages.start("explain")
@@ -834,53 +934,120 @@ def _build_chat_reply(
                     stages.finish("explain", "skip", "규칙 문장")
                     reply_text = top.summary
             else:
-                stages.finish("compute", "done", "행동 규칙 평가: 0건")
+                stages.finish("compute", "done", "행동 규칙 평가: 0건", resource_refs=[r.ref for r in resources])
                 reply_text = "지금은 특별히 안내할 행동이 없어요. 계속 잘 관리하고 계세요."
                 stages.start("explain")
                 stages.finish("explain", "skip", "규칙 문장")
 
-    else:  # faq 또는 인식하지 못한 의도: 제도 안내 KB(kb/*.md) 키워드 검색으로 답한다
-        stages.start("compute")
-        hit = kb_search.answer(masked)
-        if hit is not None:
-            reply_text = f"{hit['title']} 안내입니다. {hit['snippet']}"
-            if hit.get("needs_verification"):
-                reply_text += " 일부 수치는 확인이 필요한 항목입니다."
-            reply_text += f" {hit['disclaimer']}"
-            chips.append(Chip(id=f"chip-kb-{hit['slug']}", text=f"{hit['title']} 자세히 보기", tier=1,
-                              intent="faq", params={"slug": hit["slug"]}))
-            action = {"type": "open_kb", "payload": {"slug": hit["slug"], "title": hit["title"],
-                                                    "sources": hit.get("sources") or []}}
-            stages.finish("compute", "done", f"제도 안내 검색: {hit['title']}")
+    else:  # faq: internal(KB 히트) 또는 external(KB 미달·시점성 질문)
+        hits = kb_search.search(masked, k=1)
+        hit = hits[0] if hits else None
+        kb_ok = hit is not None and hit.score > kb_search.MIN_SCORE
+
+        if kb_ok:
+            route = "internal"
+            answer_format = "markdown"
+            doc = next((d for d in kb_search.load_docs() if d.slug == hit.slug), None)
+            if doc is None:  # 방어적: 검색 인덱스와 문서 캐시가 어긋난 경우에만 발생
+                answer_format = "text"
+                reply_text = f"{hit.title} 안내입니다. {hit.snippet}"
+                stages.start("kb")
+                stages.finish("kb", "done", f"제도 문서 검색: {hit.title}")
+                stages.start("explain")
+                stages.finish("explain", "skip", "규칙 문장")
+            else:
+                stages.start("kb")
+                ref_sections = answer_service.kb_reference_sections(doc)
+                kb_res = answer_service.kb_resources(doc, ref_sections)
+                resources.extend(kb_res)
+                stages.finish("kb", "done", f"제도 문서 검색: {hit.title}",
+                              steps=[f"제도 문서 1편에서 {len(ref_sections)}개 문단을 참조했어요: {hit.title}"],
+                              resource_refs=[r.ref for r in kb_res])
+                stages.start("explain")
+                markdown_text, kb_llm_used, kb_model, kb_latency_ms, kb_problems = answer_service.format_kb_answer(
+                    doc, hit, _llm_provider, banned,
+                    deadline_seconds=explain_service.CHAT_EXPLAIN_DEADLINE_SECONDS,
+                )
+                if kb_llm_used:
+                    stages.finish("explain", "done", f"Gemini {kb_model}, {kb_latency_ms}ms")
+                    explain_llm_used = True
+                    explain_model = kb_model
+                else:
+                    first_problem = kb_problems[0] if kb_problems else "규칙 렌더링"
+                    stages.finish("explain", "fallback", f"템플릿 문장 사용({first_problem})")
+                reply_text = markdown_text
+            chips.append(Chip(id=f"chip-kb-{hit.slug}", text=f"{hit.title} 자세히 보기", tier=1,
+                              intent="faq", params={"slug": hit.slug}))
+            action = {"type": "open_kb", "payload": {"slug": hit.slug, "title": hit.title,
+                                                    "sources": hit.sources or []}}
         else:
-            reply_text = (
-                "부채 상환표, 공시 비교, 시나리오, 행동 제안, 제도 안내 중 무엇이든 물어보세요. "
-                "예: '신용대출 공시 비교해줘', '금리 4% 이하만', '금리인하요구권 요건이 뭐야'"
+            route = "external"
+            time_sensitive = any(k in masked for k in _TIME_SENSITIVE_KEYWORDS)
+            reason_step = (
+                "시점성 질문이라 외부 검색을 사용했어요." if time_sensitive
+                else "내부 자료에서 답을 찾지 못해 외부 검색을 사용했어요."
             )
-            stages.finish("compute", "done", "해당 문서 없음")
-        chips.extend([
-            Chip(id="chip-chat-faq-compare", text="공시 비교하기", tier=1, intent="compare", params={}),
-            Chip(id="chip-chat-faq-debts", text="내 부채 보기", tier=1, intent="schedule", params={}),
-            Chip(id="chip-chat-faq-spending", text="소비 패턴 보기", tier=1, intent="spending", params={}),
-        ])
-        stages.start("explain")
-        stages.finish("explain", "skip", "규칙 문장")
+            stages.start("external")
+            text, ext_resources, ext_llm_used, ext_model, ext_problems, search_html = (
+                answer_service.external_answer(masked, _llm_provider, banned)
+            )
+            resources.extend(ext_resources)
+            grounded_ok = ext_llm_used and not ({"banned_term_removed", "no_grounding_sources"} & set(ext_problems))
+            if grounded_ok:
+                stages.finish("external", "done", f"Gemini {ext_model}, 출처 {len(ext_resources)}건",
+                              steps=[reason_step, f"출처 {len(ext_resources)}건을 모았어요."],
+                              resource_refs=[r.ref for r in ext_resources])
+                explain_llm_used = True
+                explain_model = ext_model
+            else:
+                first_problem = ext_problems[0] if ext_problems else "search_unavailable"
+                stages.finish("external", "fallback", f"그라운딩 대신 공식 링크 사용({first_problem})",
+                              steps=[reason_step, f"공식 안내 링크 {len(ext_resources)}건을 모았어요."],
+                              resource_refs=[r.ref for r in ext_resources])
+            reply_text = text
+            if search_html:
+                action = {"type": "search_suggestions", "payload": {"html": search_html}}
+        chips.extend(_static_faq_chips)
+
+    # ---- 여러 노드: 주 의도(내부 계산·화면 안내 의도)인데 발화에 제도 키워드가 뚜렷하게
+    # 들어있으면 kb 노드도 실행해 리소스와 칩을 함께 붙인다(SPEC 2.11, 예 "내 상황에서
+    # 금리인하요구권 쓸 수 있어?"). faq 자체는 위에서 이미 처리했으므로 대상이 아니다.
+    # `kb_search.search()`의 점수 대신 `find_institutional_keyword_doc`(발화에 문서
+    # keyword가 그대로 들어있는지)을 쓴다: 바이그램 점수는 "상환표 보여줘"가 학자금
+    # 문서와 우연히 크게 겹치는 것처럼 노이즈가 많아 이 "부가 참조" 판단에는 부적합하다.
+    if intent in _MULTI_NODE_ELIGIBLE_INTENTS:
+        extra_doc = answer_service.find_institutional_keyword_doc(masked)
+        if extra_doc is not None:
+            extra_sections = answer_service.kb_reference_sections(extra_doc)
+            extra_res = answer_service.kb_resources(extra_doc, extra_sections)
+            resources.extend(extra_res)
+            stages.start("kb")
+            stages.finish("kb", "done", f"제도 문서 검색: {extra_doc.title}",
+                          steps=[f"제도 문서 1편에서 참조했어요: {extra_doc.title}"],
+                          resource_refs=[r.ref for r in extra_res])
+            extra_chip_id = f"chip-kb-extra-{extra_doc.slug}"
+            if not any(c.id == extra_chip_id for c in chips):
+                chips.append(Chip(id=extra_chip_id, text=f"{extra_doc.title} 자세히 보기", tier=1,
+                                  intent="faq", params={"slug": extra_doc.slug}))
 
     # ---- check: 응답 점검 ----
     stages.start("check")
-    banned = insights_service.get_banned_terms()
     # KB 응답도 예외 없이 검사한다(2026-09-06 리뷰: kb_reply 우회는 kb/*.md에 실제
     # 금융회사명이 남아있어도 그대로 통과시키는 구멍이었다). kb/*.md는 이제 상호금융권 등
     # 개별 기관 실명을 쓰지 않으므로(SEV5 #3) 15개 문서 전부 이 검사를 통과해야 한다.
     if guardrails.check_text(reply_text, banned):
         stages.finish("check", "fallback", "금칙어 감지로 기본 안내로 대체")
         reply_text = "안내 문구를 표시할 수 없어 기본 안내로 대체했습니다. 메뉴에서 원하는 화면을 선택해주세요."
+        answer_format = "text"
     else:
         stages.finish("check", "done", "상품명·회사명·권유 표현 없음 확인")
 
     final_llm_used = llm_used or explain_llm_used
     final_model = explain_model or extract_model
-    return _ChatBuildResult(reply_text, chips, action, final_llm_used, stages.trace, final_model)
+    return _ChatBuildResult(
+        reply_text, chips, action, final_llm_used, stages.trace, final_model,
+        route=route, resources=resources, answer_format=answer_format,
+    )
 
 
 def _current_profile_id() -> str:
@@ -916,13 +1083,22 @@ def run_chat(
 
     built = _build_chat_reply(body.message, base_params=base_params, emit=emit)
 
+    # SPEC 2.11: route/resources/answer_format/model을 meta_json 한 컬럼에 함께 저장한다
+    # (chatlog.get_messages가 응답 메시지마다 이 네 값을 돌려준다).
+    meta = {
+        "route": built.route,
+        "resources": [r.model_dump(mode="json") for r in built.resources],
+        "answer_format": built.answer_format,
+        "model": built.model,
+    }
     chatlog.append_message(
         chat_id, "reply", built.reply_text, llm_used=built.llm_used, action=built.action,
-        chips=[c.model_dump(mode="json") for c in built.chips], trace=built.trace,
+        chips=[c.model_dump(mode="json") for c in built.chips], trace=built.trace, meta=meta,
     )
     return ChatReply(
         reply_text=built.reply_text, chips=built.chips, action=built.action, llm_used=built.llm_used,
         chat_id=chat_id, trace=built.trace, model=built.model,
+        route=built.route, resources=built.resources, answer_format=built.answer_format,
     )
 
 

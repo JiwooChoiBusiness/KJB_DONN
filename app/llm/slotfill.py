@@ -101,6 +101,10 @@ def validate(
     return problems
 
 
+# 값 뒤에 다시 붙으면 중복이 되는 단위(긴 것부터 검사한다).
+_UNIT_SUFFIXES = ("개월", "개", "원", "%", "세", "년")
+
+
 def fill(text: str, values: dict[str, str]) -> str:
     """text의 플레이스홀더를 values로 치환한다. 값이 없는 플레이스홀더가 남으면 KeyError.
 
@@ -121,6 +125,12 @@ def fill(text: str, values: dict[str, str]) -> str:
         out.append(text[pos:match.start()])
         out.append(value)
         pos = match.end()
+        # 단위 중복 제거: LLM이 "{candidates_total}개"처럼 값에 이미 붙은 단위를 한 번 더 쓰면
+        # "75개개"가 된다(2026-09-06 화면 실측). 값의 끝 단위와 같은 단위가 바로 이어지면 건너뛴다.
+        for unit in _UNIT_SUFFIXES:
+            if value.endswith(unit) and text.startswith(unit, pos):
+                pos += len(unit)
+                break
         fixed, consumed = _fix_josa_after(text[pos:], value)
         if consumed:
             out.append(fixed)

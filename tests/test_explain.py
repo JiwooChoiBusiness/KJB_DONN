@@ -353,3 +353,15 @@ def test_action_explain_success_unknown_action_and_after_session_clear(monkeypat
 
     r3 = client.post(f"/api/actions/{action_id}/explain")
     assert r3.status_code == 404
+
+
+def test_fill_drops_duplicated_unit_after_placeholder():
+    """LLM이 값에 이미 붙은 단위를 한 번 더 쓰면("{n}개" + "75개") 단위를 중복시키지 않는다."""
+    from app.llm import slotfill
+
+    assert slotfill.fill("상품 {n}개 중 {k}개를 골랐어요", {"n": "75개", "k": "3개"}) == "상품 75개 중 3개를 골랐어요"
+    assert slotfill.fill("금액 {a}원과 기간 {t}개월", {"a": "20,000,000원", "t": "36개월"}) == "금액 20,000,000원과 기간 36개월"
+    assert slotfill.fill("금리 {r}%로", {"r": "5.47%"}) == "금리 5.47%로"
+    # 단위가 아닌 글자는 건드리지 않는다
+    assert slotfill.fill("{n} 개월치", {"n": "3개"}) == "3개 개월치"
+

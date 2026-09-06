@@ -21,6 +21,11 @@ DEFAULT_KB_DIR = "kb"
 # 본문의 우연한 바이그램 한두 개 겹침으로는 넘지 못하도록 잡은 값이다.
 ANSWER_THRESHOLD = 3.0
 
+# SPEC 2.11: 답변 경로(internal/external) 결정에 쓰는 임계값. answer()가 이미 쓰던
+# ANSWER_THRESHOLD와 같은 값이며, app/services/answer.py와 app/api/routes.py가
+# "internal(KB로 답 가능)"과 "external(KB 미달)"을 가르는 데 이 이름으로 참조한다.
+MIN_SCORE = ANSWER_THRESHOLD
+
 DISCLAIMER = "제도 설명은 참고용이며 최신 내용은 관련 기관 안내를 확인하세요."
 
 REQUIRED_SECTIONS = (

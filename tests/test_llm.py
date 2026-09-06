@@ -306,10 +306,28 @@ def test_parse_message_intents():
 
 
 def test_parse_message_no_signal_falls_back_to_faq():
-    result = guardrails.parse_message("안녕하세요")
+    # SPEC 2.11: "안녕하세요"는 direct 키워드("안녕")를 포함하므로 더 이상 이 케이스가
+    # 아니다(아래 test_parse_message_direct_intent 참고). 여기서는 direct/부채 키워드
+    # 어디에도 걸리지 않는, 진짜 신호 없는 발화로 faq 폴백을 확인한다.
+    result = guardrails.parse_message("오늘 날씨가 좋네요")
     assert result["intent"] == "faq"
     assert "amount" not in result
     assert "category" not in result
+
+
+def test_parse_message_direct_intent():
+    """SPEC 2.11: 인사·잡담·"할 수 있는 일" 문의는 direct로 분류된다."""
+    assert guardrails.parse_message("안녕하세요")["intent"] == "direct"
+    assert guardrails.parse_message("반가워요")["intent"] == "direct"
+    assert guardrails.parse_message("고마워요")["intent"] == "direct"
+    assert guardrails.parse_message("뭐 할 수 있어?")["intent"] == "direct"
+    assert guardrails.parse_message("사용법 알려줘")["intent"] == "direct"
+
+
+def test_parse_message_direct_keyword_with_debt_topic_is_not_direct():
+    """direct 키워드가 있어도 부채 주제어가 함께 있으면 direct로 보지 않는다(SPEC 2.11)."""
+    result = guardrails.parse_message("빚 때문에 힘든데 고마워요")
+    assert result["intent"] != "direct"
 
 
 def test_parse_message_slots_without_intent_keyword_default_to_compare():
@@ -342,3 +360,21 @@ def test_gemini_live_extract_smoke():
     result = provider.extract("신용대출 공시 비교하고 싶어요", schema, "의도만 추출하세요.")
     assert result.data is not None
     assert result.data.get("intent") in ("compare", "faq")
+
+
+@skip_no_network
+def test_gemini_live_search_answer_smoke():
+    """SPEC 2.11 4절: Google 검색 그라운딩 실 호출 스모크. 무료 티어 429/503으로 체인
+    전체가 실패하면(2026-09-06 실측: 8키 전부 429) LLMUnavailable을 그대로 노출해
+    호출부가 아니라 이 테스트 자체가 실패하게 둔다(다른 live smoke 테스트와 동일한 방침).
+    """
+    provider = GeminiProvider.from_env()
+    assert provider.available()
+    system = (
+        "당신은 한국어 금융 정보 도우미입니다. 한국 금융 제도와 금리 등 일반 정보를 3문장 "
+        "이내로 답하세요. 특정 금융회사나 상품 이름을 말하지 말고 가입을 권유하지 마세요."
+    )
+    result = provider.search_answer("한국은행 기준금리 최근 결정", system)
+    assert result.text
+    assert isinstance(result.data, dict)
+    assert {"sources", "queries", "search_entry_point_html"} <= result.data.keys()

@@ -397,6 +397,21 @@ def _check_chat_expectation(
                         problems.append(f"grounded[{k}] 기대={v!r} 실제={params.get(k)!r}")
                         soft_only = not strict
 
+    # SPEC 2.11: route 기대값은 항상 soft로만 검사한다(응답 경로 분류는 KB 검색 점수처럼
+    # 결정적이지만 미묘한 값이라, 하드 실패로 빌드를 막기보다 회귀를 눈에 띄게 남기는
+    # 용도로 쓴다).
+    if "route" in expect:
+        got_route = body.get("route")
+        if got_route != expect["route"]:
+            problems.append(f"route 기대={expect['route']!r} 실제={got_route!r}")
+            soft_only = True
+
+    # SPEC 2.11: internal 응답이면 리소스 패널에 보여줄 자료가 최소 1건은 있어야
+    # 자연스럽다(비어 있어도 빌드를 막지는 않는다, soft).
+    if body.get("route") == "internal" and not body.get("resources"):
+        problems.append("internal 응답인데 resources가 비어 있음")
+        soft_only = True
+
     ok = not problems
     hard = not soft_only
     return ok, "; ".join(problems), hard

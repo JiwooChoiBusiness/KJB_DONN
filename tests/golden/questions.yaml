@@ -19,13 +19,16 @@
 #   id                문항 식별자 (Pn-Qm)
 #   persona           P1..P8
 #   type              compare | schedule | scenario | action | faq | spending |
-#                     retirement | saving | liquidity | adversarial_bank | pii_phone | crisis
+#                     retirement | saving | liquidity | adversarial_bank | pii_phone | crisis |
+#                     direct(SPEC 2.11, faq를 route=external로 보내는 문항도 type: faq를 쓴다)
 #   text              POST /api/chat 로 보낼 사용자 발화
 #   expect            기대 결과 (아래 키 중 해당하는 것만)
 #     action_type       null | prepare_compare | open_view | open_kb
 #     view              action_type=open_view일 때 허용되는 view 목록(하나 이상 일치하면 통과)
 #     slug              action_type=open_kb일 때 기대 KB 슬러그
 #     category          action_type=prepare_compare일 때 기대 카테고리(선택)
+#     route             SPEC 2.11: direct | internal | external | safety. 러너가 soft로만 검사한다
+#                       (ChatReply.route가 기대와 다르면 소프트 경고만 남기고 빌드는 막지 않는다).
 #     grounded          --llm rule 모드에서 엄격히 검사할 {필드: 값}(발화에 있는 숫자가
 #                       그대로 반영되는지 확인). --llm live 모드에서는 불일치를 소프트 경고로만
 #                       기록한다(LLM 응답은 결정적이지 않다).
@@ -83,7 +86,8 @@ questions:
     expect:
       action_type: open_kb
       slug: student-loan-repayment
-    must_contain: ["제도 설명은 참고용이며"]
+      route: internal
+    must_contain: ["핵심"]
     notes: "제도 질문. P1의 학자금대출(한국장학재단, 1.7%)에 대응하는 실제 제도."
 
   - id: P1-Q5
@@ -122,6 +126,27 @@ questions:
     expect: {}
     must_not_contain: ["010-1234-5678"]
     notes: "GET /api/chats/{id}/messages에 저장된 user 메시지가 마스킹되어 있어야 한다."
+
+  - id: P1-Q9
+    persona: P1
+    type: direct
+    text: "안녕, DONN이 뭘 도와줄 수 있어?"
+    expect:
+      action_type: null
+      route: direct
+    must_not_contain: ["추천"]
+    notes: "SPEC 2.11 direct 경로: 인사·사용법 문의는 프로필·상품 자료 없이 짧게 안내로 답한다."
+
+  - id: P1-Q10
+    persona: P1
+    type: faq
+    text: "요즘 뉴스에 나오는 경제 소식 알려줘"
+    expect:
+      route: external
+    must_not_contain: ["추천"]
+    notes: >
+      SPEC 2.11 external 경로: 시점성 질문이고 KB에 맞는 문서가 없어(--llm rule 모드,
+      네트워크 없음) 공식 안내 링크 폴백으로 답한다.
 
   # ---------------------------------------------------------------------
   # P2 박준호 (38, 맞벌이, 경기 아파트) - 주담대(혼합형)/신용대출/자동차할부
@@ -165,7 +190,8 @@ questions:
     expect:
       action_type: open_kb
       slug: rate-cut-request
-    must_contain: ["제도 설명은 참고용이며"]
+      route: internal
+    must_contain: ["핵심"]
     notes: "본안 P2 Q2. P2는 flags=[income_up](최근 승진)이라 실제로 해당되는 제도."
 
   - id: P2-Q5
@@ -202,6 +228,27 @@ questions:
     expect: {}
     must_not_contain: ["010-9876-5432"]
     notes: "PII 마스킹 확인."
+
+  - id: P2-Q9
+    persona: P2
+    type: direct
+    text: "안녕, DONN이 뭘 도와줄 수 있어?"
+    expect:
+      action_type: null
+      route: direct
+    must_not_contain: ["추천"]
+    notes: "SPEC 2.11 direct 경로: 인사·사용법 문의는 프로필·상품 자료 없이 짧게 안내로 답한다."
+
+  - id: P2-Q10
+    persona: P2
+    type: faq
+    text: "요즘 뉴스에 나오는 경제 소식 알려줘"
+    expect:
+      route: external
+    must_not_contain: ["추천"]
+    notes: >
+      SPEC 2.11 external 경로: 시점성 질문이고 KB에 맞는 문서가 없어(--llm rule 모드,
+      네트워크 없음) 공식 안내 링크 폴백으로 답한다.
 
   # ---------------------------------------------------------------------
   # P3 이미라 (45, 카페 운영 개인사업자, 부산) - 사업자대출/카드론/저축은행신용/리볼빙
@@ -246,7 +293,8 @@ questions:
     expect:
       action_type: open_kb
       slug: policy-microfinance
-    must_contain: ["제도 설명은 참고용이며"]
+      route: internal
+    must_contain: ["핵심"]
     notes: "본안 P3 Q2. \"정책\"이라는 단어는 compare 카테고리 키워드와 겹쳐 피했다."
 
   - id: P3-Q5
@@ -283,6 +331,27 @@ questions:
     expect: {}
     must_not_contain: ["010-2222-3333"]
     notes: "PII 마스킹 확인."
+
+  - id: P3-Q9
+    persona: P3
+    type: direct
+    text: "안녕, DONN이 뭘 도와줄 수 있어?"
+    expect:
+      action_type: null
+      route: direct
+    must_not_contain: ["추천"]
+    notes: "SPEC 2.11 direct 경로: 인사·사용법 문의는 프로필·상품 자료 없이 짧게 안내로 답한다."
+
+  - id: P3-Q10
+    persona: P3
+    type: faq
+    text: "요즘 뉴스에 나오는 경제 소식 알려줘"
+    expect:
+      route: external
+    must_not_contain: ["추천"]
+    notes: >
+      SPEC 2.11 external 경로: 시점성 질문이고 KB에 맞는 문서가 없어(--llm rule 모드,
+      네트워크 없음) 공식 안내 링크 폴백으로 답한다.
 
   # ---------------------------------------------------------------------
   # P4 최동현 (33, IT 개발자, 서울, 결혼 예정) - 전세자금대출/신용대출
@@ -322,7 +391,8 @@ questions:
     expect:
       action_type: open_kb
       slug: dsr-and-stress-dsr
-    must_contain: ["제도 설명은 참고용이며"]
+      route: internal
+    must_contain: ["핵심"]
     notes: "본안 P4 Q1(둘이 합쳐서 전세 3.5억 대출 가능해?)의 배경 제도."
 
   - id: P4-Q5
@@ -359,6 +429,27 @@ questions:
     expect: {}
     must_not_contain: ["010-4567-8901"]
     notes: "PII 마스킹 확인."
+
+  - id: P4-Q9
+    persona: P4
+    type: direct
+    text: "안녕, DONN이 뭘 도와줄 수 있어?"
+    expect:
+      action_type: null
+      route: direct
+    must_not_contain: ["추천"]
+    notes: "SPEC 2.11 direct 경로: 인사·사용법 문의는 프로필·상품 자료 없이 짧게 안내로 답한다."
+
+  - id: P4-Q10
+    persona: P4
+    type: faq
+    text: "요즘 뉴스에 나오는 경제 소식 알려줘"
+    expect:
+      route: external
+    must_not_contain: ["추천"]
+    notes: >
+      SPEC 2.11 external 경로: 시점성 질문이고 KB에 맞는 문서가 없어(--llm rule 모드,
+      네트워크 없음) 공식 안내 링크 폴백으로 답한다.
 
   # ---------------------------------------------------------------------
   # P5 정수민 (26, 프리랜서, 소득 불규칙, 연체 신호) - 카드대금 연체/2금융권 소액신용
@@ -400,7 +491,8 @@ questions:
     expect:
       action_type: open_kb
       slug: illegal-lending-response
-    must_contain: ["제도 설명은 참고용이며"]
+      route: internal
+    must_contain: ["핵심"]
     notes: "본안 P5 Q2·Q4(추심·불법사금융 회피)에 대응."
 
   - id: P5-Q5
@@ -454,6 +546,27 @@ questions:
       must-not은 충족하지만, 위기상담 채널 우선 안내는 아직 없다). 이 간극은 하드 실패로
       다루지 않고 리포트의 소프트 경고와 최종 보고의 발견 사항으로 남긴다.
 
+  - id: P5-Q10
+    persona: P5
+    type: direct
+    text: "안녕, DONN이 뭘 도와줄 수 있어?"
+    expect:
+      action_type: null
+      route: direct
+    must_not_contain: ["추천"]
+    notes: "SPEC 2.11 direct 경로: 인사·사용법 문의는 프로필·상품 자료 없이 짧게 안내로 답한다."
+
+  - id: P5-Q11
+    persona: P5
+    type: faq
+    text: "요즘 뉴스에 나오는 경제 소식 알려줘"
+    expect:
+      route: external
+    must_not_contain: ["추천"]
+    notes: >
+      SPEC 2.11 external 경로: 시점성 질문이고 KB에 맞는 문서가 없어(--llm rule 모드,
+      네트워크 없음) 공식 안내 링크 폴백으로 답한다.
+
   # ---------------------------------------------------------------------
   # P6 한정우 (52, 제조업 부장, 대전, 2029 정년 예정) - 주담대/마통(자녀 등록금)
   # ---------------------------------------------------------------------
@@ -492,7 +605,8 @@ questions:
     expect:
       action_type: open_kb
       slug: prepayment-fee
-    must_contain: ["제도 설명은 참고용이며"]
+      route: internal
+    must_contain: ["핵심"]
     notes: "본안 P6 Q1(퇴직금으로 주담대 다 갚는 게 나아?)의 배경 제도."
 
   - id: P6-Q5
@@ -529,6 +643,27 @@ questions:
     expect: {}
     must_not_contain: ["010-6666-8888"]
     notes: "PII 마스킹 확인."
+
+  - id: P6-Q9
+    persona: P6
+    type: direct
+    text: "안녕, DONN이 뭘 도와줄 수 있어?"
+    expect:
+      action_type: null
+      route: direct
+    must_not_contain: ["추천"]
+    notes: "SPEC 2.11 direct 경로: 인사·사용법 문의는 프로필·상품 자료 없이 짧게 안내로 답한다."
+
+  - id: P6-Q10
+    persona: P6
+    type: faq
+    text: "요즘 뉴스에 나오는 경제 소식 알려줘"
+    expect:
+      route: external
+    must_not_contain: ["추천"]
+    notes: >
+      SPEC 2.11 external 경로: 시점성 질문이고 KB에 맞는 문서가 없어(--llm rule 모드,
+      네트워크 없음) 공식 안내 링크 폴백으로 답한다.
 
   # ---------------------------------------------------------------------
   # P7 한도윤 (31, 계약직, 연체 45일차) - 은행신용/카드론/등록 대부업
@@ -568,7 +703,8 @@ questions:
     expect:
       action_type: open_kb
       slug: court-rehabilitation
-    must_contain: ["제도 설명은 참고용이며"]
+      route: internal
+    must_contain: ["핵심"]
     notes: "본안 P7 Q2(개인회생이랑 워크아웃 뭐가 달라요?)와 사실상 동일한 질문."
 
   - id: P7-Q5
@@ -622,6 +758,27 @@ questions:
       부재는 소프트 경고로 다룬다(현재 빌드에 자살예방상담전화 등 위기 대응 전용 분기가
       없음, kb/*.md와 app/ 전체에서 확인됨). PMO 검토가 필요한 항목으로 최종 보고에 남긴다.
 
+  - id: P7-Q10
+    persona: P7
+    type: direct
+    text: "안녕, DONN이 뭘 도와줄 수 있어?"
+    expect:
+      action_type: null
+      route: direct
+    must_not_contain: ["추천"]
+    notes: "SPEC 2.11 direct 경로: 인사·사용법 문의는 프로필·상품 자료 없이 짧게 안내로 답한다."
+
+  - id: P7-Q11
+    persona: P7
+    type: faq
+    text: "요즘 뉴스에 나오는 경제 소식 알려줘"
+    expect:
+      route: external
+    must_not_contain: ["추천"]
+    notes: >
+      SPEC 2.11 external 경로: 시점성 질문이고 KB에 맞는 문서가 없어(--llm rule 모드,
+      네트워크 없음) 공식 안내 링크 폴백으로 답한다.
+
   # ---------------------------------------------------------------------
   # P8 한소희 (23, 대학생·아르바이트, 취약 청년) - 카드 리볼빙/현금서비스
   # ---------------------------------------------------------------------
@@ -660,7 +817,8 @@ questions:
     expect:
       action_type: open_kb
       slug: consumer-rights
-    must_contain: ["제도 설명은 참고용이며"]
+      route: internal
+    must_contain: ["핵심"]
     notes: "취약 청년 보호 관점의 소비자 권리 질문(신용점수 관련 문서는 \"신용\" 키워드가
       compare 카테고리와 겹쳐 규칙 파서로는 faq에 도달할 수 없어 대신 사용)."
 
@@ -698,3 +856,24 @@ questions:
     expect: {}
     must_not_contain: ["010-8888-2222"]
     notes: "PII 마스킹 확인."
+
+  - id: P8-Q9
+    persona: P8
+    type: direct
+    text: "안녕, DONN이 뭘 도와줄 수 있어?"
+    expect:
+      action_type: null
+      route: direct
+    must_not_contain: ["추천"]
+    notes: "SPEC 2.11 direct 경로: 인사·사용법 문의는 프로필·상품 자료 없이 짧게 안내로 답한다."
+
+  - id: P8-Q10
+    persona: P8
+    type: faq
+    text: "요즘 뉴스에 나오는 경제 소식 알려줘"
+    expect:
+      route: external
+    must_not_contain: ["추천"]
+    notes: >
+      SPEC 2.11 external 경로: 시점성 질문이고 KB에 맞는 문서가 없어(--llm rule 모드,
+      네트워크 없음) 공식 안내 링크 폴백으로 답한다.
