@@ -324,9 +324,13 @@ def run_compare(
     target_loan = None
     if profile is not None and ctx.target_loan_id:
         target_loan = next((l for l in profile.loans if l.id == ctx.target_loan_id), None)
-    current_total_interest = (
-        build_schedule(target_loan).total_interest if target_loan is not None else None
-    )
+    # 현재 대출 대비 총이자 차이는 비교 금액이 대상 대출 잔액과 비슷할 때(10% 이내)만 계산한다.
+    # 잔액 2,400,000원짜리 카드론과 20,000,000원 신규 대출의 총이자를 그대로 빼면
+    # "현재보다 이자가 더 든다"는 엉뚱한 비교가 된다(2026-09-07 배포 화면 실측).
+    current_total_interest = None
+    if target_loan is not None and target_loan.balance > 0:
+        if abs(ctx.amount - target_loan.balance) <= target_loan.balance * 0.1:
+            current_total_interest = build_schedule(target_loan).total_interest
 
     eligible_products = ranking.eligible(prods, ctx)
     items = ranking.rank(eligible_products, ctx, params, current_total_interest=current_total_interest)

@@ -622,6 +622,17 @@ questions:
   # ---------------------------------------------------------------------
   # P6 한정우 (52, 제조업 부장, 대전, 2029 정년 예정) - 주담대/마통(자녀 등록금)
   # ---------------------------------------------------------------------
+  - id: P5-Q13
+    persona: P5
+    type: faq
+    text: "개인회생의 변제 기간은?"
+    expect:
+      action_type: open_kb
+      slug: court-rehabilitation
+      route: internal
+    must_contain: ["3년", "바로 답하면"]
+    notes: "문서 중간(절차 섹션)의 문장을 먼저 답해야 하는 질문. app/kb/focus.py가 잡는다(2026-09-07)."
+
   - id: P6-Q1
     persona: P6
     type: compare

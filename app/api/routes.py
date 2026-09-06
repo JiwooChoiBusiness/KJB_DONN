@@ -1243,15 +1243,17 @@ def _build_chat_reply(
                 ref_sections = answer_service.kb_reference_sections(
                     doc, limit=explain_service.KB_SECTION_LIMIT[detail],
                 )
+                kb_focus_hit = answer_service.kb_focus_hit(doc, masked)
                 kb_res = answer_service.kb_resources(doc, ref_sections)
                 resources.extend(kb_res)
                 stages.finish("kb", "done", f"{hit.title} 문서에서 {len(ref_sections)}개 문단을 참조했어요",
-                              steps=[f"제도 문서 1편에서 {len(ref_sections)}개 문단을 참조했어요: {hit.title}"],
+                              steps=[f"제도 문서 1편에서 {len(ref_sections)}개 문단을 참조했어요: {hit.title}"]
+                                    + ([f"질문과 가장 가까운 문단을 먼저 찾았어요({kb_focus_hit[0]})"] if kb_focus_hit else []),
                               resource_refs=[r.ref for r in kb_res])
                 stages.start("explain")
                 markdown_text, kb_llm_used, kb_model, kb_latency_ms, kb_problems = answer_service.format_kb_answer(
                     doc, hit, _llm_provider, banned,
-                    deadline_seconds=explain_service.CHAT_EXPLAIN_DEADLINE_SECONDS, detail=detail,
+                    deadline_seconds=explain_service.CHAT_EXPLAIN_DEADLINE_SECONDS, detail=detail, question=masked,
                 )
                 if kb_llm_used:
                     stages.finish("explain", "done", "설명을 썼어요", tech=f"Gemini {kb_model} · {_fmt_seconds(kb_latency_ms)}")

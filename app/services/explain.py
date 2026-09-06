@@ -782,7 +782,8 @@ def _template_compare(
     s2 = (
         f"{label_a}{slotfill.josa(label_a, '은/는')} 금리 {values['rate_a']}, "
         f"월 납입 {values.get('monthly_a', '확인 필요')}, "
-        f"총이자 {values.get('total_a', '확인 필요')}로 첫 번째예요."
+        f"총이자 {values.get('total_a', '확인 필요')}"
+        f"{slotfill.josa(values.get('total_a', '확인 필요'), '으로/로')} 첫 번째예요."
     )
     vs_sentence = _vs_sentence(top_items[0].vs_current_total_interest, values.get("vs_a")).strip()
     s3 = vs_sentence or "현재 대출과 비교할 정보가 없어 새 조건 기준으로만 안내해요."
@@ -797,7 +798,7 @@ def _template_compare(
         letter = _RANK_LETTER[idx]
         ordinal = _ORDINAL_KR[idx]
         sentence = (
-            f"{sort_basis} 기준 {ordinal}이에요. "
+            f"{sort_basis} 기준 {ordinal}{slotfill.josa(ordinal, '이에요/예요')}. "
             f"금리 {values.get(f'rate_{letter}', '확인 필요')}({_rate_kind_label(item)}), "
             f"월 납입 {values.get(f'monthly_{letter}', '확인 필요')}, "
             f"총이자 {values.get(f'total_{letter}', '확인 필요')}."

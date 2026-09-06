@@ -29,6 +29,7 @@ from app.data import products
 # `app/api/routes.py`와 같은 방식으로 패키지 전체를 임포트해 재노출된 이름들
 # (load_docs/search/MIN_SCORE/answer)을 속성으로 쓴다.
 from app import kb as kb_search
+from app.kb import focus as kb_focus
 from app.llm import guardrails, slotfill
 from app.llm.provider import LLMUnavailable
 from app.models import (
@@ -360,23 +361,37 @@ def _kb_usage_line(doc: Any) -> str:
     return f"이렇게 활용하세요: {procedure_sentence}"
 
 
-def _rule_based_kb_answer(doc: Any, sections: list[str]) -> tuple[str, list[str]]:
+def _rule_based_kb_answer(
+    doc: Any, sections: list[str], focus: Optional[tuple[str, str]] = None,
+) -> tuple[str, list[str]]:
     if not sections:
         return doc.title, []
-    summary = _first_clean_sentence(doc.sections.get(sections[0], ""))
+    focus_section, focus_text = focus if focus else (None, "")
+    focus_sentence = _first_clean_sentence(focus_text, max_len=220) if focus_text else ""
+    summary = focus_sentence or _first_clean_sentence(doc.sections.get(sections[0], ""))
     if not summary:
         summary = doc.title
     points = []
     for name in sections:
-        sentence = _first_clean_sentence(doc.sections.get(name, ""))
+        if name == focus_section and focus_sentence:
+            sentence = focus_sentence
+        else:
+            sentence = _first_clean_sentence(doc.sections.get(name, ""))
         if sentence:
             points.append(f"**{name}**: {sentence}")
     return summary, points
 
 
+def kb_focus_hit(doc: Any, question: str) -> Optional[tuple[str, str]]:
+    """질문에 직접 답하는 문단(섹션 제목, 문장). 없으면 None. routes의 노드 단계 문장에도 쓴다."""
+    if not question or not question.strip():
+        return None
+    return kb_focus.best_answer_sentence(doc, question)
+
+
 def format_kb_answer(
     doc: Any, hit: Any, provider: Any, banned: list[str], *, deadline_seconds: Optional[float] = None,
-    detail: str = "full",
+    detail: str = "full", question: str = "",
 ) -> tuple[str, bool, Optional[str], int, list[str]]:
     """KB 문서 1건으로 마크다운 답변을 만든다.
 
@@ -389,8 +404,13 @@ def format_kb_answer(
     section_limit = KB_SECTION_LIMIT[detail]
     summary_rule = LENGTH_RULES[detail]["kb_summary"]
     point_max_chars = KB_POINT_MAX_CHARS[detail]
+    # 질문에 직접 답하는 문단이 있으면 그 섹션을 맨 앞에 두고, 규칙 경로 요약도 그 문장으로 시작한다.
+    focus = kb_focus_hit(doc, question)
     sections = kb_reference_sections(doc, limit=section_limit)
-    rule_summary, rule_points = _rule_based_kb_answer(doc, sections)
+    if focus and focus[0] in (doc.sections or {}):
+        ordered = [focus[0]] + [n for n in kb_reference_sections(doc, limit=section_limit + 1) if n != focus[0]]
+        sections = ordered[:section_limit]
+    rule_summary, rule_points = _rule_based_kb_answer(doc, sections, focus)
 
     llm_used = False
     model: Optional[str] = None
@@ -403,13 +423,19 @@ def format_kb_answer(
         reference_text = "\n\n".join(f"[{name}]\n{doc.sections.get(name, '')}" for name in sections)
         reference_numbers = _number_tokens(reference_text)
         slots = {"title": doc.title, "sections": reference_text}
+        if question:
+            slots["question"] = question
         kwargs: dict[str, Any] = {"schema": KB_ANSWER_SCHEMA}
         if deadline_seconds is not None:
             kwargs["deadline_seconds"] = deadline_seconds
 
         started = time.monotonic()
         try:
-            result = provider.explain(slots, "kb_answer_v1", _kb_answer_system(detail), **kwargs)
+            system_text = _kb_answer_system(detail)
+            if question:
+                system_text += (" 사용자 질문(question)이 함께 주어지면 summary의 첫 문장은 그 질문에 직접 답하고, "
+                                "문단에 답이 없으면 '문서에 해당 내용이 없어요'라고 쓰세요.")
+            result = provider.explain(slots, "kb_answer_v1", system_text, **kwargs)
             latency_ms = int((time.monotonic() - started) * 1000)
         except LLMUnavailable:
             latency_ms = int((time.monotonic() - started) * 1000)
@@ -468,6 +494,10 @@ def format_kb_answer(
         problems.append("llm_unavailable")
 
     markdown = _render_kb_markdown(summary, points, doc.needs_verification, _kb_usage_line(doc))
+    if focus:
+        direct = _first_clean_sentence(focus[1], max_len=220)
+        if direct and not _kb_text_problems(direct, banned, 400):
+            markdown = f"**바로 답하면** {direct}\n\n" + markdown
     return markdown, llm_used, model, latency_ms, problems
 
 
