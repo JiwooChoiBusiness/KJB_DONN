@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from app.api.schemas import (ChatCreateRequest,
     ChatRequest,
     ComparePrepareRequest,
+    ExplainRequest,
     MetaResponse,
     OkResponse,
     PersonaSummary,
@@ -39,6 +40,7 @@ from app.models import (
     CompareContext,
     CompareResult,
     DecisionRecord,
+    ExplainResult,
     HomePayload,
     LenderGroup,
     LifecycleView,
@@ -52,6 +54,7 @@ from app.models import (
 from app.services import actions as actions_service
 from app.services import compare as compare_service
 from app.services import decisions as decisions_service
+from app.services import explain as explain_service
 from app.services import insights as insights_service
 from app.services import lifecycle as lifecycle_service
 from app.services import session as session_service
@@ -190,6 +193,23 @@ def get_actions() -> list[ActionCard]:
     return actions_service.list_actions(profile, params, today=date.today())
 
 
+@router.post("/actions/{action_id}/explain", response_model=ExplainResult)
+def post_action_explain(action_id: str, body: Optional[ExplainRequest] = None) -> ExplainResult:
+    """SPEC 2.8: 현재 프로필의 행동 카드 설명. 프로필 없음 또는 카드 없음이면 404.
+    첫 화면에서는 호출되지 않고, 사용자가 "AI 설명 보기"를 눌렀을 때만 호출된다."""
+    profile = session_service.get_profile()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="저장된 프로필이 없습니다.")
+    params = policy.load_policy_params()
+    refresh = body.refresh if body is not None else False
+    result = explain_service.explain_action(
+        action_id, _llm_provider, profile, params, today=date.today(), refresh=refresh,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"행동 카드를 찾을 수 없습니다: {action_id}")
+    return result
+
+
 # ---------------------------------------------------------------------------
 # 생애주기 층 (P7)
 # ---------------------------------------------------------------------------
@@ -223,6 +243,26 @@ def post_compare_run(ctx: CompareContext) -> CompareResult:
         return compare_service.run_compare(ctx, profile, today=date.today())
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/compare/{decision_id}/explain", response_model=ExplainResult)
+def post_compare_explain(decision_id: str, body: Optional[ExplainRequest] = None) -> ExplainResult:
+    """SPEC 2.8: 공시 비교 결과 설명. 저장된 설명이 있고 refresh가 아니면 LLM을
+    호출하지 않고 cached=true로 돌려준다. 결정 기록이 없으면 404."""
+    refresh = body.refresh if body is not None else False
+    result = explain_service.explain_compare(decision_id, _llm_provider, refresh=refresh)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"결정 기록을 찾을 수 없습니다: {decision_id}")
+    return result
+
+
+@router.get("/compare/{decision_id}/explain", response_model=ExplainResult)
+def get_compare_explain(decision_id: str) -> ExplainResult:
+    """저장된 설명만 돌려준다(생성하지 않음). 없으면 404."""
+    result = explain_service.get_stored("compare", decision_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="저장된 설명이 없습니다.")
+    return result
 
 
 # ---------------------------------------------------------------------------

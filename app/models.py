@@ -367,6 +367,31 @@ class ChatReply(BaseModel):
     llm_used: bool = False
     ai_notice: str = AI_NOTICE
     chat_id: Optional[str] = None  # 프로필(페르소나)별 대화 로그 식별자
+    trace: list[dict[str, Any]] = []  # 생각 과정(파이프라인 단계, SPEC 2.9). 종료 상태만
+    model: Optional[str] = None      # 실제 응답한 LLM 모델명(추출 또는 설명). 규칙 기반이면 None
+
+
+# ---------- 설명 문장 (슬롯 필링, SPEC 2.8) ----------
+class ExplainResult(BaseModel):
+    """LLM이 쓴(또는 템플릿) 설명 문장. 숫자는 항상 코드가 플레이스홀더에 채운 값이다(D4).
+
+    kind="compare"면 ref_id는 decision_id, kind="action"이면
+    "{profile_id}:{action_id}@{numbers 지문 앞 8자}"(카드 수치가 바뀌면 새 설명을 만든다).
+    """
+    kind: Literal["compare", "action"]
+    ref_id: str
+    summary: str                          # 2~3문장. 화면에 그대로 표시
+    item_reasons: dict[str, str] = {}     # compare만: {"1": 문장, "2": 문장, "3": 문장} (rank 문자열 키)
+    source: Literal["llm", "template"]
+    llm_used: bool = False
+    model: Optional[str] = None           # 실제 응답한 모델(modelVersion). 템플릿이면 None
+    latency_ms: int = 0
+    template_id: str                      # compare_summary_v1 | action_card_v1
+    prompt_version: str                   # 시스템 프롬프트 버전(감사용)
+    problems: list[str] = []              # LLM 문장을 버리고 템플릿으로 간 이유(검증 실패 코드). 성공이면 빈 리스트
+    cached: bool = False                  # 저장된 설명을 그대로 돌려줬으면 True
+    ai_notice: str = AI_NOTICE
+    created_at: datetime
 
 
 # ---------- 소비 패턴 (P5, SPEC 2.6) ----------

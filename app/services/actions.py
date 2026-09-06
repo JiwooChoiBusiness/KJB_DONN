@@ -59,6 +59,27 @@ _RATIO_PCT_LABELS: dict[str, str] = {
 }
 
 
+def format_action_number(key: str, value: Any) -> str:
+    """ActionCard.numbers의 원시 키/값 하나를 화면 표시용 문자열로 포맷한다.
+
+    `format_action_numbers`(한글 라벨 딕셔너리 생성)와 `app/services/explain.py`
+    (슬롯 필링 values, SPEC 2.8)가 같은 포맷 규칙을 공유하기 위해 분리했다.
+    """
+    if key in _RATIO_PCT_LABELS:
+        return f"{round(value * 100)}%"
+    if key in _PCT_LABELS:
+        return f"{value:.4g}%"
+    if key in _MONTHS_LABELS:
+        return f"{value:,}개월"
+    if key in _WON_LABELS:
+        return f"{value:,}원"
+    if isinstance(value, bool):
+        return "예" if value else "아니오"
+    if isinstance(value, (int, float)):
+        return f"{value:,}"
+    return str(value)
+
+
 def format_action_numbers(numbers: dict[str, Any]) -> dict[str, str]:
     """ActionCard.numbers(영문 키, 원시 숫자)를 "한글 라벨": "표시 문자열"로 바꾼다."""
     out: dict[str, str] = {}
@@ -66,20 +87,32 @@ def format_action_numbers(numbers: dict[str, Any]) -> dict[str, str]:
         if value is None:
             continue
         if key in _RATIO_PCT_LABELS:
-            out[_RATIO_PCT_LABELS[key]] = f"{round(value * 100)}%"
+            label = _RATIO_PCT_LABELS[key]
         elif key in _PCT_LABELS:
-            out[_PCT_LABELS[key]] = f"{value:.4g}%"
+            label = _PCT_LABELS[key]
         elif key in _MONTHS_LABELS:
-            out[_MONTHS_LABELS[key]] = f"{value:,}개월"
+            label = _MONTHS_LABELS[key]
         elif key in _WON_LABELS:
-            out[_WON_LABELS[key]] = f"{value:,}원"
-        elif isinstance(value, bool):
-            out[key] = "예" if value else "아니오"
-        elif isinstance(value, (int, float)):
-            out[key] = f"{value:,}"
+            label = _WON_LABELS[key]
         else:
-            out[key] = str(value)
+            label = key
+        out[label] = format_action_number(key, value)
     return out
+
+
+def _raw_actions(profile: UserProfile, params: PolicyParams, *, today: date) -> list[ActionCard]:
+    """포맷 전(numbers가 영문 키의 원시 숫자 그대로인) 행동 카드 목록.
+
+    `list_actions`가 이 결과의 numbers만 한국어 라벨로 포맷해 돌려준다(아래).
+    `app/services/explain.py`의 `explain_action`(SPEC 2.8)은 원시 숫자가 필요해
+    (플레이스홀더 값을 직접 포맷해야 하므로) 이 함수를 그대로 재사용한다.
+    """
+    schedules = [build_schedule(loan) for loan in profile.loans]
+    capacity = compute_capacity(profile, schedules)
+    all_thresholds = lifecycle_service.load_thresholds()
+    stage_result = lifecycle_core.classify_stage(profile, today=today)
+    thresholds = lifecycle_core.thresholds_for_stage(all_thresholds, stage_result.stage)
+    return evaluate_rules(profile, schedules, capacity, params, today=today, thresholds=thresholds)
 
 
 def list_actions(profile: UserProfile, params: PolicyParams, *, today: date) -> list[ActionCard]:
@@ -87,14 +120,10 @@ def list_actions(profile: UserProfile, params: PolicyParams, *, today: date) -> 
     화면 표시용 한국어 라벨로 포맷해 돌려준다(priority 오름차순, evaluate_rules 유지).
 
     R8(저축률 미달)·R9(원리금상환비율 초과)·R10(노후소득 충당률 미달)은 생애 단계별
-    임계값(`config/thresholds.yaml`)이 있어야 평가되므로(SPEC 2.7), 여기서 단계를
-    판정하고 임계값을 로드해 `evaluate_rules`에 넘긴다. 이전에는 `thresholds`를 넘기지
-    않아 `/api/actions`·`/api/home`에 R8~R10이 전혀 나타나지 않았다(2026-09-06 리뷰 지적).
+    임계값(`config/thresholds.yaml`)이 있어야 평가되므로(SPEC 2.7), `_raw_actions`가
+    단계를 판정하고 임계값을 로드해 `evaluate_rules`에 넘긴다. 이전에는 `thresholds`를
+    넘기지 않아 `/api/actions`·`/api/home`에 R8~R10이 전혀 나타나지 않았다(2026-09-06
+    리뷰 지적).
     """
-    schedules = [build_schedule(loan) for loan in profile.loans]
-    capacity = compute_capacity(profile, schedules)
-    all_thresholds = lifecycle_service.load_thresholds()
-    stage_result = lifecycle_core.classify_stage(profile, today=today)
-    thresholds = lifecycle_core.thresholds_for_stage(all_thresholds, stage_result.stage)
-    cards = evaluate_rules(profile, schedules, capacity, params, today=today, thresholds=thresholds)
+    cards = _raw_actions(profile, params, today=today)
     return [card.model_copy(update={"numbers": format_action_numbers(card.numbers)}) for card in cards]

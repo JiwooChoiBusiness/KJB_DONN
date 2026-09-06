@@ -90,6 +90,14 @@ CREATE TABLE IF NOT EXISTS spending_features (
     summary_json   TEXT NOT NULL,
     updated_at     TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS explanations (
+    kind          TEXT NOT NULL,
+    ref_id        TEXT NOT NULL,
+    payload_json  TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    PRIMARY KEY(kind, ref_id)
+);
 """
 
 

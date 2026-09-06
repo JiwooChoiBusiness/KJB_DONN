@@ -51,6 +51,13 @@ class OkResponse(BaseModel):
     ok: bool = True
 
 
+class ExplainRequest(BaseModel):
+    """POST /api/compare/{decision_id}/explain, POST /api/actions/{action_id}/explain 본문(선택,
+    SPEC 2.8). refresh=true면 저장된 설명이 있어도 새로 만들어 덮어쓴다."""
+
+    refresh: bool = False
+
+
 class SpendingAnalyzeRequest(BaseModel):
     """POST /api/spending/analyze 본문. 브라우저가 파싱·정규화한 거래내역만 받는다
     (SPEC 2.6 D3/D4: 서버는 이 요청 처리 중에만 메모리에서 계산하고 원본을 저장하지 않는다)."""

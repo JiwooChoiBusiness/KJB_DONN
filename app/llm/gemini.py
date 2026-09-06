@@ -71,6 +71,10 @@ class GeminiProvider:
         self.temperature = cfg.get("temperature", 0)
         self.timeout_seconds = cfg.get("timeout_seconds", 20)
         self.total_deadline_seconds = cfg.get("total_deadline_seconds", 12)
+        # explain(설명 문장 슬롯 필링, SPEC 2.8) 전용 체인 상한. extract/chat 경로의
+        # total_deadline_seconds와 분리해 화면이 "AI 설명 보기"를 기다리는 동안 더
+        # 여유 있게 재시도할 수 있게 한다.
+        self.explain_total_deadline_seconds = cfg.get("explain_total_deadline_seconds", 15)
         self.model_cooldown_seconds = cfg.get("model_cooldown_seconds", 120)  # 500/503이 반복된 모델은 잠시 건너뜀
         self.model_failure_threshold = cfg.get("model_failure_threshold", 2)  # 체인 전체 상한. 넘기면 규칙 파서 폴백
         # 429를 받은 (key_index) -> 쿨다운 해제 시각(time.monotonic() 기준). 프로세스
@@ -124,10 +128,16 @@ class GeminiProvider:
         headers = {"x-goog-api-key": self.keys[key_index], "Content-Type": "application/json"}
         return requests.post(url, headers=headers, json=body, timeout=timeout)
 
-    def _run_chain(self, body: dict) -> tuple[dict, str, int, int]:
-        """(응답 JSON, 모델명, 키 인덱스, 지연ms)를 반환한다. 모두 실패하면 LLMUnavailable."""
+    def _run_chain(self, body: dict, deadline_seconds: Optional[float] = None) -> tuple[dict, str, int, int]:
+        """(응답 JSON, 모델명, 키 인덱스, 지연ms)를 반환한다. 모두 실패하면 LLMUnavailable.
+
+        `deadline_seconds`를 생략하면 `self.total_deadline_seconds`(extract/chat 기본값)를
+        쓴다. `explain`(SPEC 2.8)은 `self.explain_total_deadline_seconds`로 이 값을
+        덮어써서 호출한다.
+        """
         if not self.available():
             raise LLMUnavailable("Gemini 키 또는 모델 체인이 설정되지 않았습니다.")
+        effective_deadline = self.total_deadline_seconds if deadline_seconds is None else deadline_seconds
 
         last_status: Optional[Any] = None
         chain_started = time.monotonic()
@@ -139,16 +149,16 @@ class GeminiProvider:
                 if self._is_cooling_down(key_index):
                     continue
                 elapsed = time.monotonic() - chain_started
-                if elapsed > self.total_deadline_seconds:
+                if elapsed > effective_deadline:
                     raise LLMUnavailable(
-                        f"체인 전체 시간 상한({self.total_deadline_seconds}s) 초과(last_status={last_status})."
+                        f"체인 전체 시간 상한({effective_deadline}s) 초과(last_status={last_status})."
                     )
                 # 요청별 타임아웃은 설정값(timeout_seconds)과 "남은 전체 예산"의 최솟값으로
                 # 줄인다. 그렇지 않으면 느린 요청 하나가 timeout_seconds(예: 20s)까지 그대로
-                # 붙잡고 있어, 체인 전체가 total_deadline_seconds를 크게 넘겨버릴 수 있다
+                # 붙잡고 있어, 체인 전체가 effective_deadline을 크게 넘겨버릴 수 있다
                 # (2026-09-06 리뷰 지적). 이렇게 하면 초과분은 마지막 한 번의 "짧은" 요청
                 # 정도로 제한된다.
-                deadline_remaining = self.total_deadline_seconds - elapsed
+                deadline_remaining = effective_deadline - elapsed
                 request_timeout = max(min(self.timeout_seconds, deadline_remaining), 0.001)
 
                 started = time.monotonic()
@@ -236,14 +246,31 @@ class GeminiProvider:
             usage=raw.get("usageMetadata") or {},
         )
 
-    def explain(self, slots: dict, template_id: str, system: str) -> LLMResult:
-        """범주형 슬롯만으로 설명 문장을 만든다(수치는 포함하지 않는다, D4)."""
+    def explain(self, slots: dict, template_id: str, system: str, schema: Optional[dict] = None) -> LLMResult:
+        """범주형 슬롯만으로 설명 문장을 만든다(수치는 포함하지 않는다, D4).
+
+        D4: `slots`는 호출자(`app.services.explain`)가 이미 `app.llm.slotfill.assert_no_digits`로
+        검증한 숫자 없는 facts/placeholders여야 한다. `schema`가 있으면 JSON 모드로 호출해
+        `LLMResult.data`를 채우고(없거나 파싱 실패면 `data=None`, 호출자가 `result.text`로
+        재시도), 체인 전체 시간 상한은 `explain_total_deadline_seconds`를 쓴다(extract/chat과
+        분리, SPEC 2.8).
+        """
         user_text = json.dumps({"template_id": template_id, "slots": slots}, ensure_ascii=False)
-        body = self._build_body(system, user_text, response_schema=None)
-        raw, model, key_index, latency_ms = self._run_chain(body)
+        body = self._build_body(system, user_text, response_schema=schema)
+        raw, model, key_index, latency_ms = self._run_chain(
+            body, deadline_seconds=self.explain_total_deadline_seconds
+        )
         text_out = _extract_text(raw)
+        data = None
+        if schema is not None and text_out:
+            try:
+                parsed = json.loads(text_out)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict):
+                data = parsed
         return LLMResult(
-            data=None,
+            data=data,
             text=text_out,
             model=raw.get("modelVersion") or model,
             key_index=key_index,

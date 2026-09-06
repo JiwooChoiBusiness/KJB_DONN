@@ -110,7 +110,7 @@ class _RuleOnlyProvider:
     def extract(self, text: str, schema: dict, system: str):  # noqa: ANN001
         raise LLMUnavailable("persona runner: --llm rule 모드")
 
-    def explain(self, slots: dict, template_id: str, system: str):  # noqa: ANN001
+    def explain(self, slots: dict, template_id: str, system: str, schema: Optional[dict] = None):  # noqa: ANN001
         raise LLMUnavailable("persona runner: --llm rule 모드")
 
     def health(self) -> dict:
@@ -506,6 +506,24 @@ def run_persona(
                 pr.add("replay-match-true", replay.get("match") is True)
                 pr.add("replay-hash-consistent",
                        replay.get("result_hash") == replay.get("replay_hash") == result2["result_hash"])
+
+            # ---- 설명 문장(슬롯 필링, SPEC 2.8): --llm rule에서는 _RuleOnlyProvider.explain이
+            # 항상 LLMUnavailable을 던지므로 템플릿 경로가 검사된다. 금칙어/em dash 전체 검사는
+            # soft(LLM 문장은 --llm live에서 예측 불가한 표현을 쓸 수 있어 정보성 경고로 둔다),
+            # "추천"(M0 절대 금지 표현) 부재는 summary/item_reasons에 한해 hard로 확인한다.
+            r4 = _timed(pr, "POST /api/compare/{id}/explain",
+                        lambda: client.post(f"/api/compare/{decision_id}/explain"))
+            pr.add("compare-explain-status", r4.status_code == 200, detail=f"status={r4.status_code}")
+            if r4.status_code == 200:
+                explain_body = r4.json()
+                explain_violations = find_text_violations(explain_body, banned)
+                pr.add("compare-explain-no-banned-text", not explain_violations, hard=False,
+                       detail="; ".join(explain_violations))
+                explain_prose = " ".join(
+                    [explain_body.get("summary", "")] + list((explain_body.get("item_reasons") or {}).values())
+                )
+                pr.add("compare-explain-no-recommend-word", RECOMMEND_WORD not in explain_prose,
+                       detail=f"{RECOMMEND_WORD!r} 포함" if RECOMMEND_WORD in explain_prose else "")
 
     # ---- 골든 질문 (채팅) ----
     chat_id: Optional[str] = None

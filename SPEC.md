@@ -176,6 +176,10 @@ schemas.py: `ComparePrepareRequest{intent: str, params: dict}`, `ChatRequest{mes
 | DELETE | /api/chats/{id} | `{ok}` | |
 | GET | /api/meta | `{credit_bands, categories, repay_methods, sort_keys, lender_groups}` | 화면 선택지 |
 | GET | /api/synthetic/{persona_id}/transactions.csv | text/csv | 합성 거래내역 |
+| POST | /api/compare/{decision_id}/explain | `ExplainResult` | body `{refresh?: bool}`(선택). 결정 기록 없으면 404. 저장된 설명이 있으면 LLM 호출 없이 `cached=true` |
+| GET | /api/compare/{decision_id}/explain | `ExplainResult` | 저장된 설명만. 없으면 404(생성하지 않음) |
+| POST | /api/actions/{action_id}/explain | `ExplainResult` | 현재 프로필의 행동 카드. 프로필 없음 또는 카드 없음이면 404 |
+| POST | /api/chat/stream | `text/event-stream` | body `{message, chat_id?}`. `stage`/`reply`/`error` 이벤트(2.9). 대화 로그 저장은 `/api/chat`과 동일 |
 
 main.py: `FastAPI(title="DONN PoC")`, `GET /` → `web/index.html`, `/static` → `web/`. 시작 시 `init_db()`.
 
@@ -370,6 +374,71 @@ KB 문서 3편 추가(`kb/national-pension-estimate.md`, `kb/retirement-pension-
 `isa_nontax_limit_general_krw`, `isa_nontax_limit_special_krw`,
 `isa_separate_tax_rate_pct`.
 
+### 2.8 설명 문장 (슬롯 필링, (f) 단계)
+
+원칙: LLM은 숫자를 보지도 쓰지도 않는다. 코드가 범주형 사실(facts)과 플레이스홀더 목록만 보내고, LLM은 `{amount}` 같은 플레이스홀더가 든 문장을 돌려주며, 코드가 검증한 뒤 숫자를 채운다. 검증에 실패하거나 LLM이 불가하면 템플릿 문장을 쓴다. 첫 화면 로드에서는 호출하지 않는다(사용자가 비교를 실행했거나 "AI 설명 보기"를 눌렀을 때만).
+
+- `app/llm/slotfill.py` (순수 문자열 처리, app.data/app.models 비의존)
+  - `PLACEHOLDER_RE = re.compile(r"\{([a-z][a-z_]*)\}")`. 플레이스홀더 이름은 소문자와 밑줄만(숫자 없음). 순위는 항목 라벨 글자를 따라 `_a`, `_b`, `_c` 접미사를 쓴다(`rate_a` = 첫 번째 항목 금리).
+  - `assert_no_digits(payload: Any) -> None`: 키, 값, 중첩 구조 어디에든 숫자 문자(0~9)가 있으면 `ValueError`. LLM으로 보내기 직전에 반드시 호출한다(D4 하드 불변식). 실패하면 호출하지 않고 템플릿으로 간다.
+  - `sanitize(text: str) -> str`: 앞뒤 공백 정리, 연속 공백 축약, em dash(—)와 en dash(–)를 공백으로 치환, 마크다운 기호(`*`, 백틱, 줄머리 `-`/`•`) 제거.
+  - `validate(text: str, allowed: set[str], banned: list[str], *, max_chars: int, max_sentences: int) -> list[str]`: 문제 코드 목록(빈 리스트면 통과). 코드: `empty`, `unknown_placeholder:<name>`, `digit_outside_placeholder`, `banned_term:<term>`, `forbidden_phrase:<phrase>`, `too_long`, `too_many_sentences`. 플레이스홀더를 제거한 나머지 문자열에 숫자가 하나라도 있으면 `digit_outside_placeholder`.
+  - `FORBIDDEN_PHRASES = ("추천", "가입하세요", "가입을 권", "갈아타세요", "권합니다", "권해드", "권장", "보장", "무조건", "최고의", "최선의", "가장 좋은", "가장 유리")`.
+  - `fill(text: str, values: dict[str, str]) -> str`: 플레이스홀더를 값으로 치환. 값이 없는 플레이스홀더가 남으면 `KeyError`.
+  - `josa(word: str, pair: str) -> str`: 받침 유무로 "은/는", "이/가", "을/를"을 고른다(템플릿용).
+- `app/services/explain.py`
+  - `PROMPT_VERSION = "explain-v1"`, `EXPLAIN_SYSTEM`(한국어 시스템 프롬프트: 숫자 금지와 플레이스홀더 필수, 상품명·회사명 금지, 권유 표현 금지, 입력에 없는 사실(우대조건·한도·심사·자격) 금지, 해요체, 요약 2~3문장·항목 이유 1문장, 특수 기호 금지).
+  - `COMPARE_SCHEMA = {"type":"OBJECT","properties":{"summary":{"type":"STRING"},"reasons":{"type":"ARRAY","items":{"type":"STRING"}}},"required":["summary","reasons"]}`, `ACTION_SCHEMA = {"type":"OBJECT","properties":{"summary":{"type":"STRING"}},"required":["summary"]}`.
+  - `compare_slots(result: CompareResult, profile: UserProfile | None) -> tuple[dict, dict, dict]` = (facts, placeholders, values). 상위 3개 항목만. facts는 전부 숫자 없는 문자열: category 라벨, sort_basis, has_current_loan(예/아니오), current_loan_type 라벨, estimated_fields 한글 라벨 목록, items[{label, lender_group, rate_kind 라벨, vs_current("현재보다 총이자 절감" | "현재보다 총이자 증가" | "현재 대출과 같음" | "비교 기준 없음"), notes}]. placeholders는 이름→설명(숫자 없는 한국어): amount, term_months, candidates_total, shown_count, label_a/b/c, rate_a/b/c, monthly_a/b/c, total_a/b/c, vs_a/b/c(vs_current가 없으면 제외). values는 코드가 포맷한 문자열: 금액 `f"{n:,}원"`, 금리 `f"{r:.4g}%"`, 기간 `f"{m}개월"`, 개수 `f"{n}개"`, vs는 절대값 금액.
+  - `action_slots(card: ActionCard, profile: UserProfile, capacity: Capacity) -> tuple[dict, dict, dict]`: facts = rule_id, title, gist(`RULE_GIST[rule_id]`, 숫자 없는 규칙 요지 문장), capacity_band 라벨(여유/보통/빠듯/부족), safe_mode(예/아니오), loan_type 라벨(관련 대출 첫 건). placeholders/values는 `card.numbers`의 원시 키(영문)를 이름으로 쓰고, 설명은 `app/services/actions.py`의 라벨 맵, 값은 같은 포맷터(`format_action_number(key, value) -> str` 신설, `format_action_numbers`가 이를 재사용)로 만든다. steps/assumptions/caveats(숫자 포함)는 보내지 않는다.
+  - `explain_compare(decision_id: str, provider, *, refresh: bool = False) -> ExplainResult | None`: `decisions.get`이 없으면 None. 저장된 설명이 있고 refresh가 아니면 `cached=True`로 반환. 아니면 `provider.explain(slots, template_id, EXPLAIN_SYSTEM, schema=COMPARE_SCHEMA)` → sanitize → validate(summary 300자·3문장, reason 140자·1문장) → fill. 하나라도 실패하면 전체를 템플릿으로(부분 혼합 없음) 가고 `problems`에 코드를 남긴다. `explanations` 테이블에 저장.
+  - `explain_action(action_id: str, provider, profile: UserProfile, params: PolicyParams, *, today: date, refresh: bool = False) -> ExplainResult | None`: `evaluate_rules` 원시 카드에서 id로 찾는다(없으면 None). ref_id = `f"{profile.id}:{action_id}@{hashing.fingerprint(card.numbers)[:8]}"`. 템플릿 폴백은 `card.summary` 그대로.
+  - `get_stored(kind: str, ref_id: str) -> ExplainResult | None`.
+  - 템플릿(`compare_summary_v1`): "{category} 공시 상품 {candidates_total} 중 {sort_basis}으로 상위 {shown_count}를 골랐어요. {label_a}은(는) 금리 {rate_a}, 월 납입 {monthly_a}, 총이자 {total_a}로 첫 번째예요." 뒤에 vs_a가 있으면 방향에 따라 "현재 대출보다 총이자를 {vs_a} 줄일 수 있는 조건이에요." 또는 "현재 대출보다 총이자가 {vs_a} 더 들어요."를, 추정 필드가 있으면 "금액과 기간은 프로필에서 추정한 값이라 조건 확인에서 바꿀 수 있어요."를 붙인다. 항목 이유 템플릿: "{sort_basis} 기준 {ordinal}이에요. 금리 {rate_x}({rate_kind}), 월 납입 {monthly_x}, 총이자 {total_x}." 뒤에 vs 문장.
+  - provider에 `explain`이 없거나 `available()`이 False면 LLM을 호출하지 않고 템플릿(`llm_used=False`, `source="template"`, `problems=["llm_unavailable"]`).
+- `app/llm/provider.py`: `explain(slots: dict, template_id: str, system: str, schema: dict | None = None) -> LLMResult`. schema가 있으면 JSON 모드(`responseMimeType`/`responseSchema`)로 호출하고 `data`를 채운다. `config/llm.yaml`의 `explain_total_deadline_seconds`(기본 15)를 이 호출의 체인 상한으로 쓴다(`_run_chain(body, deadline_seconds=...)`).
+- `app/data/db.py`: 테이블 `explanations(kind TEXT NOT NULL, ref_id TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(kind, ref_id))`. payload_json은 `ExplainResult.model_dump(mode="json")`.
+- 결정 기록, `result_hash`, replay는 바뀌지 않는다(설명은 별도 테이블이며 `CompareItem`/`CompareResult`에 필드를 추가하지 않는다).
+- 로그: 모델명, 키 인덱스, 지연, 검증 문제 코드만 남긴다. 사용자 발화와 프로필 수치는 이 경로에 등장하지 않는다.
+
+### 2.9 대화 화면 스트리밍과 생각 과정 (P4b)
+
+목적: 사용자가 메시지를 보내면 대화 화면으로 전환되고, 응답이 만들어지는 동안 파이프라인 단계("생각 과정")가 실시간으로 보이며, 응답 문장이 순서대로 나타난다. 생각 과정은 LLM의 내부 사고가 아니라 코드 파이프라인의 실제 단계·소요 시간·폴백 여부다(정직성 원칙: 없는 사고를 꾸며 보여주지 않는다).
+
+- `POST /api/chat/stream` body `ChatRequest{message, chat_id?}` → `text/event-stream`(Server-Sent Events). 프레임은 `event: <name>
+data: <json 한 줄>
+
+`.
+  - `stage`: `{"id": "guard"|"intent"|"compute"|"explain"|"check", "label": str, "status": "start"|"done"|"fallback"|"skip", "detail": str, "ms": int}`. 같은 id로 `start` 뒤에 `done`/`fallback`/`skip`이 한 번 온다.
+    - `guard` "발화 점검": PII 마스킹과 위기 신호 확인. detail 예 "개인정보 마스킹 완료", "위기 신호 감지: 공적 상담 안내로 전환".
+    - `intent` "의도·조건 추출": done detail "Gemini {model}, {ms}ms, 의도: {의도 라벨}"; fallback detail "규칙 파서로 대체(LLM 응답 없음)".
+    - `compute` "계산 엔진": 의도별 detail. compare "비교 조건 준비: {카테고리}, 금액 {amount}, 기간 {term}(추정 {n}개)" / 후속 질의 "이전 조건에서 {바뀐 항목}만 변경" / action "행동 규칙 R0~R10 평가: {n}건, 최우선 {rule_id}" / faq "제도 안내 검색: {title}" 또는 "해당 문서 없음" / retirement·saving·liquidity "재무비율·노후자금 계산" / schedule·scenario·spending "화면 안내". detail에는 코드가 계산한 숫자가 들어가도 된다(사용자 화면용이며 LLM으로 가지 않는다).
+    - `explain` "설명 작성": done detail "Gemini {model}, {ms}ms"; fallback detail "템플릿 문장 사용({problems 첫 코드})"; skip detail "규칙 문장"(설명 생성을 쓰지 않는 의도).
+    - `check` "응답 점검": done detail "상품명·회사명·권유 표현 없음 확인"; fallback detail "금칙어 감지로 기본 안내로 대체".
+  - `reply`: `ChatReply` JSON(`/api/chat`과 동일, `chat_id` 포함) + `trace`(종료 상태 stage 목록, 순서대로) + `model`(설명 또는 추출에 실제 응답한 모델명, 없으면 null).
+  - `error`: `{"message": str}` 뒤 스트림 종료.
+- 구현: `_build_chat_reply(message, base_params=None, emit=None)`에 stage 콜백을 추가한다. 스트림 엔드포인트는 이 함수를 워커 스레드에서 실행하고 `queue.Queue`로 stage 이벤트를 받아 즉시 내보낸 뒤, 대화 로그 저장(`/api/chat`과 동일)을 마치고 `reply`를 보낸다. `POST /api/chat`은 그대로 두되 응답 `ChatReply`에 `trace`와 `model`이 추가로 실린다.
+- 대화 로그: `chat_messages.trace_json TEXT`(없으면 `init_db`가 `PRAGMA table_info`로 확인해 `ALTER TABLE ... ADD COLUMN`). `GET /api/chats/{id}/messages`의 각 응답 메시지에 `trace` 배열이 실린다.
+- 설명 생성 연결(2.8 재사용):
+  - `compare` 의도(예·적금 제외): 조건 준비 뒤 `explain.explain_chat_compare(ctx, followup_changed, provider)`로 안내 문장을 만든다. template_id `chat_compare_prep_v1`, facts = 카테고리 라벨, 추정 필드 라벨 목록, 후속 질의로 바뀐 항목 라벨 목록, 금리 상한 유무("예"/"아니오"), 제외 회사 유무. placeholders = amount, term_months, max_rate(있을 때만). 출력 스키마 `{"summary": STRING}`, 검증은 220자·2문장. 폴백은 기존 템플릿 문장. 이 호출의 체인 상한은 `config/llm.yaml`의 `chat_explain_deadline_seconds`(기본 8). 설명 문장 뒤에 "아래 버튼으로 조건을 확인하고 실행해보세요." 같은 유도 문장은 코드가 붙인다(LLM은 화면 구조를 모른다). `explanations` 테이블에는 저장하지 않는다(대화 로그가 기록).
+  - `action` 의도(최우선 카드가 있을 때): `explain.explain_action(top.id, provider, profile, params, today=...)`의 `summary`를 응답 문장으로 쓴다(저장·캐시 규칙은 2.8과 같다). LLM 실패 시 `card.summary`.
+  - 그 밖의 의도는 `explain` 단계 skip.
+  - `ChatReply.llm_used`는 추출 또는 설명 중 하나라도 LLM이 성공했으면 True.
+- `LLMProvider.explain`에 선택 인자 `deadline_seconds: float | None = None`을 둔다(없으면 `explain_total_deadline_seconds`).
+- D4: 이 경로에서 LLM으로 가는 것은 마스킹된 발화(추출)와 숫자 없는 facts/placeholders(설명)뿐이다.
+
+### 2.10 배포 준비와 브라우저 전용 모드(보류)
+
+**상태(2026-09-06 PMO 결정)**: 서버 배포는 Render(`render.yaml`)로 진행한다. 이 절의 브라우저 전용 모드(Pyodide 브리지, 정적 번들, Pages 워크플로)는 보류하며, 시드 데이터·자동 적재·CORS·PORT 항목만 유효하다. `app/bridge.py`, `web/static-mode.js`, `.github/workflows/pages.yml`, `scripts/build_static_bundle.py`는 만들지 않는다.
+
+목적(보류된 설계): 서버 없이 GitHub Pages 주소에서 앱 전체를 실행한다. 방문자의 브라우저 안에서 Pyodide(파이썬 WebAssembly)가 `app/` 패키지를 그대로 실행하고, 화면은 같은 `web/`를 쓴다. 서버가 없으므로 세션은 브라우저마다 독립이고 키는 어디에도 저장되지 않는다(방문자가 원하면 설정에서 Gemini 키를 넣고, 키는 그 브라우저의 localStorage에만 남는다. 없으면 규칙 기반 모드).
+
+- 데이터: `seed/products_seed.json.gz`(공시 상품 스냅샷, 공개 데이터만. 프로필·결정·대화는 절대 포함하지 않는다). `scripts/export_seed.py`가 현재 DB에서 각 카테고리 조회(`products.query`)에 실제로 쓰이는 최신 스냅샷(소스별)만 골라 만든다. `app/data/products.py::import_seed(path) -> dict`(snapshots·products에 INSERT OR IGNORE, 건수 반환), `ensure_seed_loaded(path="seed/products_seed.json.gz") -> bool`(products 테이블이 비어 있을 때만 적재). `app/main.py` lifespan은 `DONN_SEED_ON_EMPTY`(기본 "1")면 시작 시 이를 호출하고, `DONN_AUTOLOAD_PRODUCTS=1`이고 금감원·공공데이터 키가 있으면 백그라운드 스레드로 실 적재(`scripts.load_products.load_snapshot`)를 추가로 돌린다. `DONN_CORS_ORIGINS`(쉼표 구분)가 있으면 CORSMiddleware를 붙인다. `run.py`는 `DONN_PORT`가 없으면 `PORT`(PaaS 관례)를 본다.
+- 브리지: `app/bridge.py::dispatch(method, path, query=None, body=None) -> {"status": int, "body": str, "content_type": str}`. `app.api.routes.router.routes`를 순회해 각 `APIRoute`의 `path_regex`로 경로를 맞추고 엔드포인트 함수를 직접 호출한다(FastAPI/Starlette 실행 계층과 스레드풀 없음). 경로 인자와 쿼리는 시그니처 애너테이션(`Query` 기본값 포함)으로 변환하고, pydantic 모델 인자는 `model_validate_json(body)`(선택 인자면 body 없을 때 None)로 만든다. `HTTPException` → status/detail, `ValidationError` → 422(FastAPI와 같은 `{"detail": [...]}`), pydantic 모델 → `model_dump_json`, list/dict → json, `Response` → body/media_type. 모든 라우트가 브리지로 호출 가능해야 하며 `tests/test_bridge.py`가 라우트 커버리지(모든 APIRoute가 매칭됨)와 TestClient 응답 동일성(JSON 엔드포인트 표본)을 검사한다. 대화 스트리밍은 `bridge.chat_with_trace(body_json, emit) -> str`가 `routes.run_chat(body, emit=emit)`(2.9)을 직접 호출한다(SSE·스레드 없음). `run_chat`이 아직 없으면 `post_chat`으로 대신한다.
+- 브라우저: `web/static-mode.js`(웹 워커에서 Pyodide 0.29 로드, 번들 압축 해제, 패키지 `pydantic`·`requests`·`pyyaml`·`fastapi` 로드, `python-dotenv`는 `sys.modules` 스텁, `DONN_DB_PATH=/tmp/donn.db`, 시드 적재, `dispatch`·`chat_with_trace` 호출을 postMessage로 중계). `web/app.js`의 `apiGet/apiSend`와 대화 스트림 클라이언트는 정적 모드면 워커로 보낸다. 정적 모드 판정: `window.DONN_STATIC === true`(index.html 스크립트가 github.io 호스트이거나 `?static=1`일 때 설정). 로딩 오버레이("브라우저 안에서 계산 엔진을 준비하는 중", 단계별 진행), 설정 모달의 Gemini 키 입력(localStorage 저장, 워커에 전달해 provider 재생성), 상단 배지("브라우저 실행 모드").
+- 배포: `.github/workflows/pages.yml`이 main push마다 `scripts/build_static_bundle.py`로 `app/`, `config/`, `kb/`, `seed/`를 `donn_bundle.zip`으로 묶어 `web/` 내용과 함께 Pages 아티팩트로 올린다(Pages 소스: GitHub Actions). 앱 소스는 번들에만 들어가고 키는 어디에도 없다.
+- 제약: 첫 로드 10~20초(이후 브라우저 캐시), 새로고침하면 세션·대화가 초기화된다(IndexedDB 영속화는 후속), Gemini 호출은 방문자 브라우저에서 직접 나간다(요청 본문은 서버 모드와 동일: 마스킹된 발화와 숫자 없는 facts).
+
 ## 3. 화면 규격 (web/)
 
 - 단일 페이지, 빌드 없음. `index.html`, `app.js`, `styles.css`. 글꼴은 Pretendard(jsdelivr CDN, 오프라인이면 system-ui·"Malgun Gothic" 폴백). 그 외 외부 CDN 의존 없음.
@@ -386,6 +455,11 @@ KB 문서 3편 추가(`kb/national-pension-estimate.md`, `kb/retirement-pension-
 - 결정 기록: 목록과 버튼 "재현" → 일치 여부 표시.
 - 채팅 입력: `POST /api/chat` → 응답 텍스트, 칩, action(`open_view`, `prepare_compare`) 처리. LLM 미연결 시 "규칙 기반 응답" 배지.
 - 접근성: 버튼 aria-label, Enter로 전송. 375px에서 사이드바 접힘.
+
+- 설명 문장(2.8): 공시 비교 2단계는 결과(숫자)를 먼저 그린 뒤 `POST /api/compare/{decision_id}/explain`을 호출해 "왜 이 순서인가요?" 블록을 채운다(대기 중 "AI가 계산 결과를 읽고 설명을 쓰는 중이에요" 자리표시, 완료 후 `source`에 따라 "AI 응답" 또는 "규칙 기반 설명" 배지와 모델명·지연 표시). 상위 3개 항목 카드에는 `item_reasons[rank]` 한 줄을 넣는다. 응답 실패(네트워크)면 블록을 조용히 숨긴다. 다른 비교를 실행하거나 화면을 떠났으면 늦게 도착한 응답은 버린다(decision_id 대조). 결정 기록 상세는 `GET`으로 저장된 설명만 보여준다(없으면 생략, 생성하지 않음). 행동 카드(홈 top_action 카드, 행동 제안 목록)에는 "AI 설명 보기" 버튼이 있고, 클릭했을 때만 `POST /api/actions/{id}/explain`을 호출한다(첫 화면 LLM 0회 유지). 모든 설명 블록 옆에 AI 고지가 보인다.
+- 대화 화면(2.9): 라우트 `#chat`. 사용자가 홈 입력창에서 메시지를 보내면 즉시 `#chat`으로 전환한다(홈 자체는 그대로, 첫 화면 LLM 0회 유지). 구성: 상단 헤더(뒤로 가기 → 홈, 대화 제목, "Gemini 체인" 모델 라벨), 가운데 대화 스레드(사용자 말풍선은 오른쪽, 응답은 왼쪽), 하단에 고정된 입력 카드(홈과 같은 카드, 375px에서도 하단 고정). 사이드바 "최근"에서 대화를 열면 `#chat`으로 간다.
+- 응답 렌더링 순서: (1) 사용자 말풍선 추가 → (2) "생각 과정" 블록이 `stage` 이벤트마다 갱신된다(진행 중 스피너, done 체크, fallback 주의 색, skip 흐리게. 각 줄은 label, detail, ms) → (3) `reply`가 오면 블록을 한 줄 요약("생각 과정 5단계 · 3.2초", 클릭해 펼침)으로 접고 응답 문장을 타자 효과로 표시한다(글자당 8~15ms, 전체 2.5초 이내가 되도록 속도 조절, 클릭하면 즉시 전체 표시) → (4) 인라인 액션 카드(prepare_compare: 조건 요약과 "조건 확인하고 비교하기" 버튼, open_view: 이동 버튼, open_kb: 기존 제도 안내 카드) → (5) 칩 행. 자동 화면 이동은 하지 않는다(버튼으로 이동하고 뒤로 가기로 대화에 복귀).
+- 배지: `llm_used`면 "AI 응답"과 모델명, 아니면 "규칙 기반 응답". AI 고지는 대화 화면에도 보인다. 저장된 대화를 다시 열면 각 응답의 trace가 접힌 상태로 표시된다. 스트림 실패(비 2xx, 네트워크)면 `POST /api/chat`으로 폴백해 생각 과정 없이 같은 렌더링을 한다.
 
 ## 4. 골든 벡터 (tests)
 
@@ -447,3 +521,6 @@ python run.py 3676       # Claude Code 테스트용
   R10(노후소득 충당률 미달)이 `GET /api/actions`·`GET /api/home`에도 나타날 수 있다.
 - `app/core/loan.py::prepay_fee`에 선택 인자 `params: PolicyParams | None = None`을
   추가했다(있으면 `prepay_fee_period_months`를 분모로 쓰고, 없으면 기존처럼 36).
+- (설명 문장 보강) `app/models.py::ExplainResult` 신설, 2.8절 추가. `LLMProvider.explain`에 선택 인자 `schema`가 생겼다(없으면 기존처럼 텍스트). `config/llm.yaml`에 `explain_total_deadline_seconds`(15)를 추가했다. `db.explanations` 테이블 신설. API 표에 `/api/compare/{decision_id}/explain`(POST, GET)과 `/api/actions/{action_id}/explain`(POST)을 추가했다. 화면 규격 3절 마지막 항목 참고.
+- (대화 스트리밍) 2.9절 추가. `ChatReply`에 `trace: list[dict] = []`, `model: str | None = None`을 추가했다. `chat_messages.trace_json` 컬럼(마이그레이션). `POST /api/chat/stream` 신설. `config/llm.yaml`에 `chat_explain_deadline_seconds`(8). `LLMProvider.explain`에 `deadline_seconds` 선택 인자.
+- (배포 준비) 2.10절 추가. `seed/products_seed.json.gz`, `scripts/export_seed.py` 신설, `app/main.py`에 시드 적재·자동 적재·CORS 환경변수와 DB 폴더 생성, `run.py`에 `PORT` 지원. 브라우저 전용 모드(Pyodide)는 PMO 결정으로 보류(설계만 2.10절에 남김).
