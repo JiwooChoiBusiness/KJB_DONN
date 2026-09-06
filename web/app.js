@@ -788,7 +788,7 @@ async function renderHome() {
 
   const hero = h('div', { class: 'home-hero' });
   hero.appendChild(h('h1', { class: 'home-title' }, 'DONN'));
-  hero.appendChild(h('p', { class: 'home-subtitle' }, '걱정을 덜어드리는 AI Agent'));
+  hero.appendChild(h('p', { class: 'home-subtitle' }, '부채 걱정을 덜어드리는 금융 AI Agent'));
   root.appendChild(hero);
 
   const cardsWrap = h('div', { class: 'insight-cards-wrap' });
