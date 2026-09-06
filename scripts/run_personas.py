@@ -37,7 +37,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -54,6 +54,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.api import routes as routes_module  # noqa: E402
 from app.data import db as db_module  # noqa: E402
+from app.data import synthetic  # noqa: E402
 from app.llm.provider import LLMUnavailable  # noqa: E402
 from app.llm.gemini import GeminiProvider  # noqa: E402
 from app.llm import guardrails  # noqa: E402
@@ -500,6 +501,26 @@ def run_persona(
 
     r = _timed(pr, "GET /api/spending", lambda: client.get("/api/spending"))
     pr.add("spending-get-status", r.status_code == 200, detail=f"status={r.status_code}")
+
+    # ---- 대화창 파일 첨부 (SPEC 2.12, P3 1회만 soft 검사) ----
+    if persona_id == "P3":
+        attach_transactions = synthetic.generate_transactions(persona_id, months=3, seed=42, end=date.today())
+        r = _timed(
+            pr, "POST /api/chat/attach",
+            lambda: client.post("/api/chat/attach", json={
+                "filename": f"{persona_id}_거래내역.csv", "months": 3,
+                "transactions": [t.model_dump(mode="json") for t in attach_transactions],
+            }),
+        )
+        pr.add("chat-attach-status", r.status_code == 200, hard=False, detail=f"status={r.status_code}")
+        if r.status_code == 200:
+            attach_body = r.json()
+            pr.add("chat-attach-markdown", attach_body.get("answer_format") == "markdown", hard=False,
+                   detail=f"answer_format={attach_body.get('answer_format')!r}")
+            attach_violations = find_text_violations(attach_body, banned)
+            pr.add("chat-attach-no-banned-text", not attach_violations, hard=False,
+                   detail="; ".join(attach_violations))
+            client.delete(f"/api/chats/{attach_body['chat_id']}")
 
     # ---- 공시 비교: prepare -> confirm -> run x2 -> replay ----
     r = _timed(

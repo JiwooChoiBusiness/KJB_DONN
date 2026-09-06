@@ -17,7 +17,8 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
-from app.api.schemas import (ChatCreateRequest,
+from app.api.schemas import (ChatAttachRequest,
+    ChatCreateRequest,
     ChatRequest,
     ComparePrepareRequest,
     ExplainRequest,
@@ -597,6 +598,10 @@ def _build_lifecycle_chat_reply(
 _CRISIS_CONTACTS = {
     "self_harm": "자살예방상담전화 109(24시간), 정신건강위기상담 1577-0199",
     "financial": "신용회복위원회 1600-5500(채무조정 상담), 서민금융콜센터 1397, 불법 추심 신고 금융감독원 1332",
+    # 2026-09-06 러너 소프트 경고 해소: financial 위기 응답에도 마음 건강 상담 채널을
+    # 강요하지 않는 어조("~해도 돼요")로 한 줄 붙인다(P5-Q9, tests/golden/questions.yaml
+    # "crisis-channel-mentioned" 검사). self_harm 분기는 이미 위 줄을 쓰므로 그대로 둔다.
+    "mental_health": "정신건강위기상담 1577-0199나 자살예방상담전화 109",
 }
 _FOLLOWUP_KEYS = ("category", "amount", "term_months", "sort_key", "repay_method", "rate_type", "credit_band",
                   "lender_groups", "exclude_companies", "max_rate", "target_loan_id")
@@ -617,7 +622,8 @@ def _crisis_reply(level: str, profile: Optional[UserProfile]) -> tuple[str, list
                 f"{_CRISIS_CONTACTS['financial']}에서 무료로 상담받을 수 있어요.")
         return text, chips, None
     text = ("지금 상황이 많이 버거우실 것 같아요. 연체나 독촉이 있을 때는 새 대출보다 공적 상담이 먼저입니다. "
-            f"{_CRISIS_CONTACTS['financial']}. ")
+            f"{_CRISIS_CONTACTS['financial']}. "
+            f"마음이 많이 힘들면 {_CRISIS_CONTACTS['mental_health']}에 먼저 연락해도 돼요. ")
     if profile is not None:
         text += "홈의 안전 모드 카드에 오늘 할 수 있는 일 한 가지를 정리해 두었어요."
     else:
@@ -738,13 +744,6 @@ class _StageEmitter:
 
 def _fmt_seconds(ms: int) -> str:
     return f"{ms / 1000:.1f}초"
-
-
-def _fmt_disclosure_month(raw: str) -> str:
-    """공시 기준월 원시 값("202608" 같은 YYYYMM)을 "2026년 8월"로. 형식이 다르면 그대로."""
-    if len(raw) == 6 and raw.isdigit():
-        return f"{raw[:4]}년 {int(raw[4:6])}월"
-    return raw
 
 
 def _explain_stage_detail(result: ExplainResult) -> tuple[str, str, str]:
@@ -945,7 +944,7 @@ def _build_chat_reply(
                     disclosure_month = next(
                         (it.disclosure_month for it in catalog_items if it.disclosure_month), "",
                     )
-                    month_prefix = f"{_fmt_disclosure_month(disclosure_month)} " if disclosure_month else ""
+                    month_prefix = f"{answer_service.format_disclosure_month(disclosure_month)} " if disclosure_month else ""
                     stages.finish(
                         "products", "done",
                         f"{month_prefix}공시 상품 {len(catalog_items)}건을 골랐어요",
@@ -1195,6 +1194,34 @@ def _current_profile_id() -> str:
     return profile.id if profile is not None else chatlog.GUEST_PROFILE_ID
 
 
+def _append_reply_message(
+    chat_id: str,
+    reply_text: str,
+    *,
+    llm_used: bool,
+    action: Optional[dict[str, Any]],
+    chips: list[Chip],
+    trace: list[dict[str, Any]],
+    route: str,
+    resources: list[ChatResource],
+    answer_format: str,
+    model: Optional[str],
+) -> None:
+    """대화 로그에 응답 메시지 1건을 저장한다. route/resources/answer_format/model은
+    meta_json 한 컬럼에 함께 저장된다(SPEC 2.11, `chatlog.get_messages`가 응답 메시지마다
+    이 네 값을 돌려준다). `run_chat`과 `post_chat_attach`(SPEC 2.12)가 이 함수를 공유한다."""
+    meta = {
+        "route": route,
+        "resources": [r.model_dump(mode="json") for r in resources],
+        "answer_format": answer_format,
+        "model": model,
+    }
+    chatlog.append_message(
+        chat_id, "reply", reply_text, llm_used=llm_used, action=action,
+        chips=[c.model_dump(mode="json") for c in chips], trace=trace, meta=meta,
+    )
+
+
 def run_chat(
     body: ChatRequest,
     emit: Optional[Callable[[dict[str, Any]], None]] = None,
@@ -1227,17 +1254,10 @@ def run_chat(
 
     built = _build_chat_reply(body.message, base_params=base_params, emit=emit, cancel_event=cancel_event)
 
-    # SPEC 2.11: route/resources/answer_format/model을 meta_json 한 컬럼에 함께 저장한다
-    # (chatlog.get_messages가 응답 메시지마다 이 네 값을 돌려준다).
-    meta = {
-        "route": built.route,
-        "resources": [r.model_dump(mode="json") for r in built.resources],
-        "answer_format": built.answer_format,
-        "model": built.model,
-    }
-    chatlog.append_message(
-        chat_id, "reply", built.reply_text, llm_used=built.llm_used, action=built.action,
-        chips=[c.model_dump(mode="json") for c in built.chips], trace=built.trace, meta=meta,
+    _append_reply_message(
+        chat_id, built.reply_text, llm_used=built.llm_used, action=built.action, chips=built.chips,
+        trace=built.trace, route=built.route, resources=built.resources,
+        answer_format=built.answer_format, model=built.model,
     )
     return ChatReply(
         reply_text=built.reply_text, chips=built.chips, action=built.action, llm_used=built.llm_used,
@@ -1323,6 +1343,74 @@ def post_chat_stream(body: ChatRequest) -> StreamingResponse:
 
     headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
+
+
+@router.post("/chat/attach", response_model=ChatReply)
+def post_chat_attach(body: ChatAttachRequest) -> ChatReply:
+    """SPEC 2.12: 대화창에 첨부한 거래내역을 즉시 분석해 소비 패턴 요약을 답변으로
+    돌려준다. `/api/spending/analyze`와 같은 프라이버시 원칙(원본 거래내역 미저장, 요약·
+    피처만 저장)을 따르고 LLM을 호출하지 않는다(추출·설명 어느 쪽도 쓰지 않으므로 호출
+    횟수 제한 대상이 아니다 - `app/main.py`의 제한 목록에도 이 경로는 없다). 세션 프로필이
+    없으면 `_profile_or_guest()`로 게스트 프로필을 쓴다."""
+    t0 = time.monotonic()
+    n = len(body.transactions)
+    masked_filename = guardrails.mask_pii(body.filename)
+    t1 = time.monotonic()
+
+    profile = _profile_or_guest()
+    months = body.months or 3
+    summary, features = spending_service.analyze(
+        body.transactions, profile, end=date.today(), months=months,
+    )
+    spending_service.save(profile.id, summary, features)
+    t2 = time.monotonic()
+
+    markdown = answer_service.format_spending_answer(summary, features, profile, months)
+    banned = insights_service.get_banned_terms()
+    if guardrails.check_text(markdown, banned) or any(p in markdown for p in slotfill.FORBIDDEN_PHRASES):
+        markdown = "분석 요약을 표시할 수 없어 소비 패턴 화면에서 확인해 주세요."
+        check_status, check_detail, answer_format = "fallback", "표현 문제가 있어 기본 안내로 바꿨어요", "text"
+    else:
+        check_status, check_detail, answer_format = "done", "상품 이름이나 권유 표현이 없는지 확인했어요", "markdown"
+    t3 = time.monotonic()
+
+    resources = [
+        answer_service.calc_resource(
+            "소비 패턴 분석", profile.id, f"{summary.period_start}~{summary.period_end}, 거래 {n}건",
+        ),
+        *answer_service.profile_resources(profile),
+    ]
+    chips = [Chip(id="chip-chat-attach-spending", text="소비 패턴 자세히 보기", tier=1, intent="spending", params={})]
+    action: dict[str, Any] = {"type": "open_view", "payload": {"view": "spending"}}
+    trace = [
+        {"id": "attach_read", "label": "파일 확인", "status": "done", "detail": f"거래 {n}건을 읽었어요",
+         "ms": int((t1 - t0) * 1000), "tech": "", "steps": [f"첨부 파일에서 거래 {n}건을 확인했어요."],
+         "resource_refs": []},
+        {"id": "attach_calc", "label": "소비 패턴 계산", "status": "done", "detail": "카테고리·정기 결제·급증을 계산했어요",
+         "ms": int((t2 - t1) * 1000), "tech": "", "steps": ["카테고리·정기 결제·급증 항목을 계산했어요."],
+         "resource_refs": [r.ref for r in resources]},
+        {"id": "check", "label": "마지막 점검", "status": check_status, "detail": check_detail,
+         "ms": int((t3 - t2) * 1000), "tech": "", "steps": [], "resource_refs": []},
+    ]
+
+    chat_id = body.chat_id
+    if chat_id:
+        chat = chatlog.get_chat(chat_id)
+        if chat is None or chat["profile_id"] != profile.id:
+            chat_id = None
+    if not chat_id:
+        chat_id = chatlog.create_chat(profile.id, title=f"파일 첨부: {masked_filename[:30]}")["id"]
+
+    chatlog.append_message(chat_id, "user", f"파일 첨부: {masked_filename[:60]} ({n}행)")
+    _append_reply_message(
+        chat_id, markdown, llm_used=False, action=action, chips=chips, trace=trace,
+        route="internal", resources=resources, answer_format=answer_format, model=None,
+    )
+
+    return ChatReply(
+        reply_text=markdown, chips=chips, action=action, llm_used=False, chat_id=chat_id, trace=trace,
+        model=None, route="internal", resources=resources, answer_format=answer_format,
+    )
 
 
 @router.get("/chats")

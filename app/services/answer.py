@@ -31,10 +31,21 @@ from app.data import products
 from app import kb as kb_search
 from app.llm import guardrails, slotfill
 from app.llm.provider import LLMUnavailable
-from app.models import ChatResource, PolicyParams, ProductCategory, UserProfile
+from app.models import (
+    ChatResource,
+    PolicyParams,
+    ProductCategory,
+    SpendingFeatures,
+    SpendingSummary,
+    UserProfile,
+)
 # insights.py가 이미 만들어 둔 공공·업권 일반어 판별 어휘를 재사용한다(SEV4 2026-09-06
 # 리뷰: external 요약의 "OO은행"류 패턴 검사가 같은 기준으로 오탐을 피하게 한다).
 from app.services.insights import _PUBLIC_TOKENS, _SECTOR_WORDS
+# app/core/spending.py의 생애 이벤트 라벨 맵을 그대로 재사용한다(SPEC 2.12: 대화창 파일
+# 첨부 답변도 같은 문구를 쓴다 - app/api/routes.py가 answer.py를 이미 import하는 것과
+# 같은 방식으로 app/core 쪽의 준-비공개 상수를 직접 참조한다).
+from app.core.spending import _LIFE_EVENT_LABELS
 
 _CATEGORY_LABELS_KR: dict[str, str] = {
     "deposit": "예금", "saving": "적금", "mortgage": "주택담보대출",
@@ -104,12 +115,22 @@ def kb_resources(doc_or_hit: Any, sections: list[str]) -> list[ChatResource]:
     )]
 
 
+def format_disclosure_month(raw: str) -> str:
+    """공시 기준월 원시 값("202608" 같은 YYYYMM)을 "2026년 8월"로 바꾼다. 형식이 다르면
+    그대로 돌려준다. `app/api/routes.py`의 답변 파이프라인도 이 함수를 그대로 써서
+    포맷 로직을 한 곳(answer.py)으로 통일한다(2026-09-06 보강)."""
+    if len(raw) == 6 and raw.isdigit():
+        return f"{raw[:4]}년 {int(raw[4:6])}월"
+    return raw
+
+
 def products_resource(category: ProductCategory) -> ChatResource:
     """공시 상품 스냅샷 리소스 1건. `products.query(category)`의 건수와 공시 기준월을 쓴다."""
     items = products.query(category)
     disclosure_month = next((it.disclosure_month for it in items if it.disclosure_month), "")
     category_label = _CATEGORY_LABELS_KR.get(category.value, category.value)
-    detail = f"{disclosure_month} 공시, {category_label}" if disclosure_month else f"{category_label} 공시"
+    month_label = format_disclosure_month(disclosure_month) if disclosure_month else ""
+    detail = f"{month_label} 공시, {category_label}" if month_label else f"{category_label} 공시"
     snapshot_ids = sorted({it.snapshot_id for it in items})
     return ChatResource(
         kind="products",
@@ -629,3 +650,52 @@ def build_direct_answer(
     if problems:
         return DIRECT_ANSWER_FALLBACK_TEXT, False, None, latency_ms, problems
     return sanitized, True, result.model, latency_ms, []
+
+
+# ---------------------------------------------------------------------------
+# 대화창 파일 첨부 답변 (SPEC 2.12) - LLM 미사용, 코드 템플릿
+# ---------------------------------------------------------------------------
+
+
+def format_spending_answer(
+    summary: SpendingSummary, features: SpendingFeatures, profile: UserProfile, months: int,
+) -> str:
+    """`POST /api/chat/attach` 응답 마크다운을 코드 템플릿으로 만든다(LLM 호출 없음).
+
+    숫자는 전부 `app/core/spending.py`가 계산한 값이고 이 함수는 문장만 조립한다.
+    가맹점 이름(마스킹된 것 포함)은 쓰지 않고 카테고리 라벨과 생애 이벤트 라벨만 쓴다
+    (app/core/spending.py의 라벨 맵을 그대로 재사용).
+    """
+    avg = summary.avg_monthly_spend
+    if profile.monthly_income > 0:
+        pct = round(avg / profile.monthly_income * 100)
+        headline = f"최근 {months}개월 월평균 지출은 {avg:,}원이고 월소득의 {pct}%예요."
+    else:
+        headline = f"최근 {months}개월 월평균 지출은 {avg:,}원이에요."
+
+    points: list[str] = []
+
+    top_categories = [c for c in summary.categories if c.amount > 0][:2]
+    if top_categories:
+        parts = ", ".join(f"{c.category.value} {round(c.share * 100)}%" for c in top_categories)
+        points.append(f"지출이 가장 많은 카테고리는 {parts}예요.")
+
+    if features.subscription_count > 0:
+        points.append(
+            f"정기 결제 {features.subscription_count}건의 월 합계는 {features.subscription_total:,}원이에요."
+        )
+
+    if summary.anomalies:
+        top_anomaly = sorted(summary.anomalies, key=lambda a: -a.change_pct)[0]
+        points.append(f"{top_anomaly.category.value} 지출이 전월보다 {round(top_anomaly.change_pct)}% 늘었어요.")
+
+    if summary.life_events:
+        top_event = sorted(summary.life_events, key=lambda e: -e.confidence)[0]
+        label = _LIFE_EVENT_LABELS.get(top_event.kind, "최근 지출 패턴에 변화가 있었어요")
+        points.append(f"{label}.")
+
+    lines = [headline, "", "**핵심**"]
+    lines.extend(f"- {p}" for p in points)
+    lines.append("")
+    lines.append("원본 거래내역은 저장하지 않고 요약만 남겨요.")
+    return "\n".join(lines)

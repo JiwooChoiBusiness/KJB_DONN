@@ -24,6 +24,18 @@ class ChatCreateRequest(BaseModel):
     title: Optional[str] = None
 
 
+class ChatAttachRequest(BaseModel):
+    """POST /api/chat/attach 본문(SPEC 2.12). 브라우저가 소비 패턴 화면과 같은 파서·열
+    자동 매핑으로 정규화한 거래 행만 받는다(원본 파일은 서버로 오지 않는다). chat_id가
+    없거나 현재 프로필 소유가 아니면 새 대화를 만든다. 행 수 상한은 /api/spending/analyze에
+    아직 명시적 상한이 없어 이 요청 전용으로 10,000행을 둔다(초과 시 422)."""
+
+    chat_id: Optional[str] = None
+    filename: str = Field(max_length=120)
+    months: Optional[int] = 3
+    transactions: list[Transaction] = Field(max_length=10_000)
+
+
 class ReplayResponse(BaseModel):
     match: bool
     result_hash: str
