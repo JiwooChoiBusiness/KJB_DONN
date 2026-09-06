@@ -1,0 +1,11 @@
+.venv
+.git
+.claude
+.env
+data/donn.db
+data/cache
+__pycache__
+**/__pycache__
+.pytest_cache
+docs/reports
+tests

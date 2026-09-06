@@ -1,0 +1,20 @@
+# GitHub Pages(Jekyll) 설정. Pages는 정적 파일만 서빙하므로 이 저장소에서는 README를 랜딩 페이지로만 쓴다.
+# 앱 자체(FastAPI 백엔드)는 docs/DEPLOY.md의 방법으로 별도 호스트에 배포한다.
+title: DONN PoC
+description: 생성형 LLM 기반 개인 부채 코치 데모 (KJB_DONN)
+exclude:
+  - app
+  - tests
+  - scripts
+  - config
+  - kb
+  - web
+  - docs/reports
+  - run.py
+  - run.bat
+  - requirements.txt
+  - Dockerfile
+  - render.yaml
+  - CLAUDE.md
+  - .claude
+  - .env.example

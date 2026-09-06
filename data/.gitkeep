@@ -1,0 +1,1 @@
+# data/ 폴더를 저장소에 유지하기 위한 빈 파일. DB(*.db)와 cache/는 .gitignore로 제외된다.
