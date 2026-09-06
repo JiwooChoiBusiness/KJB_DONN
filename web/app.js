@@ -256,6 +256,12 @@ function focusMainAfterRender() {
   try { main.focus({ preventScroll: true }); } catch (_) { main.focus(); }
 }
 
+/* 다른 화면에서 넘어와 특정 구간을 보여줘야 할 때 쓴다. 옵션을 못 받는 브라우저도 있어 감싼다. */
+function scrollNodeIntoView(node, block) {
+  if (!node || !node.scrollIntoView) return;
+  try { node.scrollIntoView({ block: block || 'start' }); } catch (_) { node.scrollIntoView(); }
+}
+
 /* ---------- 2. 포맷 헬퍼 ---------- */
 
 function fmtWon(n) {
@@ -542,7 +548,13 @@ const Api = {
   getActions: () => apiGet('/actions'),
   getLifecycle: () => apiGet('/lifecycle'),
   comparePrepare: (intent, params) => apiSend('POST', '/compare/prepare', { intent, params: params || {} }),
-  compareRun: (ctx) => apiSend('POST', '/compare/run', ctx),
+  /* SPEC 2.14: 이 세션에서 직전에 실행한 비교의 decision_id 를 함께 보내면
+     서버가 CompareResult.delta(전후 비교)를 채워 준다. 없으면 쿼리를 붙이지 않는다. */
+  compareRun: (ctx, previousDecisionId) => apiSend(
+    'POST',
+    `/compare/run${previousDecisionId ? `?previous_decision_id=${encodeURIComponent(previousDecisionId)}` : ''}`,
+    ctx,
+  ),
   productsStats: () => apiGet('/products/stats'),
   getDecisions: (limit) => apiGet(`/decisions${limit ? `?limit=${encodeURIComponent(limit)}` : ''}`),
   getDecision: (id) => apiGet(`/decisions/${encodeURIComponent(id)}`),
@@ -590,12 +602,22 @@ const state = {
   },
   compare: {
     context: null, result: null, step: 1, queuedPrepareParams: null,
+    /* SPEC 2.14: 이 세션에서 마지막으로 실행한 비교의 decision_id.
+       다음 실행에 쿼리로 실어 보내면 서버가 전후 비교(delta)를 만들어 준다. */
+    lastDecisionId: null,
     /* 설명 문장(SPEC 2.8): decisionId 를 대조해 늦게 온 응답을 버린다. */
     explain: { decisionId: null, status: 'idle', data: null },
   },
   /* 행동 카드 "AI 설명 보기" 캐시: action_id -> ExplainResult (첫 화면 로드에서는 채우지 않는다) */
   actionExplains: {},
-  debts: { selectedLoanId: null, editingLoanId: null, schedule: null, pendingFocusLoanId: null },
+  /* pendingFocus 는 화면을 열자마자 어느 구간으로 시선을 옮길지 알려주는 힌트다
+     ('scenario' | 'schedule', SPEC 2.13 / 2.15의 "시나리오로 확인하기"). */
+  debts: {
+    selectedLoanId: null, editingLoanId: null, schedule: null,
+    pendingFocusLoanId: null, pendingFocus: null,
+  },
+  /* 결정 기록: focusId 가 있으면 그 행을 자동으로 펼치고 스크롤한다(SPEC 2.14 "이전 결과 보기"). */
+  decisions: { focusId: null },
   /* 소비 패턴: data 는 서버 응답 {summary, features, cards},
      upload 는 브라우저에서 읽은 파일의 파싱 상태(서버로 보내지 않는다). */
   spending: {
@@ -1381,15 +1403,30 @@ function buildLoansSection(profile, hasProfile) {
   wrap.appendChild(scheduleArea);
   wrap.appendChild(buildLoanForm(profile, hasProfile));
 
-  if (state.debts.pendingFocusLoanId) {
-    const pendingId = state.debts.pendingFocusLoanId;
-    state.debts.pendingFocusLoanId = null;
-    if (loans.some((l) => l.id === pendingId)) {
-      setTimeout(() => selectLoan(pendingId, profile, scheduleArea), 0);
-    }
+  /* 다른 화면(칩, "시나리오로 확인하기" 버튼)에서 넘어온 힌트를 처리한다.
+     대출을 지정했으면 그 대출을, 아니면 금리가 가장 높은 대출을 열어 시나리오까지 보여준다. */
+  const pendingId = state.debts.pendingFocusLoanId;
+  const pendingFocus = state.debts.pendingFocus;
+  state.debts.pendingFocusLoanId = null;
+  state.debts.pendingFocus = null;
+  let focusLoanId = null;
+  if (pendingId && loans.some((l) => l.id === pendingId)) focusLoanId = pendingId;
+  else if (pendingFocus && loans.length) focusLoanId = highestRateLoanId(loans);
+  if (focusLoanId) {
+    setTimeout(() => selectLoan(focusLoanId, profile, scheduleArea, pendingFocus), 0);
   }
 
   return wrap;
+}
+
+/* 추가 상환 대상은 서비스 계산과 같게 금리가 가장 높은 대출로 본다(SPEC 2.15). */
+function highestRateLoanId(loans) {
+  let best = null;
+  (loans || []).forEach((l) => {
+    if (!l || !l.id) return;
+    if (!best || Number(l.annual_rate || 0) > Number(best.annual_rate || 0)) best = l;
+  });
+  return best ? best.id : null;
 }
 
 function buildLoanRow(loan, profile) {
@@ -1429,7 +1466,8 @@ function buildLoanRow(loan, profile) {
   return tr;
 }
 
-async function selectLoan(loanId, profile, scheduleArea) {
+/* focusSection('scenario' | 'schedule')이 있으면 다 그린 뒤 그 구간으로 화면을 옮긴다. */
+async function selectLoan(loanId, profile, scheduleArea, focusSection) {
   state.debts.selectedLoanId = loanId;
   document.querySelectorAll('#loansTbody tr').forEach((tr) => tr.classList.toggle('selected', tr.dataset.loanId === loanId));
   if (!scheduleArea) scheduleArea = document.getElementById('scheduleArea');
@@ -1458,9 +1496,12 @@ async function selectLoan(loanId, profile, scheduleArea) {
   if (!scenRes.ok) {
     scheduleArea.appendChild(noticeBox('시나리오를 불러오지 못했습니다.', { error: true }));
   } else {
-    scheduleArea.appendChild(h('h3', { class: 'section-title' }, '시나리오 요약'));
+    scheduleArea.appendChild(h('h3', { class: 'section-title', id: 'scenarioSection' }, '시나리오 요약'));
     scheduleArea.appendChild(buildScenarioTable(scenRes.data));
   }
+
+  if (focusSection === 'scenario') scrollNodeIntoView(document.getElementById('scenarioSection'), 'start');
+  else if (focusSection === 'schedule') scrollNodeIntoView(scheduleArea, 'start');
 }
 
 function buildScheduleTable(schedule) {
@@ -1820,7 +1861,7 @@ function buildCompareStep1(ctx) {
     clearNode(msgSlot);
     submitBtn.disabled = true;
     submitBtn.textContent = '비교하는 중...';
-    const res = await Api.compareRun(newCtx);
+    const res = await Api.compareRun(newCtx, state.compare.lastDecisionId);
     submitBtn.disabled = false;
     submitBtn.textContent = '이 조건으로 비교';
     state.compare.context = newCtx;
@@ -1829,6 +1870,7 @@ function buildCompareStep1(ctx) {
       return;
     }
     state.compare.result = res.data;
+    if (res.data && res.data.decision_id) state.compare.lastDecisionId = res.data.decision_id;
     state.compare.step = 2;
     state.compare.explain = { decisionId: null, status: 'idle', data: null };
     renderCompare();
@@ -2033,9 +2075,90 @@ function renderCompareExplain(slot, result, data) {
   });
 }
 
+/* ---- 이전 결과와 비교(SPEC 2.14) ----
+   서버가 previous_decision_id 를 받아 만든 CompareDelta 만 그린다.
+   숫자는 전부 서버 계산값이고 화면은 포맷과 색만 맡는다. */
+
+function deltaRow(label, valueNode) {
+  return h('div', { class: 'compare-delta-row' },
+    h('dt', {}, label),
+    h('dd', {}, valueNode));
+}
+
+function isNum(v) {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
+/* "1,200,000원 → 1,050,000원 (-150,000원)". 줄어들면 긍정색, 늘어나면 부정색. */
+function deltaMoneyValue(before, after) {
+  if (!isNum(before) || !isNum(after)) return null;
+  const diff = after - before;
+  const wrap = h('span', {}, `${fmtWon(before)} → ${fmtWon(after)}`);
+  if (diff === 0) {
+    wrap.appendChild(h('span', { class: 'compare-delta-diff' }, '(변화 없음)'));
+    return wrap;
+  }
+  wrap.appendChild(h('span', {
+    class: 'compare-delta-diff ' + (diff < 0 ? 'value-positive' : 'value-negative'),
+  }, `(${fmtWonSigned(diff)})`));
+  return wrap;
+}
+
+function buildCompareDeltaStrip(delta) {
+  if (!delta) return null;
+
+  const card = h('div', { class: 'compare-delta' });
+  const head = h('div', { class: 'compare-delta-head' });
+  head.appendChild(h('span', { class: 'compare-delta-title' }, '이전 결과와 비교'));
+  if (delta.previous_decision_id) {
+    head.appendChild(h('button', {
+      type: 'button', class: 'btn btn-secondary btn-sm', 'aria-label': '이전 비교 결과 열기',
+      onClick: () => {
+        state.decisions.focusId = delta.previous_decision_id;
+        navigateTo('decisions');
+      },
+    }, '이전 결과 보기'));
+  }
+  card.appendChild(head);
+
+  const rows = h('dl', { class: 'compare-delta-rows' });
+
+  const changed = (Array.isArray(delta.changed_fields) ? delta.changed_fields : []).filter(Boolean);
+  rows.appendChild(deltaRow('바뀐 조건',
+    changed.length ? changed.join(', ') : '조건은 같고 공시 자료가 갱신됐어요'));
+
+  if (isNum(delta.candidates_before) && isNum(delta.candidates_after)) {
+    rows.appendChild(deltaRow('후보', `${fmtCount(delta.candidates_before)} → ${fmtCount(delta.candidates_after)}`));
+  }
+
+  const beforeLabel = delta.top_before_label || null;
+  const afterLabel = delta.top_after_label || null;
+  const topChanged = delta.top_changed === undefined || delta.top_changed === null
+    ? beforeLabel !== afterLabel
+    : !!delta.top_changed;
+  if (beforeLabel || afterLabel) {
+    rows.appendChild(deltaRow('1순위', topChanged
+      ? `${beforeLabel || '없음'} → ${afterLabel || '없음'}`
+      : `그대로: ${afterLabel || beforeLabel}`));
+  }
+
+  const interest = deltaMoneyValue(delta.top_total_interest_before, delta.top_total_interest_after);
+  if (interest) rows.appendChild(deltaRow('1순위 총이자', interest));
+
+  const monthly = deltaMoneyValue(delta.top_monthly_before, delta.top_monthly_after);
+  if (monthly) rows.appendChild(deltaRow('1순위 월 납입', monthly));
+
+  card.appendChild(rows);
+  return card;
+}
+
 function buildCompareStep2(result) {
   const wrap = h('div', {});
   wrap.appendChild(compareStepIndicator(2));
+
+  /* 서버가 delta 를 주지 않으면(첫 비교이거나 계약 미구현) 아무것도 그리지 않는다. */
+  const deltaStrip = buildCompareDeltaStrip(result.delta);
+  if (deltaStrip) wrap.appendChild(deltaStrip);
 
   wrap.appendChild(h('p', { class: 'sort-explain' }, result.sort_explain || ''));
 
@@ -2931,6 +3054,72 @@ function buildLifeEventCard(signal) {
   return card;
 }
 
+/* ---- 지출 절감을 상환에 연결(SPEC 2.15) ----
+   opportunities(절감 후보)와 linked_actions(추가 상환 효과)는 전부 서버 계산값이고
+   문장도 서버 템플릿이다. 응답에 두 필드가 없으면 카드를 그리지 않는다. */
+
+function savingLinkItem(opportunity, action) {
+  const opp = opportunity || {};
+  const li = h('li', { class: 'saving-link-item' });
+
+  const top = h('div', { class: 'saving-link-top' });
+  top.appendChild(h('span', { class: 'saving-link-label' }, opp.label || '절감 후보'));
+  if (isNum(opp.monthly_saving)) {
+    top.appendChild(h('span', { class: 'saving-link-amount' }, `월 ${fmtWon(opp.monthly_saving)} 절감`));
+  }
+  li.appendChild(top);
+
+  /* 연결할 대출이 없으면 효과 줄 없이 문장만 보여준다. */
+  const monthsSaved = action && isNum(action.months_saved) && action.months_saved > 0 ? action.months_saved : null;
+  const interestSaved = action && isNum(action.interest_saved) && action.interest_saved > 0 ? action.interest_saved : null;
+  if (action && action.target_loan_label && (monthsSaved || interestSaved)) {
+    const parts = [];
+    if (monthsSaved) parts.push(`${fmtMonths(monthsSaved)} 단축`);
+    if (interestSaved) parts.push(`이자 ${fmtWon(interestSaved)} 절감`);
+    li.appendChild(h('p', { class: 'saving-link-effect' },
+      h('span', { class: 'saving-link-arrow', 'aria-hidden': 'true' }, '→'),
+      h('span', { class: 'value-positive' }, parts.join(' · '))));
+  }
+
+  if (action && action.sentence) li.appendChild(h('p', { class: 'saving-link-sentence' }, action.sentence));
+  if (opp.basis) li.appendChild(h('p', { class: 'saving-link-basis' }, `근거: ${opp.basis}`));
+  return li;
+}
+
+function buildSavingLinkCard(data) {
+  const actions = (Array.isArray(data.linked_actions) ? data.linked_actions : []).filter(Boolean);
+  const opportunities = (Array.isArray(data.opportunities) ? data.opportunities : []).filter(Boolean);
+  if (!actions.length && !opportunities.length) return null;
+
+  /* 연결할 대출이 없으면(대출 미등록) 상환 효과 대신 모으는 이야기만 나온다. */
+  const hasTargetLoan = actions.some((a) => a && a.target_loan_label);
+
+  const card = h('div', { class: 'panel-card saving-link-card' });
+  const head = h('div', { class: 'panel-card-head' });
+  const headLeft = h('div', {});
+  headLeft.appendChild(h('h2', {}, '지출 절감을 상환에 연결하면'));
+  headLeft.appendChild(h('p', { class: 'panel-card-sub' }, hasTargetLoan
+    ? '줄일 수 있어 보이는 지출을 금리가 가장 높은 대출에 더 갚았을 때의 계산 결과입니다.'
+    : '줄일 수 있어 보이는 지출과 그 돈을 모았을 때의 계산 결과입니다.'));
+  head.appendChild(headLeft);
+  card.appendChild(head);
+
+  const list = h('ul', { class: 'saving-link-list' });
+  if (actions.length) actions.forEach((a) => list.appendChild(savingLinkItem(a.opportunity, a)));
+  else opportunities.forEach((o) => list.appendChild(savingLinkItem(o, null)));
+  card.appendChild(list);
+
+  /* 시나리오는 대출이 있어야 계산되므로 연결된 대출이 있을 때만 버튼을 둔다. */
+  if (hasTargetLoan) {
+    card.appendChild(h('div', { class: 'form-actions' },
+      h('button', {
+        type: 'button', class: 'btn btn-primary', 'aria-label': '내 부채 화면의 시나리오로 확인하기',
+        onClick: () => { state.debts.pendingFocus = 'scenario'; navigateTo('debts'); },
+      }, '시나리오로 확인하기')));
+  }
+  return card;
+}
+
 function spendingSectionTitle(text, countText) {
   const title = h('h2', { class: 'section-title' }, text);
   if (countText) title.appendChild(h('span', { class: 'section-count' }, countText));
@@ -2971,6 +3160,10 @@ function renderSpendingResults() {
   } else {
     slot.appendChild(h('p', { class: 'empty-text' }, '반복 결제로 보이는 항목이 없습니다.'));
   }
+
+  /* 절감 → 상환 연결(SPEC 2.15). 서버 응답에 해당 필드가 없으면 아무것도 그리지 않는다. */
+  const savingLink = buildSavingLinkCard(data);
+  if (savingLink) slot.appendChild(savingLink);
 
   const signals = summary.life_events || [];
   if (signals.length) {
@@ -3664,6 +3857,12 @@ function resetChatForProfileChange() {
   state.actionExplains = {};
 }
 
+/* 결정 기록은 세션(계정)별이므로 계정이 바뀌면 전후 비교의 기준도 버린다(SPEC 2.14). */
+function resetCompareForProfileChange() {
+  state.compare.lastDecisionId = null;
+  state.decisions.focusId = null;
+}
+
 /* 소비 패턴 분석 결과도 계정별이므로 계정이 바뀌면 다시 불러온다. */
 function resetSpendingForProfileChange() {
   state.spending.data = null;
@@ -3681,6 +3880,7 @@ async function loadPersonaAndGoHome(personaId) {
   lsSetStr('donn.lastPersonaId', personaId);
   resetChatForProfileChange();
   resetSpendingForProfileChange();
+  resetCompareForProfileChange();
   await refreshSidebarData();
   navigateTo('home');
   return { ok: true };
@@ -3694,6 +3894,7 @@ async function clearSessionProfile() {
   lsSetStr('donn.lastPersonaId', null);
   resetChatForProfileChange();
   resetSpendingForProfileChange();
+  resetCompareForProfileChange();
   await refreshSidebarData();
   return { ok: true };
 }
@@ -3770,7 +3971,7 @@ async function renderPersonas() {
 /* ---------- 12. 화면: 결정 기록 ---------- */
 
 function buildDecisionRow(rec) {
-  const wrap = h('div', { style: 'width:100%;' });
+  const wrap = h('div', { style: 'width:100%;', 'data-decision-id': rec.decision_id || '' });
   const row = h('div', { class: 'decision-row' });
   const info = h('div', { class: 'decision-info' });
   info.appendChild(h('span', { class: 'decision-kind' }, DECISION_KIND_LABELS[rec.kind] || rec.kind));
@@ -3802,7 +4003,7 @@ function buildDecisionRow(rec) {
     },
   }, '재현'));
   actions.appendChild(h('button', {
-    type: 'button', class: 'btn btn-secondary btn-sm', 'aria-label': '상세 보기',
+    type: 'button', class: 'btn btn-secondary btn-sm', 'aria-label': '상세 보기', 'data-role': 'detail',
     onClick: async () => {
       const isHidden = detailWrap.classList.contains('is-hidden');
       if (isHidden && !detailWrap.dataset.loaded) {
@@ -3852,7 +4053,29 @@ async function renderDecisions() {
     listWrap.appendChild(h('p', { class: 'empty-text' }, '아직 결정 기록이 없습니다.'));
     return;
   }
-  items.forEach((rec) => listWrap.appendChild(buildDecisionRow(rec)));
+
+  /* "이전 결과 보기"(SPEC 2.14)로 들어오면 그 결정 행을 펼치고 그 자리로 옮긴다. */
+  const focusId = state.decisions.focusId;
+  state.decisions.focusId = null;
+  let focusWrap = null;
+
+  items.forEach((rec) => {
+    const node = buildDecisionRow(rec);
+    if (focusId && rec.decision_id === focusId) focusWrap = node;
+    listWrap.appendChild(node);
+  });
+
+  if (focusWrap) {
+    focusWrap.classList.add('is-focused');
+    const detailBtn = focusWrap.querySelector('button[data-role="detail"]');
+    if (detailBtn) detailBtn.click();
+    setTimeout(() => scrollNodeIntoView(focusWrap, 'center'), 0);
+  } else if (focusId) {
+    listWrap.insertBefore(
+      noticeBox('이전 비교 결과를 최근 목록에서 찾지 못했습니다. 목록이 더 길어졌을 수 있어요.'),
+      listWrap.firstChild,
+    );
+  }
 }
 
 /* ---------- 13. 대화 화면 (#chat) ----------
@@ -4133,7 +4356,13 @@ function resourceOpenAction(r) {
     if (!slug) return null;
     return () => openKbPanel(slug, r.title);
   }
-  if (kind === 'calc') return () => navigateTo('decisions');
+  if (kind === 'calc') {
+    /* 계산형 자유 질의(SPEC 2.13)의 결과는 결정 기록이 아니라 내 부채의 시나리오에서 확인한다. */
+    if (String(r.ref || '').startsWith('whatif:')) {
+      return () => { state.debts.pendingFocus = 'scenario'; navigateTo('debts'); };
+    }
+    return () => navigateTo('decisions');
+  }
   if (kind === 'loan' || kind === 'profile') return () => navigateTo('debts');
   if (kind === 'products') return () => navigateTo('compare');
   return null;
@@ -4841,7 +5070,10 @@ async function handleChipClick(chip) {
       break;
     case 'schedule':
     case 'scenario':
+      /* SPEC 2.13: whatif 답변의 칩. 대출을 지정하면 그 대출, 아니면 금리가 가장 높은 대출을
+         열고 상환표(schedule) 또는 시나리오(scenario) 구간으로 화면을 옮긴다. */
       state.debts.pendingFocusLoanId = (chip.params && (chip.params.target_loan_id || chip.params.loan_id)) || null;
+      state.debts.pendingFocus = chip.intent;
       navigateTo('debts');
       break;
     case 'spending':

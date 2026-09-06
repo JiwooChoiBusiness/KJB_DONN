@@ -1077,6 +1077,40 @@ table.data-table tfoot td {
 }
 .confirm-hint { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: var(--sp-1); margin-top: var(--sp-3); }
 
+/* 이전 결과와 비교(SPEC 2.14): 조건을 바꿔 다시 실행했을 때만 결과 맨 위에 붙는다 */
+.compare-delta {
+  background: var(--accent-light);
+  border: 1px solid var(--accent-mid);
+  border-radius: var(--radius);
+  padding: var(--sp-3) var(--sp-4);
+  margin-bottom: var(--sp-3);
+}
+.compare-delta-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-2);
+}
+.compare-delta-title { font-size: 12.5px; font-weight: 600; color: var(--accent-dark); }
+.compare-delta-rows { margin: 0; display: grid; gap: var(--sp-1); }
+.compare-delta-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: var(--sp-3);
+  align-items: baseline;
+}
+.compare-delta-row dt { font-size: 11.5px; color: var(--muted); }
+.compare-delta-row dd {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.compare-delta-diff { margin-left: var(--sp-1); font-weight: 500; }
+
 .sort-explain {
   font-size: 13px;
   color: var(--text);
@@ -1363,6 +1397,44 @@ table.data-table tfoot td {
 .anomaly-head .anomaly-month { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .anomaly-note { font-size: 13px; margin-top: var(--sp-1); }
 
+/* 지출 절감을 상환에 연결(SPEC 2.15) */
+.saving-link-card { margin-top: var(--sp-5); }
+.saving-link-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.saving-link-item {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-md);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-subtle);
+}
+.saving-link-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.saving-link-label { font-size: 13.5px; font-weight: 600; }
+.saving-link-amount { font-size: 13px; font-variant-numeric: tabular-nums; flex: none; }
+.saving-link-effect {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  font-size: 13px;
+  margin-top: var(--sp-2);
+  font-variant-numeric: tabular-nums;
+}
+.saving-link-arrow { color: var(--muted); flex: none; }
+.saving-link-sentence { font-size: 13px; line-height: 1.6; margin-top: var(--sp-2); }
+.saving-link-basis { font-size: 11.5px; color: var(--muted); margin-top: var(--sp-1); }
+
 .signal-list { display: flex; flex-direction: column; gap: var(--sp-3); }
 .signal-card {
   border: 1px solid var(--border);
@@ -1403,6 +1475,8 @@ table.data-table tfoot td {
   background: #fff;
 }
 .decision-row:hover { border-color: #D9DBE1; }
+/* "이전 결과 보기"로 열린 행(SPEC 2.14) */
+.is-focused > .decision-row { border-color: var(--accent); background: var(--accent-light); }
 .decision-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .decision-kind { font-weight: 500; font-size: 13.5px; }
 .decision-sub { font-size: 11.5px; color: var(--muted); font-family: var(--mono); }
@@ -2263,6 +2337,17 @@ button.resource-open:hover .resource-title { color: var(--accent); }
   .mapping-panel { padding: var(--sp-3); }
   .drop-zone { padding: var(--sp-4) var(--sp-3); }
   .cat-bar-top { font-size: 12.5px; }
+
+  /* 이전 결과와 비교: 라벨을 값 위로 올리고 버튼은 한 줄을 차지한다 */
+  .compare-delta { padding: var(--sp-3); }
+  .compare-delta-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .compare-delta-head .btn { width: 100%; }
+  .compare-delta-diff { margin-left: 0; display: block; }
+
+  /* 절감 연결 카드 */
+  .saving-link-item { padding: var(--sp-3); }
+  .saving-link-card .form-actions .btn { width: 100%; }
+
   .decision-row { align-items: flex-start; flex-direction: column; }
   .footer-disclaimer { padding: var(--sp-2) var(--sp-3); }
 

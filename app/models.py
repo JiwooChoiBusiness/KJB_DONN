@@ -313,6 +313,52 @@ class CompareResult(BaseModel):
     engine_version: str = ENGINE_VERSION
     created_at: datetime
     candidates_total: int
+    delta: Optional["CompareDelta"] = None  # 이전 결정 대비 변화(SPEC 2.14). result_hash에는 포함하지 않는다
+
+
+class CompareDelta(BaseModel):
+    """후속 질의 등으로 다시 실행한 비교가 직전 결정과 어떻게 달라졌는지(SPEC 2.14). 숫자는 코드가 계산한다."""
+    previous_decision_id: str
+    changed_fields: list[str] = []          # 한글 라벨: 금액, 기간, 금리 상한, 정렬 기준, 제외 회사 등
+    candidates_before: int
+    candidates_after: int
+    top_before_label: Optional[str] = None
+    top_after_label: Optional[str] = None
+    top_changed: bool = False
+    top_total_interest_before: Optional[int] = None
+    top_total_interest_after: Optional[int] = None
+    top_monthly_before: Optional[int] = None
+    top_monthly_after: Optional[int] = None
+
+
+class SavingOpportunity(BaseModel):
+    """지출에서 찾은 절감 후보 1건(SPEC 2.15). 가맹점명 없이 카테고리 라벨만 쓴다."""
+    kind: Literal["subscriptions", "spike", "discretionary"]
+    label: str                 # 예: "정기 결제 3건", "배달·외식 급증분", "카페·간식 15% 절감"
+    monthly_saving: int        # 원/월
+    basis: str                 # 계산 근거 한 문장
+
+
+class SpendingLinkedAction(BaseModel):
+    """절감액을 최고금리 대출 추가 상환에 넣었을 때의 효과(SPEC 2.15)."""
+    opportunity: SavingOpportunity
+    target_loan_label: Optional[str] = None
+    months_saved: int = 0
+    interest_saved: int = 0
+    new_months: Optional[int] = None
+    sentence: str
+
+
+class WhatIfResult(BaseModel):
+    """계산형 자유 질의(SPEC 2.13)의 도구 결과. 전후 수치와 차이는 전부 코드 계산값이다."""
+    tool: Literal["extra_payment", "lump_sum", "refinance", "retirement_age"]
+    target_loan_label: Optional[str] = None
+    inputs: dict[str, Any] = {}
+    before: dict[str, Any] = {}
+    after: dict[str, Any] = {}
+    deltas: dict[str, Any] = {}
+    assumptions: list[str] = []
+    scenario_params: dict[str, Any] = {}
 
 
 class DecisionRecord(BaseModel):

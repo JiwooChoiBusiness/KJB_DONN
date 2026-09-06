@@ -461,6 +461,23 @@ data: <json 한 줄>
 - 답변 마크다운: 요약 1문장(최근 {개월}개월 월평균 지출 {원}, 소득 대비 {%}) → `**핵심**` 목록 3~5개(상위 카테고리 2개와 비중, 정기 결제 {n}건 합계 {원}, 급증 항목 1개, 생애 이벤트 신호 1개, 해당 없으면 생략) → 마지막 줄 "원본 거래내역은 저장하지 않고 요약만 남겨요." 숫자는 모두 `app/core/spending.py` 계산값이며 문장은 코드 템플릿이다(상품·회사명 없음, 가맹점명은 카테고리로만).
 - 테스트: 합성 거래내역(`synthetic`의 CSV 행)을 `/api/chat/attach`로 보내 200·markdown·resources·대화 로그 저장·`GET /api/spending`에 요약이 남는지, 파일명 PII 마스킹, 행 수 상한 초과 422. 러너는 페르소나 1명에 attach 1회 soft 검사.
 
+### 2.13 계산형 자유 질의(what-if) (PMO 결정 2026-09-06, 마지막 업데이트 1)
+
+- 의도 `whatif`(추출 스키마·규칙 파서에 추가). 슬롯: `extra_monthly`(원), `lump_sum`(원), `new_rate`(%), `retirement_age`(세), `loan_hint`(카드론|신용대출|마이너스통장|주택담보|전세|학자금|정책 중 하나 또는 없음). 규칙 파서 키워드: "더 갚", "추가로 갚", "추가 상환", "갈아타면", "금리 N%로", "은퇴를 N세", "N세에 은퇴", "한번에 갚", "일시 상환", "몰아서 갚". 숫자 근거 검사(`_ground_numeric_slots`)에 새 슬롯을 포함한다(발화에 없는 숫자 폐기). 슬롯이 하나도 없으면 되묻는다("매달 얼마를 더 갚을지 알려주세요(예: 30만 원)").
+- 도구(`app/services/whatif.py`, 순수 계산은 `app/core`): `extra_payment`(`loan.extra_payment_effect`), `lump_sum`(`app/core/loan.py::lump_sum_effect(loan, amount, fee) -> dict` 신설: 잔액 차감 후 새 스케줄, months_saved, interest_saved, fee), `refinance`(`refinance_compare`, 수수료 `prepay_fee`), `retirement_age`(프로필 사본에 `retirement_age`를 넣어 `retirement_gap_projection` 재계산, 기준 시나리오의 shortfall·monthly_gap·required_monthly_saving 전후). 대상 대출: `loan_hint` 일치 우선, 없으면 최고금리 대출. 결과 `WhatIfResult`(models.py).
+- 답변: 코드 템플릿 마크다운(결론 1문장 + `**계산 근거**` 3개 + 가정 1줄) → LLM 슬롯 필링(template_id `whatif_v1`, facts=도구·대출 종류·방향, placeholders=금액·개월·이자, 2.8 검증)으로 결론 문장을 대체할 수 있고 실패 시 템플릿. `answer_format="markdown"`. 노드: debt_data("대출 {n}건 중 {대출 종류}을 골랐어요"), calc("{도구 이름} 효과를 계산했어요"), explain, check. 리소스: calc(title "추가 상환 효과" | "일시 상환 효과" | "대환 효과" | "은퇴 시점 변경", ref `whatif:{tool}`, detail 전후 요약), profile. 칩: "시나리오로 확인하기"(scenario), "상환표 보기"(schedule), refinance면 "내 조건으로 공시 비교"(compare, params amount·term_months·target_loan_id). 골든 질문에 페르소나별 whatif 1개 추가.
+
+### 2.14 후속 질의 전후 비교(비교 결과 델타) (마지막 업데이트 2)
+
+- `POST /api/compare/run?previous_decision_id=dec-...`(선택 쿼리). 서버는 이전 결정(현재 세션 소유, kind compare)이 있으면 `CompareResult.delta: CompareDelta`를 채운다(models.py): `changed_fields`(이전 context와 새 context를 비교한 한글 라벨 목록), `candidates_before/after`, `top_before_label/top_after_label`, `top_changed`, `top_total_interest_before/after`, `top_monthly_before/after`. 없거나 다른 세션·다른 카테고리면 None. `result_hash`·`fingerprint`에는 넣지 않는다(재현성 불변). 결정 기록 result JSON에는 저장된다.
+- 화면: `state.compare.lastDecisionId`(이 세션에서 마지막으로 실행한 비교)를 관리해 run 시 쿼리로 보낸다(채팅 후속 질의로 준비된 조건이든 "조건 바꿔서 다시 보기"든 동일). 2단계 결과 상단에 "이전 결과와 비교" 스트립: 바뀐 조건 라벨, 후보 수 전후, 1순위 라벨 전후, 1순위 총이자 전후와 차이(절감이면 긍정색, 증가면 부정색), 버튼 "이전 결과 보기"(결정 기록 화면에서 해당 결정을 펼침). delta가 없으면 표시하지 않는다.
+
+### 2.15 지출 절감을 상환 효과로 연결 (마지막 업데이트 3)
+
+- `app/core/spending.py::savings_opportunities(summary, features) -> list[SavingOpportunity]`: (a) 정기 결제 합계(월), (b) 급증 카테고리의 초과분(이번 달 - 월평균), (c) 재량 지출 상위 카테고리 15% 절감. 가맹점명 없이 카테고리 라벨만, 금액 큰 순 최대 3개, 0원은 제외.
+- `app/services/spending.py::link_savings_to_debt(profile, opportunities, today) -> list[SpendingLinkedAction]`: 최고금리 대출에 `extra_payment_effect(loan, monthly_saving)`를 적용해 단축 개월·절감 이자를 계산하고 템플릿 문장을 만든다("정기 결제 3건(월 45,000원)을 줄여 카드론에 더 갚으면 4개월 빨리 끝나고 이자 60,000원을 아껴요."). 대출이 없으면 "비상금으로 {n}개월 만에 목표에 닿아요" 문장.
+- 노출: `GET /api/spending`과 `POST /api/spending/analyze`(+synthetic) 응답에 `opportunities`, `linked_actions` 추가. `POST /api/chat/attach` 답변 마크다운에 `**이렇게 연결돼요**` 목록(최대 2개)과 칩 "시나리오로 확인하기". 소비 패턴 화면에 "지출 절감을 상환에 연결하면" 카드(항목별 절감액 → 단축 개월·절감 이자, 버튼 "시나리오로 확인하기" → 내 부채 화면 시나리오). 숫자는 코드, 문장은 템플릿.
+
 ## 3. 화면 규격 (web/)
 
 - 단일 페이지, 빌드 없음. `index.html`, `app.js`, `styles.css`. 글꼴은 Pretendard(jsdelivr CDN, 오프라인이면 system-ui·"Malgun Gothic" 폴백). 그 외 외부 CDN 의존 없음.
@@ -552,3 +569,4 @@ python run.py 3676       # Claude Code 테스트용
 - (검토 게이트 2차) `app/services/compare.py::prepare_context`는 `term_months`를 1~600으로, `amount`는 양수만 채택하며 채팅 compare 분기는 검증 실패 시 안내 문장으로 답한다(500 금지). `app/services/insights.py::get_banned_terms`는 빈 결과·예외를 캐시하지 않고 `invalidate_banned_terms()`가 시드·실 적재 뒤 호출된다. 외부 검색 질의는 숫자 토큰을 제거한 뒤 보내고(남으면 검색 포기), external 요약은 회사명 패턴 검사와 "(수치는 확인 필요)" 부기를 거친다. `ChatRequest.message`는 최대 2000자. `app/data/db.py::get_conn`은 WAL과 busy_timeout(10초)을 켠다. 2.11 라우팅 보강: faq는 발화에 문서 키워드가 있으면 그 문서로 internal, 없으면 점수가 임계값을 넘고 시점성 질문이 아닐 때만 internal, 그 밖은 external. 인사·도움말은 LLM 분류와 무관하게 규칙이 direct면 direct.
 - (생각 과정 문구·설명 품질) 2.9의 stage dict에 `tech: str`(선택, 모델명·소요 초·사유 코드 같은 기술 정보 한 줄)을 추가하고 `label`·`detail`은 사용자 말로 쓴다(예: "무엇이 필요한지 파악 · 공시 비교로 이해했어요", 기술 정보는 `tech`에 "Gemini gemini-3.8-flash · 3.0초"). 화면은 `tech`를 작은 회색 줄로만 보여준다. 2.8 행동 카드 설명: `safe_mode` 카드(R0)는 LLM을 쓰지 않고 항상 템플릿. LLM 문장 검증에 `unlabeled_placeholder`(플레이스홀더 앞 20자 안에 맥락어 없음), `not_informative`(이유 연결어와 행동 동사 부재), `vague_phrase`(빈말)를 추가해 실패하면 템플릿으로 간다(2026-09-06 화면 실측: "현재 -1,450,608원이나 95% 상태를 고려해..." 같은 문장 차단).
 - (대화창 파일 첨부) 2.12절 추가. `POST /api/chat/attach`, `ChatAttachRequest` 신설. 입력 카드 "+"는 새 대화가 아니라 파일 첨부. 모델명은 화면 어디에도 표시하지 않고(배지는 "AI 응답"/"규칙 기반 응답"만), 입력 카드의 "모드: M0 공시 비교" 배지는 제거.
+- (마지막 업데이트 1~3) 2.13~2.15절 추가. models.py: `CompareDelta`(+`CompareResult.delta`), `SavingOpportunity`, `SpendingLinkedAction`, `WhatIfResult`. `POST /api/compare/run`에 `previous_decision_id` 쿼리, 소비 응답에 `opportunities`·`linked_actions`, 의도 `whatif`.
