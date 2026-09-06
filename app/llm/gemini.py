@@ -90,6 +90,10 @@ class GeminiProvider:
         self.fail_fast_on_status = set(cfg.get("fail_fast_on_status", [400, 401, 403]))
         self.key_cooldown_seconds = cfg.get("key_cooldown_seconds", 60)
         self.temperature = cfg.get("temperature", 0)
+        # 설명 문장(슬롯 필링, SPEC 2.8/2.16) 전용 온도. extract는 항상 self.temperature(기본
+        # 0)를 쓰고, explain은 호출부가 명시하지 않으면 이 값을 쓴다(PMO 요청: 답변을 더
+        # 알차게 만들기 위해 약간의 다양성을 허용한다).
+        self.explain_temperature = cfg.get("explain_temperature", 0.4)
         self.timeout_seconds = cfg.get("timeout_seconds", 20)
         self.total_deadline_seconds = cfg.get("total_deadline_seconds", 12)
         # explain(설명 문장 슬롯 필링, SPEC 2.8) 전용 체인 상한. extract/chat 경로의
@@ -251,8 +255,12 @@ class GeminiProvider:
 
         raise LLMUnavailable(f"모든 모델/키 조합이 실패했습니다(last_status={last_status}).")
 
-    def _build_body(self, system: str, user_text: str, *, response_schema: Optional[dict]) -> dict:
-        generation_config: dict[str, Any] = {"temperature": self.temperature}
+    def _build_body(
+        self, system: str, user_text: str, *, response_schema: Optional[dict],
+        temperature: Optional[float] = None,
+    ) -> dict:
+        effective_temperature = self.temperature if temperature is None else temperature
+        generation_config: dict[str, Any] = {"temperature": effective_temperature}
         if response_schema is not None:
             generation_config["responseMimeType"] = "application/json"
             generation_config["responseSchema"] = response_schema
@@ -287,7 +295,7 @@ class GeminiProvider:
 
     def explain(
         self, slots: dict, template_id: str, system: str, schema: Optional[dict] = None,
-        deadline_seconds: Optional[float] = None,
+        deadline_seconds: Optional[float] = None, temperature: Optional[float] = None,
     ) -> LLMResult:
         """범주형 슬롯만으로 설명 문장을 만든다(수치는 포함하지 않는다, D4).
 
@@ -297,9 +305,12 @@ class GeminiProvider:
         재시도), 체인 전체 시간 상한은 기본 `explain_total_deadline_seconds`를 쓴다(extract/chat과
         분리, SPEC 2.8). `deadline_seconds`를 넘기면 이 호출 1건에 한해 그 값으로 덮어쓴다
         (SPEC 2.9: 대화 화면의 설명 생성은 `chat_explain_deadline_seconds`로 더 짧게 줄인다).
+        `temperature`를 생략하면 `self.explain_temperature`(기본 0.4, SPEC 2.16)를 쓴다(extract는
+        항상 `self.temperature`(기본 0)를 그대로 쓴다 - 별도 경로라 이 메서드와 무관하다).
         """
         user_text = json.dumps({"template_id": template_id, "slots": slots}, ensure_ascii=False)
-        body = self._build_body(system, user_text, response_schema=schema)
+        effective_temperature = self.explain_temperature if temperature is None else temperature
+        body = self._build_body(system, user_text, response_schema=schema, temperature=effective_temperature)
         effective_deadline = (
             self.explain_total_deadline_seconds if deadline_seconds is None else deadline_seconds
         )

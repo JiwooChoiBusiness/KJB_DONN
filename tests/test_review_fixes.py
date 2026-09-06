@@ -584,7 +584,11 @@ def test_format_kb_answer_treats_comma_formatted_number_as_grounded():
         summary="한도는 2,000만원이에요.",
         points=[f"**{name}**: 확인해보세요." for name in sections],
     )
-    markdown, llm_used, model, latency_ms, problems = answer_service.format_kb_answer(doc, None, fake, [])
+    # SPEC 2.16: 이 테스트는 숫자 그라운딩(콤마 표기 정규화) 자체를 보는 단위 테스트라
+    # 기존(2.8) 길이 계약인 detail="brief"(요약 1문장)로 호출한다.
+    markdown, llm_used, model, latency_ms, problems = answer_service.format_kb_answer(
+        doc, None, fake, [], detail="brief",
+    )
     assert "ungrounded_number" not in problems
     assert llm_used is True
 
@@ -611,7 +615,7 @@ _GENERIC_ERROR_TEXT = "응답을 만들지 못했어요. 잠시 후 다시 시�
 def test_chat_stream_error_payload_hides_internal_details(monkeypatch):
     monkeypatch.setattr(routes_module, "_llm_provider", _FakeUnavailableProvider())
 
-    def _boom(message, base_params=None, emit=None, cancel_event=None):  # noqa: ANN001
+    def _boom(message, base_params=None, emit=None, cancel_event=None, detail="full"):  # noqa: ANN001
         raise RuntimeError(
             "pydantic.ValidationError: 3 validation errors for CompareContext\n"
             "Traceback (most recent call last):\n"

@@ -611,13 +611,16 @@ def run_persona(
 
         ok, detail, hard = _check_chat_expectation(q, body, strict, banned)
 
-        # action 의도는 GET /api/actions[0].summary와 정확히 같아야 한다(계약 검증).
+        # action 의도는 GET /api/actions[0].summary로 시작해야 한다(계약 검증). SPEC 2.16:
+        # --llm rule(템플릿) 폴백이 이제 요약 그대로가 아니라 `explain._template_action_rich`로
+        # "요약 + 왜 중요한지(gist) + 지금 할 일" 순으로 보강되므로, 예전의 "정확히 같다"
+        # 대신 "요약으로 시작한다"로 계약을 완화했다(첫 문장은 항상 카드 요약 그대로다).
         if (q.get("expect") or {}).get("action_reply_equals_top_action"):
             if actions:
                 expected_summary = actions[0]["summary"]
-                if body.get("reply_text") != expected_summary:
+                if not (body.get("reply_text") or "").startswith(expected_summary):
                     ok = False
-                    detail = (detail + "; " if detail else "") + "reply_text != actions[0].summary"
+                    detail = (detail + "; " if detail else "") + "reply_text가 actions[0].summary로 시작하지 않음"
 
         judge_score = None
         if judge_provider is not None:

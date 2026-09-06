@@ -1,7 +1,7 @@
 """API 요청/응답 스키마 (SPEC 2.5). 나머지 응답은 app.models의 타입을 그대로 쓴다."""
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -18,6 +18,9 @@ class ChatRequest(BaseModel):
     # 검색까지 흘러가 비용·성능 문제를 만들 수 있다. 초과분은 422로 거절한다.
     message: str = Field(max_length=2000)
     chat_id: Optional[str] = None
+    # SPEC 2.16(PMO 요청): 답변 길이. 화면이 이미 body에 detail을 보낸다(설정 모달의
+    # "답변 길이: 자세히(기본)/간단히" 토글). full이 기본값이고, brief는 기존(2.8) 상한을 쓴다.
+    detail: Literal["full", "brief"] = "full"
 
 
 class ChatCreateRequest(BaseModel):
@@ -67,9 +70,11 @@ class OkResponse(BaseModel):
 
 class ExplainRequest(BaseModel):
     """POST /api/compare/{decision_id}/explain, POST /api/actions/{action_id}/explain 본문(선택,
-    SPEC 2.8). refresh=true면 저장된 설명이 있어도 새로 만들어 덮어쓴다."""
+    SPEC 2.8). refresh=true면 저장된 설명이 있어도 새로 만들어 덮어쓴다. detail(SPEC 2.16)은
+    full(기본, 자세히)/brief(간단히)이며 캐시 키(ref_id)에도 반영된다."""
 
     refresh: bool = False
+    detail: Literal["full", "brief"] = "full"
 
 
 class SpendingAnalyzeRequest(BaseModel):

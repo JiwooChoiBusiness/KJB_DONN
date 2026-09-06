@@ -11,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
@@ -218,8 +218,9 @@ def post_action_explain(action_id: str, body: Optional[ExplainRequest] = None) -
         raise HTTPException(status_code=404, detail="저장된 프로필이 없습니다.")
     params = policy.load_policy_params()
     refresh = body.refresh if body is not None else False
+    detail = body.detail if body is not None else "full"
     result = explain_service.explain_action(
-        action_id, _llm_provider, profile, params, today=date.today(), refresh=refresh,
+        action_id, _llm_provider, profile, params, today=date.today(), refresh=refresh, detail=detail,
     )
     if result is None:
         raise HTTPException(status_code=404, detail=f"행동 카드를 찾을 수 없습니다: {action_id}")
@@ -272,18 +273,26 @@ def post_compare_explain(decision_id: str, body: Optional[ExplainRequest] = None
     """SPEC 2.8: 공시 비교 결과 설명. 저장된 설명이 있고 refresh가 아니면 LLM을
     호출하지 않고 cached=true로 돌려준다. 결정 기록이 없으면 404."""
     refresh = body.refresh if body is not None else False
-    result = explain_service.explain_compare(decision_id, _llm_provider, refresh=refresh)
+    detail = body.detail if body is not None else "full"
+    result = explain_service.explain_compare(decision_id, _llm_provider, refresh=refresh, detail=detail)
     if result is None:
         raise HTTPException(status_code=404, detail=f"결정 기록을 찾을 수 없습니다: {decision_id}")
     return result
 
 
 @router.get("/compare/{decision_id}/explain", response_model=ExplainResult)
-def get_compare_explain(decision_id: str) -> ExplainResult:
-    """저장된 설명만 돌려준다(생성하지 않음). 없으면 404."""
+def get_compare_explain(decision_id: str, detail: Literal["full", "brief"] = Query("full")) -> ExplainResult:
+    """저장된 설명만 돌려준다(생성하지 않음). 없으면 404. `detail`(SPEC 2.16)은 POST의 body와
+    같은 값을 쿼리로 받아 먼저 그 캐시 키(ref_id, full은 접미사 없음·brief는 "#brief")로
+    찾는다. 없으면 다른 detail로 저장된 설명이라도 있으면 그것을 돌려준다(화면의 기존
+    getCompareExplain 호출은 detail 쿼리를 붙이지 않으므로, 사용자가 "간단히"로 설정한
+    상태에서 만들어진 설명도 이 GET에서 찾을 수 있어야 한다)."""
     if decisions_service.get(decision_id) is None:  # 다른 브라우저 세션의 결정 기록은 없는 것으로 본다
         raise HTTPException(status_code=404, detail="저장된 설명이 없습니다.")
-    result = explain_service.get_stored("compare", decision_id)
+    result = explain_service.get_stored("compare", f"{decision_id}{explain_service.ref_suffix(detail)}")
+    if result is None:
+        other_detail = "brief" if detail == "full" else "full"
+        result = explain_service.get_stored("compare", f"{decision_id}{explain_service.ref_suffix(other_detail)}")
     if result is None:
         raise HTTPException(status_code=404, detail="저장된 설명이 없습니다.")
     return result
@@ -817,12 +826,15 @@ def _build_chat_reply(
     base_params: Optional[dict[str, Any]] = None,
     emit: Optional[Callable[[dict[str, Any]], None]] = None,
     cancel_event: Optional[threading.Event] = None,
+    detail: str = "full",
 ) -> _ChatBuildResult:
     """SPEC 2.9: 단계별로 `stages.start`/`stages.finish`를 호출해 "생각 과정"을 기록·방출한다.
     수치·판단 자체는 기존과 동일한 코드 경로(규칙 파서/코드 계산)로 만든다. LLM은 의도
     추출(intent 단계)과 문장 설명(explain 단계)에만 관여한다. `cancel_event`가 set되면
     (SSE 클라이언트가 스트림을 닫음) 단계 이벤트만 더 이상 큐에 넣지 않는다(계산 자체는
-    끝까지 마친다, SEV3 2026-09-06 리뷰)."""
+    끝까지 마친다, SEV3 2026-09-06 리뷰). `detail`(SPEC 2.16, "full"|"brief")은 설명 생성
+    함수(explain_compare/explain_action/explain_chat_compare/explain_chat_whatif,
+    format_kb_answer, build_direct_answer)에 그대로 넘긴다."""
     stages = _StageEmitter(emit, cancel_event)
     banned = insights_service.get_banned_terms()
 
@@ -912,7 +924,7 @@ def _build_chat_reply(
         # 프로필도 참조하지 않는다.
         stages.start("direct")
         text, direct_llm_used, direct_model, direct_latency_ms, direct_problems = (
-            answer_service.build_direct_answer(_llm_provider, banned)
+            answer_service.build_direct_answer(_llm_provider, banned, detail=detail)
         )
         if direct_llm_used:
             stages.finish("direct", "done", "자료 없이 바로 답할 수 있는 질문이에요",
@@ -992,13 +1004,30 @@ def _build_chat_reply(
                         steps=compute_steps, resource_refs=[r.ref for r in resources],
                     )
                 stages.start("explain")
-                explain_result = explain_service.explain_chat_compare(ctx, followup_labels, _llm_provider)
-                status, detail, tech = _explain_stage_detail(explain_result)
-                stages.finish("explain", status, detail, tech=tech)
+                explain_result = explain_service.explain_chat_compare(
+                    ctx, followup_labels, _llm_provider, detail=detail,
+                )
+                status, stage_detail, tech = _explain_stage_detail(explain_result)
+                stages.finish("explain", status, stage_detail, tech=tech)
                 if explain_result.source == "llm":
                     explain_llm_used = True
                     explain_model = explain_result.model
-                reply_text = explain_result.summary + " 아래 버튼으로 조건을 확인하고 실행해보세요."
+                # SPEC 2.16: 설명 문장 뒤에 코드가 "준비한 조건" 목록을 마크다운으로 붙인다
+                # (LLM 문장이든 템플릿 문장이든 동일하게, answer_format="markdown").
+                max_rate_label = f"{ctx.max_rate:.4g}%" if ctx.max_rate is not None else "없음"
+                prepared_lines = [
+                    "", "**준비한 조건**",
+                    f"- 카테고리: {category_label}",
+                    f"- 금액: {ctx.amount:,}원",
+                    f"- 기간: {ctx.term_months}개월",
+                    f"- 금리 상한: {max_rate_label}",
+                    f"- 정렬 기준: {explain_service._sort_basis_label(ctx.sort_key)}",
+                ]
+                reply_text = (
+                    explain_result.summary + " 아래 버튼으로 조건을 확인하고 실행해보세요.\n"
+                    + "\n".join(prepared_lines)
+                )
+                answer_format = "markdown"
                 action = {"type": "prepare_compare", "payload": {"params": ctx.model_dump(mode="json")}}
 
     elif intent in ("schedule", "scenario"):
@@ -1077,11 +1106,11 @@ def _build_chat_reply(
                     chips.append(top.chip)
                 stages.start("explain")
                 explain_result = explain_service.explain_action(
-                    top.id, _llm_provider, profile, params_policy, today=date.today(),
+                    top.id, _llm_provider, profile, params_policy, today=date.today(), detail=detail,
                 )
                 if explain_result is not None:
-                    status, detail, tech = _explain_stage_detail(explain_result)
-                    stages.finish("explain", status, detail, tech=tech)
+                    status, stage_detail, tech = _explain_stage_detail(explain_result)
+                    stages.finish("explain", status, stage_detail, tech=tech)
                     if explain_result.source == "llm":
                         explain_llm_used = True
                         explain_model = explain_result.model
@@ -1153,7 +1182,7 @@ def _build_chat_reply(
 
                 stages.start("explain")
                 conclusion, w_llm_used, w_model, w_latency_ms, w_problems = explain_service.explain_chat_whatif(
-                    result, _llm_provider,
+                    result, _llm_provider, detail=detail,
                 )
                 if w_llm_used:
                     stages.finish("explain", "done", "설명을 썼어요", tech=f"Gemini {w_model} · {_fmt_seconds(w_latency_ms)}")
@@ -1208,7 +1237,12 @@ def _build_chat_reply(
                 stages.finish("explain", "skip", "준비된 문장을 그대로 썼어요")
             else:
                 stages.start("kb")
-                ref_sections = answer_service.kb_reference_sections(doc)
+                # SPEC 2.16: 섹션 개수 상한(최대 5는 full, 3은 brief)은 format_kb_answer가
+                # 답변 본문에 실제로 쓰는 개수와 같아야 "N개 문단을 참조했어요" 안내와
+                # 리소스 패널이 어긋나지 않는다.
+                ref_sections = answer_service.kb_reference_sections(
+                    doc, limit=explain_service.KB_SECTION_LIMIT[detail],
+                )
                 kb_res = answer_service.kb_resources(doc, ref_sections)
                 resources.extend(kb_res)
                 stages.finish("kb", "done", f"{hit.title} 문서에서 {len(ref_sections)}개 문단을 참조했어요",
@@ -1217,7 +1251,7 @@ def _build_chat_reply(
                 stages.start("explain")
                 markdown_text, kb_llm_used, kb_model, kb_latency_ms, kb_problems = answer_service.format_kb_answer(
                     doc, hit, _llm_provider, banned,
-                    deadline_seconds=explain_service.CHAT_EXPLAIN_DEADLINE_SECONDS,
+                    deadline_seconds=explain_service.CHAT_EXPLAIN_DEADLINE_SECONDS, detail=detail,
                 )
                 if kb_llm_used:
                     stages.finish("explain", "done", "설명을 썼어요", tech=f"Gemini {kb_model} · {_fmt_seconds(kb_latency_ms)}")
@@ -1375,7 +1409,9 @@ def run_chat(
         chat_id = chatlog.create_chat(profile_id, title=title)["id"]
     chatlog.append_message(chat_id, "user", guardrails.mask_pii(body.message))
 
-    built = _build_chat_reply(body.message, base_params=base_params, emit=emit, cancel_event=cancel_event)
+    built = _build_chat_reply(
+        body.message, base_params=base_params, emit=emit, cancel_event=cancel_event, detail=body.detail,
+    )
 
     _append_reply_message(
         chat_id, built.reply_text, llm_used=built.llm_used, action=built.action, chips=built.chips,

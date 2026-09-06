@@ -249,7 +249,12 @@ def test_format_kb_answer_accepts_text_with_no_new_numbers():
         summary="신용 상태가 좋아졌을 때 기존 대출 금리를 낮춰달라고 요구할 수 있는 권리예요.",
         points=[f"**{name}**: 참고할 내용이에요." for name in sections],
     )
-    markdown, llm_used, model, latency_ms, problems = answer_service.format_kb_answer(doc, None, fake, [])
+    # SPEC 2.16: 기본값(detail="full")은 요약 2문장·섹션 최대 5개를 요구한다. 이 테스트는
+    # 그라운딩(숫자 검사) 자체를 보는 단위 테스트라 길이 계약이 기존(2.8) 그대로인
+    # detail="brief"로 호출해 1문장 요약을 그대로 쓴다.
+    markdown, llm_used, model, latency_ms, problems = answer_service.format_kb_answer(
+        doc, None, fake, [], detail="brief",
+    )
     assert llm_used is True
     assert problems == []
     assert model == "fake-kb-model"

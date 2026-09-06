@@ -13,6 +13,7 @@ skip_model_on_status: [404]           # 다음 모델로 넘어가는 오류
 fail_fast_on_status: [400, 401, 403]  # 요청 자체 문제 또는 키 무효. 400은 즉시 실패, 401/403은 다음 키
 key_cooldown_seconds: 60              # 429를 받은 키는 60초 동안 건너뜀
 temperature: 0
+explain_temperature: 0.4              # 설명 문장(슬롯 필링) 전용 온도. 추출(extract)은 temperature(0)를 그대로 쓴다
 timeout_seconds: 8                    # 요청 1건 상한
 total_deadline_seconds: 12            # 체인 전체 상한, 초과 시 규칙 파서 폴백
 explain_total_deadline_seconds: 15    # 설명 문장(슬롯 필링, SPEC 2.8) 전용 체인 상한, 초과 시 템플릿 폴백

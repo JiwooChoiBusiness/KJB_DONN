@@ -48,6 +48,9 @@ from app.services.insights import _PUBLIC_TOKENS, _SECTOR_WORDS
 # 첨부 답변도 같은 문구를 쓴다 - app/api/routes.py가 answer.py를 이미 import하는 것과
 # 같은 방식으로 app/core 쪽의 준-비공개 상수를 직접 참조한다).
 from app.core.spending import _LIFE_EVENT_LABELS
+# SPEC 2.16(답변 길이): 길이 규칙 표와 문장 수 세기는 app/services/explain.py에 한 곳에만
+# 둔다(explain.py는 answer.py를 import하지 않아 순환 임포트가 생기지 않는다).
+from app.services.explain import KB_POINT_MAX_CHARS, KB_SECTION_LIMIT, LENGTH_RULES, count_sentences
 
 _CATEGORY_LABELS_KR: dict[str, str] = {
     "deposit": "예금", "saving": "적금", "mortgage": "주택담보대출",
@@ -209,13 +212,20 @@ def external_resources(sources: list[dict[str, Any]]) -> list[ChatResource]:
 # KB 답변 형식 (SPEC 2.11 3절)
 # ---------------------------------------------------------------------------
 
-KB_ANSWER_SYSTEM = (
-    "당신은 한국어 개인 부채 코치 앱 DONN의 제도 안내 요약 작성기입니다. 제공된 문단만 "
-    "근거로 요약 1문장과 핵심 3개(각 1문장, 문단당 1개)를 JSON으로 돌려주세요. 문단에 없는 "
-    "숫자나 사실을 지어내지 마세요. 특정 금융회사나 상품 이름, 가입을 권유하는 표현을 쓰지 "
-    "마세요. 숫자를 한글 수사로 바꿔 쓰지 말고 아라비아 숫자 그대로 쓰세요. 해요체로 짧고 "
-    "명확하게 쓰세요."
-)
+def _kb_answer_system(detail: str) -> str:
+    """제도 안내 요약(kb_answer_v1) 시스템 프롬프트. 요약 문장 수·핵심 개수 상한만
+    detail(SPEC 2.16, "full"|"brief")별로 다르다."""
+    rule = LENGTH_RULES[detail]["kb_summary"]
+    point_limit = KB_SECTION_LIMIT[detail]
+    return (
+        "당신은 한국어 개인 부채 코치 앱 DONN의 제도 안내 요약 작성기입니다. 제공된 문단만 "
+        f"근거로 요약({rule['min_sentences']}~{rule['max_sentences']}문장)과 핵심 최대 "
+        f"{point_limit}개(각 1문장, 문단당 1개)를 JSON으로 돌려주세요. 문단에 없는 숫자나 "
+        "사실을 지어내지 마세요. 특정 금융회사나 상품 이름, 가입을 권유하는 표현을 쓰지 "
+        "마세요. 숫자를 한글 수사로 바꿔 쓰지 말고 아라비아 숫자 그대로 쓰세요. 문장마다 "
+        "서로 다른 정보를 쓰고 같은 말을 반복하지 마세요. 해요체로 짧고 명확하게 쓰세요."
+    )
+
 
 KB_ANSWER_SCHEMA: dict[str, Any] = {
     "type": "OBJECT",
@@ -324,13 +334,30 @@ def _kb_text_problems(text: str, banned: list[str], max_chars: int) -> list[str]
     return problems
 
 
-def _render_kb_markdown(summary: str, points: list[str], needs_verification: bool) -> str:
+def _render_kb_markdown(
+    summary: str, points: list[str], needs_verification: bool, usage_line: Optional[str] = None,
+) -> str:
     lines = [summary, "", "**핵심**"]
     lines.extend(f"- {p}" for p in points)
     if needs_verification:
         lines.append("")
         lines.append("일부 수치는 확인이 필요한 항목이에요.")
+    if usage_line:
+        lines.append("")
+        lines.append(usage_line)
     return "\n".join(lines)
+
+
+def _kb_usage_line(doc: Any) -> str:
+    """SPEC 2.16: "이렇게 활용하세요" 한 줄(코드가 항상 붙인다, LLM/규칙 경로 공통).
+
+    "절차" 섹션의 권유 표현 없는 첫 문장을 쓰고, 그 섹션이 없거나 빈 문장이면 고정
+    안내로 대신한다(kb/*.md 15개 문서는 전부 "절차" 섹션을 갖고 있다).
+    """
+    procedure_sentence = _first_clean_sentence((doc.sections or {}).get("절차", ""))
+    if not procedure_sentence:
+        procedure_sentence = "자세히 보기에서 절차를 확인해 보세요."
+    return f"이렇게 활용하세요: {procedure_sentence}"
 
 
 def _rule_based_kb_answer(doc: Any, sections: list[str]) -> tuple[str, list[str]]:
@@ -349,13 +376,20 @@ def _rule_based_kb_answer(doc: Any, sections: list[str]) -> tuple[str, list[str]
 
 def format_kb_answer(
     doc: Any, hit: Any, provider: Any, banned: list[str], *, deadline_seconds: Optional[float] = None,
+    detail: str = "full",
 ) -> tuple[str, bool, Optional[str], int, list[str]]:
     """KB 문서 1건으로 마크다운 답변을 만든다.
 
     반환: (markdown_text, llm_used, model, latency_ms, problems). LLM 경로가 하나라도
     검증에 실패하면 규칙 경로(섹션 제목 + 첫 문장)로 전부 되돌아간다(부분 혼합 없음).
+    `detail`(SPEC 2.16, "full"|"brief")은 섹션·핵심 개수 상한(`KB_SECTION_LIMIT`)과 요약
+    길이 규칙(`LENGTH_RULES`)에 반영된다. 마지막 줄("이렇게 활용하세요")은 경로와 무관하게
+    코드가 항상 붙인다(검증 대상이 아니다).
     """
-    sections = kb_reference_sections(doc)
+    section_limit = KB_SECTION_LIMIT[detail]
+    summary_rule = LENGTH_RULES[detail]["kb_summary"]
+    point_max_chars = KB_POINT_MAX_CHARS[detail]
+    sections = kb_reference_sections(doc, limit=section_limit)
     rule_summary, rule_points = _rule_based_kb_answer(doc, sections)
 
     llm_used = False
@@ -375,7 +409,7 @@ def format_kb_answer(
 
         started = time.monotonic()
         try:
-            result = provider.explain(slots, "kb_answer_v1", KB_ANSWER_SYSTEM, **kwargs)
+            result = provider.explain(slots, "kb_answer_v1", _kb_answer_system(detail), **kwargs)
             latency_ms = int((time.monotonic() - started) * 1000)
         except LLMUnavailable:
             latency_ms = int((time.monotonic() - started) * 1000)
@@ -406,11 +440,15 @@ def format_kb_answer(
                     [slotfill.sanitize(str(p)) for p in raw_points_field]
                     if isinstance(raw_points_field, list) else []
                 )
-                candidate_problems = list(_kb_text_problems(raw_summary, banned, 120))
+                candidate_problems = list(_kb_text_problems(raw_summary, banned, summary_rule["max_chars"]))
+                if raw_summary and count_sentences(raw_summary) < summary_rule["min_sentences"]:
+                    candidate_problems.append("too_short")
                 if len(raw_points) != len(sections):
                     candidate_problems.append("points_count_mismatch")
                 for p in raw_points:
-                    candidate_problems.extend(f"point:{c}" for c in _kb_text_problems(p, banned, 100))
+                    candidate_problems.extend(
+                        f"point:{c}" for c in _kb_text_problems(p, banned, point_max_chars)
+                    )
                 output_numbers = set(_number_tokens(raw_summary))
                 for p in raw_points:
                     output_numbers |= _number_tokens(p)
@@ -429,7 +467,7 @@ def format_kb_answer(
     else:
         problems.append("llm_unavailable")
 
-    markdown = _render_kb_markdown(summary, points, doc.needs_verification)
+    markdown = _render_kb_markdown(summary, points, doc.needs_verification, _kb_usage_line(doc))
     return markdown, llm_used, model, latency_ms, problems
 
 
@@ -589,12 +627,19 @@ def external_answer(
 # 직접 답변 (SPEC 2.11 1절)
 # ---------------------------------------------------------------------------
 
-DIRECT_ANSWER_SYSTEM = (
-    "당신은 한국어 개인 부채 코치 앱 DONN의 안내 도우미입니다. DONN이 할 수 있는 일(부채 "
-    "상환표 계산, 시나리오 비교, 공시 상품 비교, 행동 제안, 제도 안내, 소비 패턴 분석, "
-    "생애 흐름과 노후자금 계산)을 바탕으로 인사나 일반적인 질문에 2문장 이내로 답하세요. "
-    "숫자, 상품명, 금융회사명, 가입을 권유하는 표현을 쓰지 말고 해요체로 답하세요."
-)
+def _direct_answer_system(detail: str) -> str:
+    """직접 답변(direct_answer_v1) 시스템 프롬프트. 문장 수 상한만 detail(SPEC 2.16,
+    "full"|"brief")별로 다르다."""
+    rule = LENGTH_RULES[detail]["direct"]
+    return (
+        "당신은 한국어 개인 부채 코치 앱 DONN의 안내 도우미입니다. DONN이 할 수 있는 일(부채 "
+        "상환표 계산, 시나리오 비교, 공시 상품 비교, 행동 제안, 제도 안내, 소비 패턴 분석, "
+        "생애 흐름과 노후자금 계산)을 바탕으로 인사나 일반적인 질문에 답하세요. 문장마다 "
+        "서로 다른 정보를 담고 같은 말을 반복하지 마세요. "
+        f"문장 수는 {rule['min_sentences']}~{rule['max_sentences']}문장입니다. "
+        "숫자, 상품명, 금융회사명, 가입을 권유하는 표현을 쓰지 말고 해요체로 답하세요."
+    )
+
 
 DIRECT_ANSWER_SCHEMA: dict[str, Any] = {
     "type": "OBJECT",
@@ -610,20 +655,22 @@ DIRECT_ANSWER_FALLBACK_TEXT = (
 
 
 def build_direct_answer(
-    provider: Any, banned: list[str], *, deadline_seconds: Optional[float] = None,
+    provider: Any, banned: list[str], *, deadline_seconds: Optional[float] = None, detail: str = "full",
 ) -> tuple[str, bool, Optional[str], int, list[str]]:
     """(text, llm_used, model, latency_ms, problems). 프로필 수치·발화 원문을 LLM에 보내지
-    않는다(자료가 필요 없는 질문이므로 빈 slots만 보낸다)."""
+    않는다(자료가 필요 없는 질문이므로 빈 slots만 보낸다). `detail`(SPEC 2.16)은 길이
+    규칙(`LENGTH_RULES`)과 시스템 프롬프트에 반영된다."""
     if not hasattr(provider, "explain") or not provider.available():
         return DIRECT_ANSWER_FALLBACK_TEXT, False, None, 0, ["llm_unavailable"]
 
+    rule = LENGTH_RULES[detail]["direct"]
     kwargs: dict[str, Any] = {"schema": DIRECT_ANSWER_SCHEMA}
     if deadline_seconds is not None:
         kwargs["deadline_seconds"] = deadline_seconds
 
     started = time.monotonic()
     try:
-        result = provider.explain({}, "direct_answer_v1", DIRECT_ANSWER_SYSTEM, **kwargs)
+        result = provider.explain({}, "direct_answer_v1", _direct_answer_system(detail), **kwargs)
     except LLMUnavailable:
         latency_ms = int((time.monotonic() - started) * 1000)
         return DIRECT_ANSWER_FALLBACK_TEXT, False, None, latency_ms, ["llm_unavailable"]
@@ -648,7 +695,11 @@ def build_direct_answer(
 
     sanitized = slotfill.sanitize(summary)
     # 허용 플레이스홀더 없음(빈 allowed set) + 숫자 있으면 실패 + 금칙어/권유표현/길이 검사.
-    problems = slotfill.validate(sanitized, set(), banned, max_chars=200, max_sentences=2)
+    problems = slotfill.validate(
+        sanitized, set(), banned, max_chars=rule["max_chars"], max_sentences=rule["max_sentences"],
+    )
+    if sanitized and count_sentences(sanitized) < rule["min_sentences"]:
+        problems.append("too_short")
     if problems:
         return DIRECT_ANSWER_FALLBACK_TEXT, False, None, latency_ms, problems
     return sanitized, True, result.model, latency_ms, []

@@ -118,9 +118,15 @@ def test_chat_stream_stage_order_and_reply_trace_matches_stored_message(monkeypa
 
 
 def test_chat_stream_compare_intent_llm_explain_fills_numbers_into_reply(monkeypatch):
+    # SPEC 2.16: detail 기본값(full)의 chat_compare_prep 길이 규칙은 3~4문장이라(기존 2.8은
+    # 2문장) 여기서도 3문장짜리 요약을 써야 "too_short"로 템플릿 폴백하지 않는다.
     fake = _FakeChatProvider(
         extract_data={"intent": "compare", "category": "credit", "amount": 20_000_000, "term_months": 36},
-        explain_summary="신용대출 금액 {amount}을 {term_months} 동안 갚는 조건이라서 준비했어요. 기간은 추정값이에요.",
+        explain_summary=(
+            "신용대출 금액 {amount}을 {term_months} 동안 갚는 조건이라서 이렇게 준비했어요. "
+            "기간과 금액은 추정값이라 조건 확인 화면에서 바꿀 수 있어요. "
+            "아래에서 실행하면 순위와 설명을 바로 확인할 수 있어요."
+        ),
     )
     monkeypatch.setattr(routes_module, "_llm_provider", fake)
     _clear_session()
@@ -180,10 +186,18 @@ def test_chat_stream_compare_intent_llm_digit_leak_falls_back_to_template(monkey
 
 
 def test_chat_stream_action_intent_uses_llm_explain_sentence(monkeypatch):
+    # SPEC 2.16: detail 기본값(full)의 action_card 길이 규칙은 4~5문장이라(기존 2.8은
+    # 3문장) 여기서도 4문장짜리 요약을 써야 "too_short"로 템플릿 폴백하지 않는다.
+    action_summary = (
+        "지금 상황 때문에 이번 안내를 한번 확인했어요. "
+        "여건에 맞게 준비한 내용이라 지금 살펴보면 도움이 될 거예요. "
+        "무리하지 않는 선에서 하나씩 진행해보세요. "
+        "궁금한 점이 있으면 관련 화면에서 자세히 확인해보세요."
+    )
     assert client.post("/api/session/persona/P1").status_code == 200
     fake = _FakeChatProvider(
         extract_data={"intent": "action"},
-        explain_summary={"action_card_v1": "지금 상황 때문에 한번 확인했어요. 여건에 맞게 계속 살펴보세요."},
+        explain_summary={"action_card_v1": action_summary},
     )
     monkeypatch.setattr(routes_module, "_llm_provider", fake)
 
@@ -192,7 +206,7 @@ def test_chat_stream_action_intent_uses_llm_explain_sentence(monkeypatch):
     events = _parse_sse_events(r.text)
     reply = events[-1][1]
 
-    assert reply["reply_text"] == "지금 상황 때문에 한번 확인했어요. 여건에 맞게 계속 살펴보세요."
+    assert reply["reply_text"] == action_summary
     assert reply["llm_used"] is True
 
     terminal = _terminal_stage_map(events)
@@ -257,7 +271,7 @@ def test_post_chat_non_streaming_also_carries_trace(monkeypatch):
 def test_chat_stream_emits_error_event_when_build_chat_reply_raises(monkeypatch):
     monkeypatch.setattr(routes_module, "_llm_provider", _FakeUnavailableProvider())
 
-    def _boom(message, base_params=None, emit=None):  # noqa: ANN001
+    def _boom(message, base_params=None, emit=None, cancel_event=None, detail="full"):  # noqa: ANN001
         raise RuntimeError("강제 실패(테스트)")
 
     monkeypatch.setattr(routes_module, "_build_chat_reply", _boom)

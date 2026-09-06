@@ -63,6 +63,92 @@ def _load_llm_yaml_value(key: str, default: Any, path: str = "config/llm.yaml") 
 
 CHAT_EXPLAIN_DEADLINE_SECONDS: float = _load_llm_yaml_value("chat_explain_deadline_seconds", 8)
 
+# ---------------------------------------------------------------------------
+# 답변 길이 "자세히" 기본값 (SPEC 2.16, PMO 요청 2026-09-06)
+# ---------------------------------------------------------------------------
+# detail="full"(기본)이 이번 기능의 새 상한이고 detail="brief"는 2.8절의 기존 상한을 그대로
+# 유지한다. min_sentences 미만이면 too_short로 템플릿 폴백한다(`_process_text`). brief의
+# min_sentences는 전부 1이라(원래도 하한이 없었다) "brief 모드에서는 min_sentences 검사만
+# 완화" 요구를 그대로 만족한다.
+LENGTH_RULES: dict[str, dict[str, dict[str, int]]] = {
+    "full": {
+        "compare_summary": {"min_sentences": 4, "max_sentences": 6, "max_chars": 700},
+        "compare_reason": {"min_sentences": 1, "max_sentences": 2, "max_chars": 220},
+        "action_card": {"min_sentences": 4, "max_sentences": 5, "max_chars": 600},
+        "chat_compare_prep": {"min_sentences": 3, "max_sentences": 4, "max_chars": 400},
+        "whatif": {"min_sentences": 2, "max_sentences": 3, "max_chars": 320},
+        "direct": {"min_sentences": 2, "max_sentences": 3, "max_chars": 260},
+        "kb_summary": {"min_sentences": 2, "max_sentences": 2, "max_chars": 240},
+    },
+    "brief": {
+        "compare_summary": {"min_sentences": 1, "max_sentences": 3, "max_chars": 300},
+        "compare_reason": {"min_sentences": 1, "max_sentences": 1, "max_chars": 140},
+        "action_card": {"min_sentences": 1, "max_sentences": 3, "max_chars": 300},
+        "chat_compare_prep": {"min_sentences": 1, "max_sentences": 2, "max_chars": 220},
+        "whatif": {"min_sentences": 1, "max_sentences": 1, "max_chars": 160},
+        "direct": {"min_sentences": 1, "max_sentences": 2, "max_chars": 200},
+        "kb_summary": {"min_sentences": 1, "max_sentences": 1, "max_chars": 120},
+    },
+}
+
+# SPEC 2.16: 제도 안내(KB) 섹션·핵심 개수 상한. 문장 길이가 아니라 "개수" 상한이라
+# LENGTH_RULES와 표 구조가 달라 따로 둔다. `app/services/answer.py::format_kb_answer`가 쓴다.
+KB_SECTION_LIMIT: dict[str, int] = {"full": 5, "brief": 3}
+KB_POINT_MAX_CHARS: dict[str, int] = {"full": 120, "brief": 100}
+
+
+def ref_suffix(detail: str) -> str:
+    """detail이 기본값(full)이 아니면 캐시 키(ref_id)에 붙일 접미사(예: "#brief").
+
+    full은 접미사를 붙이지 않는다(이번 기능 이전에 저장된 설명, 그리고 `ExplainResult.ref_id`
+    문서화된 형태(decision_id 또는 action ref 그대로)와 하위 호환). brief만 별도 키를 써서
+    같은 decision_id/action_id라도 full·brief 캐시가 서로 덮어쓰지 않는다.
+    """
+    return "" if detail == "full" else f"#{detail}"
+
+
+# app.llm.slotfill.validate와 같은 문장 구분 규칙이다(그 모듈은 이번 작업의 수정 대상이
+# 아니라 여기 그대로 복제해 둔다 - app/llm/slotfill.py는 builder 수정 파일 목록 밖이다).
+_SENTENCE_END_RE = re.compile(r"[.!?]+")
+
+
+def _split_sentences(text: str) -> list[str]:
+    return [s.strip() for s in _SENTENCE_END_RE.split(text) if s.strip()]
+
+
+def count_sentences(text: str) -> int:
+    """text의 문장 수(slotfill.validate의 too_many_sentences 판정과 같은 방식으로 센다).
+
+    `app/services/answer.py`(direct 답변·제도 안내 KB 요약)도 이 함수를 그대로 재사용해
+    too_short(최소 문장 수 미달) 여부를 판정한다.
+    """
+    return len(_split_sentences(text))
+
+
+def _word_tokens(sentence: str) -> set[str]:
+    return set(sentence.split())
+
+
+def _is_repetitive(text: str) -> bool:
+    """문장 두 개의 어절(공백 기준 토큰) 집합이 70% 이상 겹치면 True(자카드 유사도 기준).
+
+    "문장마다 다른 정보를 쓰게" 하려는 SPEC 2.16 취지의 반복 검사다(`_extra_quality_problems`가
+    호출). 토큰이 없는(빈) 문장은 비교에서 제외한다.
+    """
+    sentences = _split_sentences(text)
+    token_sets = [_word_tokens(s) for s in sentences]
+    for i, a in enumerate(token_sets):
+        if not a:
+            continue
+        for b in token_sets[i + 1:]:
+            if not b:
+                continue
+            union = a | b
+            if union and len(a & b) / len(union) >= 0.7:
+                return True
+    return False
+
+
 EXPLAIN_SYSTEM = (
     "당신은 한국어 개인 부채 코치 앱 DONN의 설명 작성기입니다. 입력 JSON의 facts만으로 문장을 씁니다. "
     "규칙 1: 숫자를 직접 쓰지 말고 금액, 금리, 기간, 개수는 반드시 placeholders에 있는 "
@@ -70,10 +156,11 @@ EXPLAIN_SYSTEM = (
     "규칙 2: 상품명, 금융회사명, 브랜드명을 쓰지 말고 각 항목은 제공된 익명 라벨로만 부르세요. "
     "규칙 3: 추천, 가입하세요, 갈아타세요 같은 권유 표현을 쓰지 말고 비교, 확인, 살펴보기로 쓰세요. "
     "규칙 4: 입력에 없는 사실(우대조건, 한도, 심사 결과, 자격, 서류)을 지어내지 마세요. "
-    "규칙 5: 해요체로 짧고 명확하게 쓰세요. summary는 2~3문장이고, reasons가 있다면 항목마다 "
-    "1문장씩 items 순서와 같은 개수로 돌려주세요. "
+    "규칙 5: 해요체로 짧고 명확하게 쓰세요. "
     "규칙 6: em dash나 특수 기호, 마크다운 서식(별표, 백틱, 목록 기호)을 쓰지 마세요. "
-    "규칙 7: 출력은 주어진 JSON 스키마를 그대로 따르세요."
+    "규칙 7: 출력은 주어진 JSON 스키마를 그대로 따르세요. "
+    "규칙 8(2026-09-06 PMO 요청): 문장마다 서로 다른 정보(사실, 이유, 비교, 주의, 다음 행동)를 "
+    "쓰고 같은 말을 반복하지 마세요. 빈말을 쓰지 마세요."
 )
 
 COMPARE_SCHEMA: dict[str, Any] = {
@@ -91,20 +178,33 @@ ACTION_SCHEMA: dict[str, Any] = {
     "required": ["summary"],
 }
 
+
+def _compare_system(detail: str) -> str:
+    """compare_summary_v1 시스템 프롬프트. 길이 규칙(규칙 9)만 detail별로 다르다."""
+    s = LENGTH_RULES[detail]["compare_summary"]
+    r = LENGTH_RULES[detail]["compare_reason"]
+    return EXPLAIN_SYSTEM + (
+        f" 규칙 9(길이): summary는 {s['min_sentences']}~{s['max_sentences']}문장이고, reasons가 "
+        f"있다면 항목마다 {r['min_sentences']}~{r['max_sentences']}문장씩 items 순서와 같은 "
+        "개수로 돌려주세요. 숫자는 자리표(placeholder)만 쓰세요."
+    )
+
+
 # 행동 카드 설명(action_card_v1) 전용 시스템 프롬프트(2026-09-06 PMO 지적: 실제 화면에서
 # "현재 -1,450,608원이나 95% 상태를 고려해..." 같이 라벨 없는 플레이스홀더 나열이
-# 나왔다). EXPLAIN_SYSTEM의 공통 규칙에 3문장 구조와 라벨 동반 요구, 숫자 없는 좋은
-# 문장 예시(R2 추가 상환, R4 비상금, R3 대환 비교)를 더한다.
-ACTION_EXPLAIN_SYSTEM = EXPLAIN_SYSTEM + (
-    "\n규칙 8(구조): summary는 반드시 세 문장입니다. 문장 1은 확인된 사실을 라벨과 값으로 "
-    "말합니다(예: 이번 달 남는 돈이 {net_monthly}이고 상환 비율이 {debt_service_ratio}라서). "
-    "문장 2는 그 사실이 왜 중요한지 gist를 풀어서 설명합니다. 문장 3은 지금 할 일 한 가지를 "
-    "카드 제목의 행동을 풀어써서 말합니다(상품명·회사명 없이). "
-    "규칙 9(라벨 동반): placeholders 목록의 각 항목은 \"키: 라벨\" 형식입니다. 문장에서 그 "
+# 나왔다). EXPLAIN_SYSTEM의 공통 규칙에 구조와 라벨 동반 요구, 숫자 없는 좋은 문장
+# 예시(R2 추가 상환, R4 비상금, R3 대환 비교)를 더한다. detail="full"이면 SPEC 2.16의
+# "사실 -> 이유 -> 지금 할 일 -> 주의점 -> 확인 방법" 4~5문장 구조를, "brief"면 기존(2.8)
+# 3문장 구조를 쓴다(few-shot 예문도 구조에 맞춰 따로 둔다).
+_ACTION_LABEL_RULE = (
+    " 규칙 10(라벨 동반): placeholders 목록의 각 항목은 \"키: 라벨\" 형식입니다. 문장에서 그 "
     "플레이스홀더를 쓸 때는 반드시 라벨에 해당하는 말과 함께 쓰세요(예: 라벨이 \"이번 달 "
     "남는 돈\"이면 \"이번 달 남는 돈이 {net_monthly}\"처럼 쓰고, 라벨 없이 \"{net_monthly}이나\" "
-    "처럼 값만 나열하지 마세요). "
-    "좋은 예시 세 개(숫자 없이 플레이스홀더를 그대로 쓴 문장, 실제로는 이렇게 라벨과 함께 씁니다):\n"
+    "처럼 값만 나열하지 마세요)."
+)
+
+_ACTION_FEWSHOT_BRIEF = (
+    " 좋은 예시 세 개(숫자 없이 플레이스홀더를 그대로 쓴 문장, 실제로는 이렇게 라벨과 함께 씁니다):\n"
     "1) 이번 달 남는 돈이 {net_monthly}이라서 금리 {target_rate} 대출에 추가로 갚으면 "
     "{months_saved} 빨리 끝나고 이자 {interest_saved}을 아낄 수 있어요. 여유 자금이 생기면 "
     "이 대출부터 갚는 것을 확인해 보세요.\n"
@@ -113,6 +213,63 @@ ACTION_EXPLAIN_SYSTEM = EXPLAIN_SYSTEM + (
     "3) 지금 대출 금리가 {current_rate}로 낮지 않은 편이라서 다른 조건과 비교해볼 필요가 "
     "있어요. 공시된 다른 상품의 금리와 조건을 비교해 보세요."
 )
+
+_ACTION_FEWSHOT_FULL = (
+    " 좋은 예시 세 개(숫자 없이 플레이스홀더를 그대로 쓴 문장, 실제로는 이렇게 라벨과 함께 "
+    "씁니다. 순서는 사실, 이유, 지금 할 일, 주의점, 확인 방법입니다):\n"
+    "1) 이번 달 남는 돈이 {net_monthly}이고 지금 금리가 가장 높은 대출은 금리 {target_rate}예요. "
+    "여유 자금을 이 대출에 먼저 넣으면 전체 이자 부담을 가장 크게 줄일 수 있어서 중요해요. "
+    "이번 달부터 남는 돈을 이 대출 원금 상환에 우선 배정해 보세요. 다만 다른 대출의 최소 "
+    "상환일은 놓치지 않는 선에서 진행해야 해요. 실제 절감 효과는 상환표 화면에서 다시 "
+    "확인해 보세요.\n"
+    "2) 지금 비상금이 목표보다 {gap}만큼 모자라서 갑자기 돈이 필요할 때 대응하기 어려워요. "
+    "비상금이 부족하면 예상하지 못한 지출이 생겼을 때 다시 빚을 지게 될 수 있어서 중요해요. "
+    "매달 조금씩이라도 비상금부터 채우는 자동이체를 준비해 보세요. 다만 대출 상환을 미루면서까지 "
+    "무리하게 모을 필요는 없어요. 목표 금액까지 얼마나 남았는지는 내 부채 화면에서 확인해 "
+    "보세요.\n"
+    "3) 지금 대출 금리가 {current_rate}로 낮지 않은 편이고 남은 기간도 꽤 남아 있어요. 금리 "
+    "차이가 크면 갈아탔을 때 아낄 수 있는 이자도 커서 확인해볼 만해요. 공시된 다른 상품의 "
+    "금리와 조건을 지금 비교해 보세요. 다만 중도상환수수료가 있으면 그만큼 실제 절감액이 "
+    "줄어들 수 있어요. 조건 확인 화면에서 수수료까지 포함해 다시 계산해 보세요."
+)
+
+
+def action_explain_system(detail: str) -> str:
+    rule = LENGTH_RULES[detail]["action_card"]
+    if detail == "full":
+        structure = (
+            f" 규칙 9(구조): summary는 {rule['min_sentences']}~{rule['max_sentences']}문장이고 "
+            "사실, 그 사실이 왜 중요한지, 지금 할 일, 주의할 점, 확인 방법 순서로 각기 다른 "
+            "정보를 한 문장씩 담으세요."
+        )
+        fewshot = _ACTION_FEWSHOT_FULL
+    else:
+        structure = (
+            f" 규칙 9(구조): summary는 반드시 {rule['max_sentences']}문장입니다. "
+            "문장 1은 확인된 사실을 라벨과 값으로 말합니다(예: 이번 달 남는 돈이 {net_monthly}이고 "
+            "상환 비율이 {debt_service_ratio}라서). 문장 2는 그 사실이 왜 중요한지 gist를 풀어서 "
+            "설명합니다. 문장 3은 지금 할 일 한 가지를 카드 제목의 행동을 풀어써서 말합니다"
+            "(상품명, 회사명 없이)."
+        )
+        fewshot = _ACTION_FEWSHOT_BRIEF
+    return EXPLAIN_SYSTEM + structure + _ACTION_LABEL_RULE + fewshot
+
+
+def _chat_compare_system(detail: str) -> str:
+    rule = LENGTH_RULES[detail]["chat_compare_prep"]
+    return EXPLAIN_SYSTEM + (
+        f" 규칙 9(길이): summary는 {rule['min_sentences']}~{rule['max_sentences']}문장으로, 준비한 "
+        "조건과 추정하거나 바뀐 항목, 다음에 할 일을 각각 다른 문장으로 말하세요. 숫자는 "
+        "자리표(placeholder)만 쓰세요."
+    )
+
+
+def _whatif_system(detail: str) -> str:
+    rule = LENGTH_RULES[detail]["whatif"]
+    return EXPLAIN_SYSTEM + (
+        f" 규칙 9(길이): summary는 {rule['min_sentences']}~{rule['max_sentences']}문장으로 결론과 "
+        "그 이유, 가정을 각각 다른 문장으로 말하세요. 숫자는 자리표(placeholder)만 쓰세요."
+    )
 
 # ---------------------------------------------------------------------------
 # 설명 문장 품질 검증 (2026-09-06 PMO 지적, compare·action·chat_compare 모두 적용)
@@ -203,13 +360,16 @@ def _unlabeled_placeholder_names(text: str) -> list[str]:
 
 
 def _extra_quality_problems(text: str, *, location: str) -> list[str]:
-    """slotfill.validate 이후에 추가로 거는 품질 검사(2026-09-06 PMO 지적 반영).
+    """slotfill.validate 이후에 추가로 거는 품질 검사(2026-09-06 PMO 지적, 2.16 반영).
 
     (a) unlabeled_placeholder: 플레이스홀더 근처에 맥락어가 하나도 없음.
     (b) not_informative: summary에 이유 연결어와 행동 동사가 둘 다 있어야 한다(둘 중
         하나라도 없으면 실패). 항목 이유(reason_a/b/c)는 원래 문장이 짧고 사실
         나열형이라 이 검사는 summary에만 건다.
     (c) vague_phrase: "상태를 고려해" 같은 빈말이 있으면 실패(위치 무관).
+    (d) repetitive(SPEC 2.16): 문장 두 개의 어절 집합이 70% 이상 겹치면 실패(위치 무관).
+        "문장마다 다른 정보를 쓰게" 하려는 검사라 문장이 여러 개일 때만 의미가 있지만,
+        한 문장짜리 텍스트에도 안전하게 걸 수 있다(비교 대상이 없으면 항상 통과).
     """
     problems: list[str] = []
     if _unlabeled_placeholder_names(text):
@@ -221,6 +381,8 @@ def _extra_quality_problems(text: str, *, location: str) -> list[str]:
             problems.append("not_informative")
     if any(p in text for p in _VAGUE_PHRASES):
         problems.append("vague_phrase")
+    if _is_repetitive(text):
+        problems.append("repetitive")
     return problems
 
 # R0~R10 규칙 요지(숫자 없는 한 문장). app/core/rules.py의 각 규칙 조건을 그대로 요약한다.
@@ -309,13 +471,50 @@ def _vs_current_phrase(vs: Optional[int]) -> str:
 # 슬롯 조립 (facts/placeholders/values)
 # ---------------------------------------------------------------------------
 
+# SPEC 2.16: 비교 요약에 항상 붙이는 주의점·다음 단계(둘 다 숫자 없는 범주형 사실이라
+# facts에 그대로 넣는다. LLM이 문장 안에 자연스럽게 녹여 쓰게 하되, 코드가 정한 사실
+# 자체는 바뀌지 않는다).
+_COMPARE_CAVEATS: list[str] = [
+    "공시 금리는 기준 월의 공시값이라 실제 승인 금리와 한도는 심사에 따라 다름",
+    "중도상환수수료가 있을 수 있음",
+]
+_COMPARE_NEXT_STEPS: list[str] = [
+    "조건 확인 화면에서 금액·기간·금리 상한을 바꾸면 다시 계산됨",
+    "공시 열람 링크에서 원문 확인",
+]
+
+
+def _institution_kind_from_anon_label(label: str) -> str:
+    """anon_label(예: "A은행 신용대출")에서 취급 기관 종류(앞부분)만 뽑는다.
+
+    `app/core/ranking.py::_anon_label`의 형식은 "{순위 글자}{그룹명} {카테고리명}"이며
+    순위 글자와 그룹명 사이에는 공백이 없다(은행/저축은행/카드사/캐피탈/보험사/정책상품/기타
+    중 하나). 그룹명 뒤 첫 공백까지만 잘라 쓴다.
+    """
+    if len(label) < 2:
+        return "기타"
+    return (label[1:].split(" ", 1)[0] or "기타")
+
+
+def _rate_vs_current_loan_phrase(item_rate: float, current_rate: Optional[float]) -> str:
+    """항목 금리를 프로필의 대상 대출 금리와 비교한 범주형 문구(SPEC 2.16)."""
+    if current_rate is None:
+        return "비교 대상 없음"
+    if item_rate < current_rate:
+        return "현재 대출 금리보다 낮음"
+    if item_rate > current_rate:
+        return "현재 대출 금리보다 높음"
+    return "현재 대출 금리와 같음"
+
 
 def compare_slots(result: CompareResult, profile: Optional[UserProfile]) -> tuple[dict, dict, dict]:
     """비교 결과 상위 3개 항목만으로 (facts, placeholders, values)를 만든다.
 
     facts는 전부 숫자 없는 범주형 문자열이다(LLM에 그대로 전달). `CompareItem`에는
     `lender_group`/`rate_type` 필드가 없으므로(anon_label 문자열에 그룹명이 이미
-    포함되어 있다) SPEC 2.8 원문의 items 필드 중 그 둘은 만들지 않는다.
+    포함되어 있다) SPEC 2.8 원문의 items 필드 중 그 둘은 만들지 않는다. SPEC 2.16:
+    항목별 취급 기관 종류(institution_kind)와 현재 대출 금리 대비 방향(rate_vs_current_loan),
+    그리고 요약 전반의 주의점(caveats)·다음 단계(next_steps)를 추가한다(전부 숫자 없음).
     """
     ctx = result.context
     top_items = result.items[:3]
@@ -323,12 +522,15 @@ def compare_slots(result: CompareResult, profile: Optional[UserProfile]) -> tupl
     target_loan = None
     if ctx.target_loan_id and profile is not None:
         target_loan = next((l for l in profile.loans if l.id == ctx.target_loan_id), None)
+    current_rate = target_loan.annual_rate if target_loan is not None else None
 
     facts: dict[str, Any] = {
         "category": _CATEGORY_LABELS_KR.get(ctx.category.value, ctx.category.value),
         "sort_basis": _sort_basis_label(ctx.sort_key),
         "has_current_loan": "예" if target_loan is not None else "아니오",
         "estimated_fields": [_ESTIMATED_FIELD_LABELS_KR.get(f, f) for f in ctx.estimated_fields],
+        "caveats": list(_COMPARE_CAVEATS),
+        "next_steps": list(_COMPARE_NEXT_STEPS),
         "items": [],
     }
     if target_loan is not None:
@@ -346,6 +548,9 @@ def compare_slots(result: CompareResult, profile: Optional[UserProfile]) -> tupl
         "candidates_total": f"{result.candidates_total}개",
         "shown_count": f"{len(top_items)}개",
     }
+    if current_rate is not None:
+        placeholders["current_rate"] = "현재 대출 금리"
+        values["current_rate"] = f"{current_rate:.4g}%"
 
     for idx, item in enumerate(top_items, start=1):
         letter = _RANK_LETTER[idx]
@@ -354,6 +559,8 @@ def compare_slots(result: CompareResult, profile: Optional[UserProfile]) -> tupl
             "label": item.anon_label,
             "rate_kind": _rate_kind_label(item),
             "vs_current": _vs_current_phrase(item.vs_current_total_interest),
+            "rate_vs_current_loan": _rate_vs_current_loan_phrase(item.rate, current_rate),
+            "institution_kind": _institution_kind_from_anon_label(item.anon_label),
             "notes": list(item.notes),
         })
 
@@ -388,6 +595,22 @@ def _action_number_label(key: str) -> Optional[str]:
     )
 
 
+_LEADING_STEP_NUM_RE = re.compile(r"^\d+[.)]\s*")
+
+
+def _digit_free_sentences(items: list[str]) -> list[str]:
+    """번호(있다면)를 뗀 뒤 숫자가 하나도 남지 않은 문장만 남긴다(SPEC 2.16: next_actions·
+    caveats는 LLM에 보내는 facts라 숫자가 있으면 D4 위반이다). `card.steps`는 "1. ..." 처럼
+    번호가 붙기도 하고 `card.caveats`는 보통 번호가 없어 두 경우 모두 안전하게 처리한다.
+    """
+    out: list[str] = []
+    for raw in items:
+        cleaned = _LEADING_STEP_NUM_RE.sub("", raw).strip()
+        if cleaned and not _DIGIT_RE.search(cleaned):
+            out.append(cleaned)
+    return out
+
+
 def action_slots(card: ActionCard, profile: UserProfile, capacity: Capacity) -> tuple[dict, dict, dict]:
     """행동 카드 1건으로 (facts, placeholders, values)를 만든다.
 
@@ -397,6 +620,8 @@ def action_slots(card: ActionCard, profile: UserProfile, capacity: Capacity) -> 
     문장으로 전달하므로 rule_id는 내부 조회에만 쓰고 LLM 페이로드에는 넣지 않는다.
     같은 이유로 `card.numbers`의 라벨 자체에 숫자가 섞인 키가 있다면(현재
     `app/services/actions.py`의 라벨 맵에는 없다) placeholders/values에서 제외한다.
+    SPEC 2.16: `card.steps`/`card.caveats` 중 숫자가 없는 문장만(next_actions/caveats)
+    facts에 추가한다(번호 "1. "는 떼고, 그래도 숫자가 남으면 그 문장 자체를 뺀다).
     """
     facts: dict[str, Any] = {
         "title": card.title,
@@ -408,6 +633,13 @@ def action_slots(card: ActionCard, profile: UserProfile, capacity: Capacity) -> 
         loan = next((l for l in profile.loans if l.id == card.related_loan_ids[0]), None)
         if loan is not None:
             facts["loan_type"] = _LOAN_TYPE_LABELS_KR.get(loan.loan_type.value, "기타 대출")
+
+    next_actions = _digit_free_sentences(card.steps)
+    if next_actions:
+        facts["next_actions"] = next_actions
+    action_caveats = _digit_free_sentences(card.caveats)
+    if action_caveats:
+        facts["caveats"] = action_caveats
 
     placeholders: dict[str, str] = {}
     values: dict[str, str] = {}
@@ -443,8 +675,10 @@ def _call_llm_explain(
     그 인자를 아예 넘기지 않는다(기존 테스트 더블처럼 그 키워드를 모르는 provider와도
     호환되도록). 넘길 때는 SPEC 2.9의 대화 화면 설명(`explain_chat_compare`)처럼 provider
     기본값보다 짧은 체인 상한을 강제하고 싶을 때만 지정한다. `system`을 생략하면 공용
-    EXPLAIN_SYSTEM을 쓰고, action_card_v1처럼 구조화된 지시가 필요하면 호출부가
-    ACTION_EXPLAIN_SYSTEM 등을 넘긴다.
+    EXPLAIN_SYSTEM을 쓰고, 그 외에는 호출부가 detail별 길이 규칙을 담은 시스템 프롬프트
+    (`_compare_system(detail)`, `action_explain_system(detail)` 등, SPEC 2.16)를 넘긴다.
+    `temperature`는 이 함수가 provider에 넘기지 않는다(GeminiProvider가 스스로
+    `explain_temperature`를 기본값으로 쓴다 - SPEC 2.16, extract와 분리).
     """
     if not hasattr(provider, "explain") or not provider.available():
         return None, None, 0, ["llm_unavailable"]
@@ -487,14 +721,20 @@ def _call_llm_explain(
 
 def _process_text(
     raw: Any, allowed: set[str], banned: list[str], values: dict[str, str],
-    *, max_chars: int, max_sentences: int, location: str,
+    *, max_chars: int, max_sentences: int, location: str, min_sentences: int = 1,
 ) -> tuple[Optional[str], list[str]]:
-    """sanitize -> validate -> fill 파이프라인 1건. 문제가 있으면 (None, [위치가 접두된 코드들])."""
+    """sanitize -> validate -> fill 파이프라인 1건. 문제가 있으면 (None, [위치가 접두된 코드들]).
+
+    `min_sentences`(SPEC 2.16, 기본 1 = 사실상 검사 없음)보다 문장 수가 적으면 `too_short`로
+    실패한다(brief 모드는 항상 1을 넘겨 이 검사를 사실상 완화한다).
+    """
     if not isinstance(raw, str):
         return None, [f"{location}:empty"]
     sanitized = slotfill.sanitize(raw)
     problems = slotfill.validate(sanitized, allowed, banned, max_chars=max_chars, max_sentences=max_sentences)
     problems = problems + _extra_quality_problems(sanitized, location=location)
+    if sanitized and count_sentences(sanitized) < min_sentences:
+        problems.append("too_short")
     if problems:
         return None, [f"{location}:{p}" for p in problems]
     try:
@@ -522,24 +762,35 @@ def _vs_sentence(vs: Optional[int], vs_amount: Optional[str]) -> str:
 def _template_compare(
     top_items: list[CompareItem], facts: dict[str, Any], values: dict[str, str],
 ) -> tuple[str, dict[str, str]]:
-    """LLM 실패/검증 실패 시 쓰는 결정론적 템플릿(compare_summary_v1). SPEC 2.8 문장 그대로
-    (은/는은 `slotfill.josa`로 고른다)."""
+    """LLM 실패/검증 실패 시 쓰는 결정론적 템플릿(compare_summary_v1).
+
+    SPEC 2.16: 항상 4문장 구조(정렬 기준, 1순위 근거, 현재 대비, 확인할 점)로 보강했다
+    (은/는은 `slotfill.josa`로 고른다). 현재 대출과 비교할 정보가 없으면 3번째 문장은
+    그 사실 자체를 말한다(빈 문장으로 건너뛰지 않는다).
+    """
     if not top_items:
         return "지금 조건으로는 비교할 수 있는 상품이 없어요.", {}
 
     category = facts["category"]
     sort_basis = facts["sort_basis"]
     label_a = values["label_a"]
-    summary = (
+
+    s1 = (
         f"{category} 공시 상품 {values['candidates_total']} 중 {sort_basis}으로 "
-        f"상위 {values['shown_count']}를 골랐어요. "
+        f"상위 {values['shown_count']}를 골랐어요."
+    )
+    s2 = (
         f"{label_a}{slotfill.josa(label_a, '은/는')} 금리 {values['rate_a']}, "
         f"월 납입 {values.get('monthly_a', '확인 필요')}, "
         f"총이자 {values.get('total_a', '확인 필요')}로 첫 번째예요."
     )
-    summary += _vs_sentence(top_items[0].vs_current_total_interest, values.get("vs_a"))
+    vs_sentence = _vs_sentence(top_items[0].vs_current_total_interest, values.get("vs_a")).strip()
+    s3 = vs_sentence or "현재 대출과 비교할 정보가 없어 새 조건 기준으로만 안내해요."
     if facts.get("estimated_fields"):
-        summary += " 금액과 기간은 프로필에서 추정한 값이라 조건 확인에서 바꿀 수 있어요."
+        s4 = "금액과 기간은 프로필에서 추정한 값이라 조건 확인에서 바꿀 수 있어요."
+    else:
+        s4 = "공시 금리는 기준 월의 값이라 실제 승인 금리와 한도는 심사에 따라 달라질 수 있어요."
+    summary = " ".join([s1, s2, s3, s4])
 
     item_reasons: dict[str, str] = {}
     for idx, item in enumerate(top_items, start=1):
@@ -558,8 +809,31 @@ def _template_compare(
 
 
 def _template_action(card: ActionCard) -> tuple[str, dict[str, str]]:
-    """LLM 실패/검증 실패 시 쓰는 템플릿(action_card_v1). card.summary를 그대로 쓴다."""
+    """LLM 실패/검증 실패 시 쓰는 템플릿(action_card_v1). card.summary를 그대로 쓴다.
+
+    안전 모드(R0) 카드 전용이다(SPEC 0.1 결정론 원칙: 위기 상황 문장은 항상 이 카드
+    문구 그대로 쓴다, 늘리지 않는다). 일반 카드 폴백은 `_template_action_rich`를 쓴다.
+    """
     return card.summary, {}
+
+
+def _template_action_rich(card: ActionCard) -> tuple[str, dict[str, str]]:
+    """일반(비안전모드) 행동 카드 폴백 템플릿(SPEC 2.16): card.summary + 코드가 만든
+
+    "왜 중요한지"(RULE_GIST 문장) + "지금 할 일"(card.steps 첫 문장, 번호만 제거) 3문장
+    구성이다. 문장 수가 검증 규칙(action_card 템플릿은 검증을 타지 않지만 LENGTH_RULES와
+    같은 정신)보다 적어도 폴백이므로 그대로 쓴다(대상 규칙에 gist/steps가 없으면 있는
+    부분만으로 줄어들 수 있다).
+    """
+    sentences = [card.summary.strip()]
+    gist = RULE_GIST.get(card.rule_id, "")
+    if gist:
+        sentences.append(gist)
+    if card.steps:
+        first_step = _LEADING_STEP_NUM_RE.sub("", card.steps[0]).strip()
+        if first_step:
+            sentences.append(f"지금 할 일은 {first_step}")
+    return " ".join(s for s in sentences if s), {}
 
 
 def _guard_template(summary: str, item_reasons: dict[str, str], banned: list[str]) -> tuple[str, dict[str, str]]:
@@ -631,7 +905,9 @@ def _save_explanation(result: ExplainResult, *, extra: Optional[dict[str, Any]] 
 # ---------------------------------------------------------------------------
 
 
-def explain_compare(decision_id: str, provider: Any, *, refresh: bool = False) -> Optional[ExplainResult]:
+def explain_compare(
+    decision_id: str, provider: Any, *, refresh: bool = False, detail: str = "full",
+) -> Optional[ExplainResult]:
     """공시 비교 결과 설명. `decisions.get`이 없거나 compare 결정이 아니면 None.
 
     저장된 설명의 payload_json에는 생성 당시 세션 프로필 id를 비공개 키 `_profile_id`로
@@ -639,6 +915,10 @@ def explain_compare(decision_id: str, provider: Any, *, refresh: bool = False) -
     같은 decision_id를 다른 페르소나로 전환한 뒤에도 조회할 수 있는데, 캐시를 그대로
     재사용하면 이전 페르소나 기준으로 만든 문장(현재 대출 유무 등 facts)이 그대로
     나온다. 현재 프로필과 다르면 캐시를 쓰지 않고 새로 만든다.
+
+    `detail`(SPEC 2.16, "full"|"brief")은 길이 규칙(`LENGTH_RULES`)과 시스템 프롬프트
+    (`_compare_system`), 그리고 캐시 키(ref_id)에 반영된다. full은 decision_id 그대로를
+    ref_id로 쓰고 brief는 "decision_id#brief"를 써서 두 설명이 서로 덮어쓰지 않는다.
     """
     record = decisions_service.get(decision_id)
     if record is None or record.kind != "compare":
@@ -646,9 +926,10 @@ def explain_compare(decision_id: str, provider: Any, *, refresh: bool = False) -
 
     profile = session_service.get_profile()
     current_profile_id = profile.id if profile is not None else None
+    ref_id = f"{decision_id}{ref_suffix(detail)}"
 
     if not refresh:
-        stored_raw = _get_stored_row("compare", decision_id)
+        stored_raw = _get_stored_row("compare", ref_id)
         if stored_raw is not None and stored_raw.get("_profile_id") == current_profile_id:
             return ExplainResult.model_validate(stored_raw).model_copy(update={"cached": True})
 
@@ -657,9 +938,11 @@ def explain_compare(decision_id: str, provider: Any, *, refresh: bool = False) -
     facts, placeholders, values = compare_slots(result, profile)
     top_items = result.items[:3]
     allowed = set(placeholders.keys())
+    summary_rule = LENGTH_RULES[detail]["compare_summary"]
+    reason_rule = LENGTH_RULES[detail]["compare_reason"]
 
     data, model, latency_ms, problems = _call_llm_explain(
-        provider, facts, placeholders, "compare_summary_v1", COMPARE_SCHEMA,
+        provider, facts, placeholders, "compare_summary_v1", COMPARE_SCHEMA, system=_compare_system(detail),
     )
 
     all_problems: list[str] = list(problems)
@@ -671,7 +954,9 @@ def explain_compare(decision_id: str, provider: Any, *, refresh: bool = False) -
         if not isinstance(raw_reasons, list):
             raw_reasons = []
         summary_text, summary_problems = _process_text(
-            data.get("summary"), allowed, banned, values, max_chars=300, max_sentences=3, location="summary",
+            data.get("summary"), allowed, banned, values,
+            max_chars=summary_rule["max_chars"], max_sentences=summary_rule["max_sentences"],
+            min_sentences=summary_rule["min_sentences"], location="summary",
         )
         all_problems.extend(summary_problems)
 
@@ -682,7 +967,9 @@ def explain_compare(decision_id: str, provider: Any, *, refresh: bool = False) -
         for idx in range(len(top_items)):
             raw = raw_reasons[idx] if idx < len(raw_reasons) else None
             filled, reason_problems = _process_text(
-                raw, allowed, banned, values, max_chars=140, max_sentences=1, location=_REASON_LOCATIONS[idx],
+                raw, allowed, banned, values,
+                max_chars=reason_rule["max_chars"], max_sentences=reason_rule["max_sentences"],
+                min_sentences=reason_rule["min_sentences"], location=_REASON_LOCATIONS[idx],
             )
             all_problems.extend(reason_problems)
             reasons_filled.append(filled)
@@ -699,7 +986,7 @@ def explain_compare(decision_id: str, provider: Any, *, refresh: bool = False) -
 
     explain_result = ExplainResult(
         kind="compare",
-        ref_id=decision_id,
+        ref_id=ref_id,
         summary=summary_text,
         item_reasons=item_reasons,
         source=source,
@@ -724,8 +1011,13 @@ def explain_action(
     *,
     today: date,
     refresh: bool = False,
+    detail: str = "full",
 ) -> Optional[ExplainResult]:
-    """행동 카드 설명. `evaluate_rules` 원시 카드에서 action_id로 찾는다(없으면 None)."""
+    """행동 카드 설명. `evaluate_rules` 원시 카드에서 action_id로 찾는다(없으면 None).
+
+    `detail`(SPEC 2.16, "full"|"brief")은 길이 규칙(`LENGTH_RULES`)과 시스템 프롬프트
+    (`action_explain_system`), 그리고 캐시 키(ref_id)에 반영된다(brief는 "...#brief" 접미사).
+    """
     cards = actions_service._raw_actions(profile, params, today=today)
     card = next((c for c in cards if c.id == action_id), None)
     if card is None:
@@ -744,7 +1036,7 @@ def explain_action(
         "safe_mode": card.safe_mode,
         "related_loan_ids": list(card.related_loan_ids),
     }
-    ref_id = f"{profile.id}:{action_id}@{hashing.fingerprint(cache_fingerprint_input)[:8]}"
+    ref_id = f"{profile.id}:{action_id}@{hashing.fingerprint(cache_fingerprint_input)[:8]}{ref_suffix(detail)}"
 
     if not refresh:
         stored = get_stored("action", ref_id)
@@ -756,8 +1048,8 @@ def explain_action(
     allowed = set(placeholders.keys())
 
     # 2026-09-06 PMO 지적("말도 안 되는 답변"): 안전 모드(R0) 카드는 위기 상황 문장이라
-    # 결정론 원칙(SPEC 0.1)을 지켜 LLM을 아예 호출하지 않고 항상 카드 템플릿을 쓴다.
-    # provider.explain은 이 분기에서 한 번도 불리지 않는다.
+    # 결정론 원칙(SPEC 0.1)을 지켜 LLM을 아예 호출하지 않고 항상 카드 템플릿을 쓴다(길이
+    # 보강 대상이 아니다 - card.summary 그대로).
     if card.safe_mode:
         summary_text, item_reasons = _template_action(card)
         summary_text, item_reasons = _guard_template(summary_text, item_reasons, banned)
@@ -779,8 +1071,9 @@ def explain_action(
         _save_explanation(explain_result)
         return explain_result
 
+    rule = LENGTH_RULES[detail]["action_card"]
     data, model, latency_ms, problems = _call_llm_explain(
-        provider, facts, placeholders, "action_card_v1", ACTION_SCHEMA, system=ACTION_EXPLAIN_SYSTEM,
+        provider, facts, placeholders, "action_card_v1", ACTION_SCHEMA, system=action_explain_system(detail),
     )
 
     all_problems: list[str] = list(problems)
@@ -789,7 +1082,9 @@ def explain_action(
 
     if data is not None:
         summary_text, summary_problems = _process_text(
-            data.get("summary"), allowed, banned, values, max_chars=300, max_sentences=3, location="summary",
+            data.get("summary"), allowed, banned, values,
+            max_chars=rule["max_chars"], max_sentences=rule["max_sentences"],
+            min_sentences=rule["min_sentences"], location="summary",
         )
         all_problems.extend(summary_problems)
 
@@ -797,7 +1092,7 @@ def explain_action(
         source, llm_used, final_model = "llm", True, model
     else:
         source, llm_used, final_model = "template", False, None
-        summary_text, item_reasons = _template_action(card)
+        summary_text, item_reasons = _template_action_rich(card)
         summary_text, item_reasons = _guard_template(summary_text, item_reasons, banned)
 
     explain_result = ExplainResult(
@@ -830,23 +1125,32 @@ CHAT_COMPARE_SCHEMA: dict[str, Any] = {
 }
 
 
-def _chat_compare_template(category_label: str, followup_changed: list[str], values: dict[str, str]) -> str:
-    """LLM 실패/검증 실패 시 쓰는 템플릿(chat_compare_prep_v1). 지금까지 routes.py에 그대로
-    있던 안내 문장과 같은 내용이다. "아래 버튼으로..." 유도 문장은 여기서 붙이지 않는다
-    (app/api/routes.py가 LLM 문장이든 템플릿 문장이든 동일하게 뒤에 덧붙인다)."""
+# SPEC 2.16: 조건 확인 화면에서 사용자가 실제로 바꿀 수 있는 항목(범주형, 숫자 없음).
+_COMPARE_ADJUSTABLE_FIELDS: list[str] = ["금액", "기간", "금리 상한", "정렬 기준"]
+
+
+def _chat_compare_template(
+    category_label: str, followup_changed: list[str], values: dict[str, str], estimated_labels: list[str],
+) -> str:
+    """LLM 실패/검증 실패 시 쓰는 템플릿(chat_compare_prep_v1, SPEC 2.16: 항상 3문장).
+    "아래 버튼으로..." 유도 문장은 여기서 붙이지 않는다(app/api/routes.py가 LLM 문장이든
+    템플릿 문장이든 동일하게 뒤에 덧붙인다)."""
     if followup_changed:
         labels = ", ".join(followup_changed)
-        return (
-            f"이전 조건에서 {labels}만 바꿔 다시 준비했어요. {category_label}, 금액 {values['amount']}, "
-            f"기간 {values['term_months']} 기준입니다."
-        )
-    return (
-        f"{category_label} 비교 조건을 준비했어요. 금액 {values['amount']}, 기간 {values['term_months']} "
-        "기준입니다."
-    )
+        s1 = f"이전 조건에서 {labels}만 바꿔 다시 준비했어요."
+    else:
+        s1 = f"{category_label} 비교 조건을 준비했어요."
+    s2 = f"금액 {values['amount']}, 기간 {values['term_months']} 기준입니다."
+    if estimated_labels:
+        s3 = f"{', '.join(estimated_labels)}은 프로필에서 추정한 값이라 조건 확인 화면에서 바꿀 수 있어요."
+    else:
+        s3 = "조건 확인 화면에서 세부 항목을 바꾸면 다시 계산돼요."
+    return f"{s1} {s2} {s3}"
 
 
-def explain_chat_compare(ctx: CompareContext, followup_changed: list[str], provider: Any) -> ExplainResult:
+def explain_chat_compare(
+    ctx: CompareContext, followup_changed: list[str], provider: Any, *, detail: str = "full",
+) -> ExplainResult:
     """대화 화면(SPEC 2.9)의 compare 의도 안내 문장. `followup_changed`는 이미 한국어로
     번역된 라벨 목록이다(호출부 `app/api/routes.py`가 `_FOLLOWUP_LABELS`로 변환해 넘긴다).
 
@@ -854,15 +1158,19 @@ def explain_chat_compare(ctx: CompareContext, followup_changed: list[str], provi
     이미 이 응답 문장을 기록한다). 체인 상한은 `config/llm.yaml`의
     `chat_explain_deadline_seconds`(기본 8초)로 `explain_total_deadline_seconds`보다 짧게
     강제한다(대화 화면은 "생각 과정"을 보여주며 기다리므로 더 빨리 포기하고 템플릿으로
-    가는 편이 낫다).
+    가는 편이 낫다). `detail`(SPEC 2.16)은 길이 규칙과 시스템 프롬프트에만 반영된다(저장하지
+    않으므로 캐시 키는 없다).
     """
     category_label = _CATEGORY_LABELS_KR.get(ctx.category.value, ctx.category.value)
+    estimated_labels = [_ESTIMATED_FIELD_LABELS_KR.get(f, f) for f in ctx.estimated_fields]
     facts: dict[str, Any] = {
         "category": category_label,
-        "estimated_fields": [_ESTIMATED_FIELD_LABELS_KR.get(f, f) for f in ctx.estimated_fields],
+        "estimated_fields": estimated_labels,
         "changed_fields": list(followup_changed),
         "has_max_rate": "예" if ctx.max_rate is not None else "아니오",
         "has_exclude_companies": "예" if ctx.exclude_companies else "아니오",
+        "adjustable_fields": list(_COMPARE_ADJUSTABLE_FIELDS),
+        "next_view": "익명 라벨 순위와 설명",
     }
     placeholders: dict[str, str] = {"amount": "비교 금액", "term_months": "비교 기간"}
     values: dict[str, str] = {
@@ -875,10 +1183,11 @@ def explain_chat_compare(ctx: CompareContext, followup_changed: list[str], provi
 
     banned = get_banned_terms()
     allowed = set(placeholders.keys())
+    rule = LENGTH_RULES[detail]["chat_compare_prep"]
 
     data, model, latency_ms, problems = _call_llm_explain(
         provider, facts, placeholders, "chat_compare_prep_v1", CHAT_COMPARE_SCHEMA,
-        deadline_seconds=CHAT_EXPLAIN_DEADLINE_SECONDS,
+        deadline_seconds=CHAT_EXPLAIN_DEADLINE_SECONDS, system=_chat_compare_system(detail),
     )
 
     all_problems: list[str] = list(problems)
@@ -886,7 +1195,9 @@ def explain_chat_compare(ctx: CompareContext, followup_changed: list[str], provi
 
     if data is not None:
         summary_text, summary_problems = _process_text(
-            data.get("summary"), allowed, banned, values, max_chars=220, max_sentences=2, location="summary",
+            data.get("summary"), allowed, banned, values,
+            max_chars=rule["max_chars"], max_sentences=rule["max_sentences"],
+            min_sentences=rule["min_sentences"], location="summary",
         )
         all_problems.extend(summary_problems)
 
@@ -894,7 +1205,7 @@ def explain_chat_compare(ctx: CompareContext, followup_changed: list[str], provi
         source, llm_used, final_model = "llm", True, model
     else:
         source, llm_used, final_model = "template", False, None
-        summary_text = _chat_compare_template(category_label, followup_changed, values)
+        summary_text = _chat_compare_template(category_label, followup_changed, values, estimated_labels)
         summary_text, _ = _guard_template(summary_text, {}, banned)
 
     return ExplainResult(
@@ -942,12 +1253,51 @@ def _loan_type_label_no_digits(label: Optional[str]) -> str:
     return _WHATIF_DIGIT_PAREN_RE.sub("", label).strip() or "대출"
 
 
+# SPEC 2.16: 도구별 가정 문장(숫자 없이 범주형으로 - 실제 가정 문장은 WhatIfResult.assumptions에
+# 있지만 숫자가 섞여 있어 D4를 위반한다. 같은 의미를 숫자 없이 요약한 문장을 따로 둔다).
+_WHATIF_ASSUMPTION_GIST: dict[str, str] = {
+    "extra_payment": "매달 정해진 금액을 원금에 추가로 상환한다고 가정해요",
+    "lump_sum": "정해진 금액을 한 번에 갚는다고 가정해요",
+    "refinance": "새로운 금리로 대환한다고 가정해요",
+    "retirement_age": "은퇴 나이를 바꿨을 때를 기준 시나리오로 가정해요",
+}
+
+
+def _months_saved_bucket(months_saved: float) -> str:
+    """단축 개월 기준 효과 크기(SPEC 2.16): 큼(12개월 이상)·보통(3~11개월)·작음(1~2개월)."""
+    if months_saved <= 0:
+        return "변화 없음"
+    if months_saved >= 12:
+        return "큼"
+    if months_saved >= 3:
+        return "보통"
+    return "작음"
+
+
+def _ratio_effect_bucket(delta: float, baseline: float) -> str:
+    """절감/증가분(delta)이 기준값(baseline) 대비 차지하는 비율로 큼(15%+)·보통(5~15%)·
+    작음(5% 미만)을 가른다(SPEC 2.16, 대환·은퇴 나이 도구). 기준값이 없거나 0 이하면
+    비율을 계산할 수 없어 "확인 필요"를 돌려준다."""
+    if not delta:
+        return "변화 없음"
+    if not baseline or baseline <= 0:
+        return "확인 필요"
+    ratio = abs(delta) / baseline
+    if ratio >= 0.15:
+        return "큼"
+    if ratio >= 0.05:
+        return "보통"
+    return "작음"
+
+
 def whatif_slots(result: WhatIfResult) -> tuple[dict, dict, dict]:
     """what-if 결과 1건으로 (facts, placeholders, values)를 만든다. facts=도구·대출 종류·
-    방향(숫자 없음), placeholders/values=금액·개월·이자(도구별로 있는 것만)."""
+    방향·효과 크기 구간·가정 문장(숫자 없음, SPEC 2.16), placeholders/values=금액·개월·이자
+    (도구별로 있는 것만)."""
     facts: dict[str, Any] = {
         "tool": _WHATIF_TOOL_LABELS_KR.get(result.tool, result.tool),
         "loan_type": _loan_type_label_no_digits(result.target_loan_label),
+        "assumption_gist": _WHATIF_ASSUMPTION_GIST.get(result.tool, ""),
     }
     placeholders: dict[str, str] = {}
     values: dict[str, str] = {}
@@ -963,22 +1313,26 @@ def whatif_slots(result: WhatIfResult) -> tuple[dict, dict, dict]:
 
     if result.tool == "extra_payment":
         facts["direction"] = "상환 기간 단축"
+        facts["effect_size"] = _months_saved_bucket(result.deltas.get("months_saved") or 0)
         add("extra_monthly", result.inputs.get("extra_monthly"), "매월 추가 상환액", won)
         add("months_saved", result.deltas.get("months_saved"), "단축 개월", months)
         add("interest_saved", result.deltas.get("interest_saved"), "절감 이자", won)
     elif result.tool == "lump_sum":
         facts["direction"] = "상환 기간 단축"
+        facts["effect_size"] = _months_saved_bucket(result.deltas.get("months_saved") or 0)
         add("lump_sum_amount", result.inputs.get("amount"), "일시 상환액", won)
         add("months_saved", result.deltas.get("months_saved"), "단축 개월", months)
         add("interest_saved", result.deltas.get("interest_saved"), "절감 이자", won)
     elif result.tool == "refinance":
         delta = result.deltas.get("total_cost_delta") or 0
         facts["direction"] = "총이자 절감" if delta < 0 else ("총이자 증가" if delta > 0 else "총이자 변화 없음")
+        facts["effect_size"] = _ratio_effect_bucket(delta, result.before.get("total_interest") or 0)
         add("new_rate", result.inputs.get("new_rate"), "새 금리", lambda v: f"{v:.4g}%")
         add("total_cost_delta", abs(delta) if delta else 0, "총이자 차이", won)
     else:  # retirement_age
         delta = result.deltas.get("shortfall_delta") or 0
         facts["direction"] = "부족액 감소" if delta < 0 else ("부족액 증가" if delta > 0 else "부족액 변화 없음")
+        facts["effect_size"] = _ratio_effect_bucket(delta, result.before.get("shortfall") or 0)
         add("retirement_age_after", result.after.get("retirement_age"), "새 은퇴 나이", lambda v: f"{v}세")
         add("shortfall_delta", abs(delta), "노후 부족액 차이", won)
 
@@ -1017,22 +1371,23 @@ def _template_whatif_conclusion(result: WhatIfResult) -> str:
 
 
 def explain_chat_whatif(
-    result: WhatIfResult, provider: Any,
+    result: WhatIfResult, provider: Any, *, detail: str = "full",
 ) -> tuple[str, bool, Optional[str], int, list[str]]:
-    """SPEC 2.13: what-if 결론 1문장을 LLM 슬롯 필링으로 만든다. 실패·불가 시 템플릿.
+    """SPEC 2.13/2.16: what-if 결론 문장을 LLM 슬롯 필링으로 만든다. 실패·불가 시 템플릿.
 
     반환: (text, llm_used, model, latency_ms, problems). `ExplainResult`는 kind가
     "compare"|"action"으로 고정돼 있어(app/models.py) whatif 전용 kind를 담을 수 없으므로,
     `explain_chat_compare`와 달리 저장하지 않고 이 얕은 튜플만 돌려준다(대화 로그가 이미
-    응답 문장을 기록한다).
+    응답 문장을 기록한다). `detail`(SPEC 2.16)은 길이 규칙과 시스템 프롬프트에 반영된다.
     """
     facts, placeholders, values = whatif_slots(result)
     banned = get_banned_terms()
     allowed = set(placeholders.keys())
+    rule = LENGTH_RULES[detail]["whatif"]
 
     data, model, latency_ms, problems = _call_llm_explain(
         provider, facts, placeholders, "whatif_v1", WHATIF_SCHEMA,
-        deadline_seconds=CHAT_EXPLAIN_DEADLINE_SECONDS,
+        deadline_seconds=CHAT_EXPLAIN_DEADLINE_SECONDS, system=_whatif_system(detail),
     )
 
     all_problems: list[str] = list(problems)
@@ -1040,7 +1395,9 @@ def explain_chat_whatif(
 
     if data is not None:
         summary_text, summary_problems = _process_text(
-            data.get("summary"), allowed, banned, values, max_chars=160, max_sentences=1, location="summary",
+            data.get("summary"), allowed, banned, values,
+            max_chars=rule["max_chars"], max_sentences=rule["max_sentences"],
+            min_sentences=rule["min_sentences"], location="summary",
         )
         all_problems.extend(summary_problems)
 

@@ -143,7 +143,16 @@ class _FakeExplainProvider:
         elif "label_a" not in placeholders:
             data = {"summary": "지금은 참고할 상품이 없어요.", "reasons": []}
         else:
-            summary = "{label_a} 조건이 금리 {rate_a}이라서 총이자 {total_a}로 유리해요. 조건을 확인해 보세요."
+            # SPEC 2.16: detail 기본값(full)의 compare_summary 길이 규칙은 4~6문장이라
+            # (기존 2.8은 2~3문장) 여기서도 4문장짜리 요약을 써야 "too_short"로 템플릿
+            # 폴백하지 않는다. amount/rate_a만 써서 monthly_a/total_a가 없는 픽스처에서도
+            # 안전하다.
+            summary = (
+                "공시 상품 {candidates_total} 중 상위 {shown_count}를 비교했어요. "
+                "정렬 기준으로 보면 {label_a}이 금리 {rate_a}라서 가장 먼저 확인해 볼 만해요. "
+                "이번 비교는 금액 {amount} 조건으로 진행했어요. "
+                "기간은 {term_months}으로 계산했어요."
+            )
             reasons = []
             for letter in ("a", "b", "c"):
                 if f"label_{letter}" in placeholders:

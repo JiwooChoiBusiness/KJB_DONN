@@ -50,7 +50,7 @@ class LLMProvider(Protocol):
 
     def explain(
         self, slots: dict, template_id: str, system: str, schema: Optional[dict] = None,
-        deadline_seconds: Optional[float] = None,
+        deadline_seconds: Optional[float] = None, temperature: Optional[float] = None,
     ) -> LLMResult:
         """범주형 슬롯만으로 설명 문장을 생성한다(수치는 이후 코드가 문장에 삽입한다).
 
@@ -60,7 +60,10 @@ class LLMProvider(Protocol):
         responseSchema)로 호출해 `LLMResult.data`를 채우고, 없으면 기존처럼 텍스트만
         돌려준다(`LLMResult.text`). `deadline_seconds`를 생략하면 구현체의 기본 설명 체인
         상한(예: `explain_total_deadline_seconds`)을 쓴다(SPEC 2.9: 대화 화면의 설명 생성은
-        `chat_explain_deadline_seconds`로 더 짧게 줄인다).
+        `chat_explain_deadline_seconds`로 더 짧게 줄인다). `temperature`를 생략하면 구현체의
+        기본 설명 온도(예: `explain_temperature`, SPEC 2.16)를 쓴다(추출(`extract`)은 항상
+        `temperature=0`을 그대로 쓴다). 이 인자는 선택이라 이를 모르는 기존 구현체/테스트
+        더블과도 호환된다.
         """
         ...
 
