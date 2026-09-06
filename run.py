@@ -33,7 +33,9 @@ def main() -> None:
 
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     flags = [a for a in sys.argv[1:] if a.startswith("--")]
-    port = int(args[0]) if args else int(os.environ.get("DONN_PORT", DEFAULT_PORT))
+    # 포트 우선순위: 위치 인자 > DONN_PORT > PORT(PaaS 관례, SPEC 2.10) > 기본값.
+    env_port = os.environ.get("DONN_PORT") or os.environ.get("PORT")
+    port = int(args[0]) if args else int(env_port or DEFAULT_PORT)
     reload = "--reload" in flags
 
     try:

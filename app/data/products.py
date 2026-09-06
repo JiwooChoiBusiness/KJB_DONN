@@ -3,6 +3,8 @@
 """
 from __future__ import annotations
 
+import gzip
+import json
 import os
 from datetime import datetime
 from sqlite3 import Connection
@@ -210,3 +212,76 @@ def stats() -> dict[str, Any]:
         }
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 브라우저 전용 모드 시드 (SPEC 2.10). scripts/export_seed.py가 내보내는 파일을
+# 여기서 다시 읽어들인다. 공개 상품 스냅샷만 다루며 profiles/decisions/session 등
+# 다른 테이블은 절대 건드리지 않는다.
+# ---------------------------------------------------------------------------
+
+DEFAULT_SEED_PATH = "seed/products_seed.json.gz"
+
+
+def import_seed(path: str) -> dict[str, int]:
+    """gzip으로 압축된 시드 JSON(scripts.export_seed 산출물)을 읽어 snapshots·products에
+    INSERT OR IGNORE한다(이미 있는 snapshot_id/product id는 그대로 둔다, 멱등).
+
+    반환값은 실제로 새로 들어간 행 수 `{"snapshots": n, "products": n}`.
+    """
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    conn = db.init_db(db.get_conn())
+    try:
+        n_snapshots = 0
+        for row in payload.get("snapshots", []):
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO snapshots(snapshot_id, source, fetched_at, count, note) "
+                "VALUES (?,?,?,?,?)",
+                (row["snapshot_id"], row["source"], row["fetched_at"], row.get("count", 0), row.get("note", "")),
+            )
+            if cur.rowcount and cur.rowcount > 0:
+                n_snapshots += cur.rowcount
+
+        n_products = 0
+        for row in payload.get("products", []):
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO products(
+                    id, snapshot_id, source, category, lender_group, company_code, company_name,
+                    product_code, product_name, rate_semantics, disclosure_month, disclosure_url, json
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    row["id"], row["snapshot_id"], row["source"], row["category"], row["lender_group"],
+                    row["company_code"], row["company_name"], row["product_code"], row["product_name"],
+                    row["rate_semantics"], row.get("disclosure_month", ""), row.get("disclosure_url", ""),
+                    row["json"],
+                ),
+            )
+            if cur.rowcount and cur.rowcount > 0:
+                n_products += cur.rowcount
+        conn.commit()
+        return {"snapshots": n_snapshots, "products": n_products}
+    finally:
+        conn.close()
+
+
+def ensure_seed_loaded(path: str = DEFAULT_SEED_PATH) -> bool:
+    """products 테이블이 비어 있고 시드 파일이 있을 때만 `import_seed`를 실행한다.
+
+    이미 상품이 있으면(실 적재를 했거나 이전에 시드를 넣었으면) 아무 것도 하지 않고
+    False를 돌려준다. 실제로 적재했으면 True.
+    """
+    if not os.path.exists(path):
+        return False
+    conn = db.init_db(db.get_conn())
+    try:
+        count = conn.execute("SELECT COUNT(*) AS c FROM products").fetchone()["c"]
+    finally:
+        conn.close()
+    if count > 0:
+        return False
+    import_seed(path)
+    return True
