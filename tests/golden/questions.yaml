@@ -148,6 +148,16 @@ questions:
       SPEC 2.11 external 경로: 시점성 질문이고 KB에 맞는 문서가 없어(--llm rule 모드,
       네트워크 없음) 공식 안내 링크 폴백으로 답한다.
 
+  - id: P1-Q11
+    persona: P1
+    type: whatif
+    text: "매달 30만 원 더 갚으면 얼마나 빨리 끝나?"
+    expect:
+      action_type: null
+      route: internal
+    must_contain: ["원"]
+    notes: "SPEC 2.13 계산형 자유 질의: 매월 추가상환(extra_monthly) 도구."
+
   # ---------------------------------------------------------------------
   # P2 박준호 (38, 맞벌이, 경기 아파트) - 주담대(혼합형)/신용대출/자동차할부
   # ---------------------------------------------------------------------
@@ -249,6 +259,18 @@ questions:
     notes: >
       SPEC 2.11 external 경로: 시점성 질문이고 KB에 맞는 문서가 없어(--llm rule 모드,
       네트워크 없음) 공식 안내 링크 폴백으로 답한다.
+
+  - id: P2-Q11
+    persona: P2
+    type: whatif
+    text: "신용대출을 금리 4%로 갈아타면?"
+    expect:
+      action_type: null
+      route: internal
+    must_contain: ["원"]
+    notes: >
+      SPEC 2.13 계산형 자유 질의: 대환(refinance) 도구. "갈아타면"은 compare 키워드
+      "갈아타"와 겹치지만 금리 숫자("4%로")가 함께 있어 whatif로 분류된다.
 
   # ---------------------------------------------------------------------
   # P3 이미라 (45, 카페 운영 개인사업자, 부산) - 사업자대출/카드론/저축은행신용/리볼빙
@@ -353,6 +375,16 @@ questions:
       SPEC 2.11 external 경로: 시점성 질문이고 KB에 맞는 문서가 없어(--llm rule 모드,
       네트워크 없음) 공식 안내 링크 폴백으로 답한다.
 
+  - id: P3-Q11
+    persona: P3
+    type: whatif
+    text: "1,000만원 한번에 갚으면 얼마나 빨리 끝나?"
+    expect:
+      action_type: null
+      route: internal
+    must_contain: ["원"]
+    notes: "SPEC 2.13 계산형 자유 질의: 일시 상환(lump_sum) 도구."
+
   # ---------------------------------------------------------------------
   # P4 최동현 (33, IT 개발자, 서울, 결혼 예정) - 전세자금대출/신용대출
   # ---------------------------------------------------------------------
@@ -450,6 +482,16 @@ questions:
     notes: >
       SPEC 2.11 external 경로: 시점성 질문이고 KB에 맞는 문서가 없어(--llm rule 모드,
       네트워크 없음) 공식 안내 링크 폴백으로 답한다.
+
+  - id: P4-Q11
+    persona: P4
+    type: whatif
+    text: "매달 50만 원 추가로 갚으면 얼마나 빨리 끝나?"
+    expect:
+      action_type: null
+      route: internal
+    must_contain: ["원"]
+    notes: "SPEC 2.13 계산형 자유 질의: 매월 추가상환(extra_monthly) 도구."
 
   # ---------------------------------------------------------------------
   # P5 정수민 (26, 프리랜서, 소득 불규칙, 연체 신호) - 카드대금 연체/2금융권 소액신용
@@ -567,6 +609,16 @@ questions:
       SPEC 2.11 external 경로: 시점성 질문이고 KB에 맞는 문서가 없어(--llm rule 모드,
       네트워크 없음) 공식 안내 링크 폴백으로 답한다.
 
+  - id: P5-Q12
+    persona: P5
+    type: whatif
+    text: "카드대금 145만원 한번에 갚으면 얼마나 빨리 끝나?"
+    expect:
+      action_type: null
+      route: internal
+    must_contain: ["원"]
+    notes: "SPEC 2.13 계산형 자유 질의: 일시 상환(lump_sum) 도구. P5의 연체 카드대금(145만원) 규모."
+
   # ---------------------------------------------------------------------
   # P6 한정우 (52, 제조업 부장, 대전, 2029 정년 예정) - 주담대/마통(자녀 등록금)
   # ---------------------------------------------------------------------
@@ -664,6 +716,16 @@ questions:
     notes: >
       SPEC 2.11 external 경로: 시점성 질문이고 KB에 맞는 문서가 없어(--llm rule 모드,
       네트워크 없음) 공식 안내 링크 폴백으로 답한다.
+
+  - id: P6-Q11
+    persona: P6
+    type: whatif
+    text: "은퇴를 60세로 하면 노후 부족액은?"
+    expect:
+      action_type: null
+      route: internal
+    must_contain: ["원"]
+    notes: "SPEC 2.13 계산형 자유 질의: 은퇴 시점 변경(retirement_age) 도구. P6은 정년(2029년) 임박 서사와 맞는다."
 
   # ---------------------------------------------------------------------
   # P7 한도윤 (31, 계약직, 연체 45일차) - 은행신용/카드론/등록 대부업
@@ -779,6 +841,16 @@ questions:
       SPEC 2.11 external 경로: 시점성 질문이고 KB에 맞는 문서가 없어(--llm rule 모드,
       네트워크 없음) 공식 안내 링크 폴백으로 답한다.
 
+  - id: P7-Q12
+    persona: P7
+    type: whatif
+    text: "은행 신용대출을 금리 5%로 갈아타면?"
+    expect:
+      action_type: null
+      route: internal
+    must_contain: ["원"]
+    notes: "SPEC 2.13 계산형 자유 질의: 대환(refinance) 도구. loan_hint(신용대출)로 P7의 은행 신용대출(7.0%)을 고른다."
+
   # ---------------------------------------------------------------------
   # P8 한소희 (23, 대학생·아르바이트, 취약 청년) - 카드 리볼빙/현금서비스
   # ---------------------------------------------------------------------
@@ -877,3 +949,13 @@ questions:
     notes: >
       SPEC 2.11 external 경로: 시점성 질문이고 KB에 맞는 문서가 없어(--llm rule 모드,
       네트워크 없음) 공식 안내 링크 폴백으로 답한다.
+
+  - id: P8-Q11
+    persona: P8
+    type: whatif
+    text: "매달 10만 원 더 갚으면 얼마나 빨리 끝나?"
+    expect:
+      action_type: null
+      route: internal
+    must_contain: ["원"]
+    notes: "SPEC 2.13 계산형 자유 질의: 매월 추가상환(extra_monthly) 도구."

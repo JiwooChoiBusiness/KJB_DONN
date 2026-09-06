@@ -143,3 +143,29 @@ def extra_payment_effect(loan: Loan, extra_monthly: int) -> dict:
         "interest_saved": interest_saved,
         "new_months": new_schedule.months,
     }
+
+
+def lump_sum_effect(loan: Loan, amount: int, fee: int) -> dict:
+    """일시 상환(목돈으로 한 번에 갚기) 시 효과(SPEC 2.13). 키: months_saved, interest_saved,
+    fee, new_months.
+
+    잔액에서 `amount`를 차감한 새 잔액으로 스케줄을 다시 계산해 기존 스케줄과 비교한다.
+    `amount`가 잔액 이상이면 새 잔액이 0이 되어 `build_schedule`이 빈 스케줄(월 0, 이자 0)을
+    돌려주므로 자연스럽게 "전액 정리"로 처리된다. 수수료(`fee`)는 이 함수가 계산하지 않고
+    호출부가 `prepay_fee`로 구해 그대로 전달한다(결과에는 참고용으로만 담는다).
+    """
+    base_schedule = build_schedule(loan)
+    amount = max(amount, 0)
+    new_balance = max(loan.balance - amount, 0)
+    new_loan = loan.model_copy(update={"balance": new_balance})
+    new_schedule = build_schedule(new_loan)
+
+    months_saved = base_schedule.months - new_schedule.months
+    interest_saved = base_schedule.total_interest - new_schedule.total_interest
+
+    return {
+        "months_saved": months_saved,
+        "interest_saved": interest_saved,
+        "fee": fee,
+        "new_months": new_schedule.months,
+    }

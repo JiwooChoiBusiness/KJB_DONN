@@ -34,6 +34,7 @@ from app.models import (
     InsightCard,
     LifeEventSignal,
     LoanType,
+    SavingOpportunity,
     SpendingCategory,
     SpendingFeatures,
     SpendingSummary,
@@ -629,3 +630,61 @@ def build_spending_cards(
         ))
 
     return cards
+
+
+# ---------------------------------------------------------------------------
+# savings_opportunities (SPEC 2.15): 지출 절감 후보를 상환 효과로 연결하기 위한 재료.
+# ---------------------------------------------------------------------------
+
+
+def savings_opportunities(summary: SpendingSummary, features: SpendingFeatures) -> list[SavingOpportunity]:
+    """지출에서 찾은 절감 후보 최대 3개(SPEC 2.15). 가맹점명 없이 카테고리 라벨만 쓰고,
+    금액이 큰 순으로 최대 3개, 0원인 항목은 제외한다.
+
+    (a) 정기 결제(subscriptions) 월 합계. (b) 가장 크게 급증한 카테고리의 초과분
+    (이번 달 금액 - 급증 판정 기준이 된 전월 금액). (c) 재량 지출(카페간식·쇼핑·여가·기타)
+    중 월평균이 가장 큰 카테고리의 15% 절감.
+    """
+    candidates: list[SavingOpportunity] = []
+
+    if summary.subscriptions:
+        total = sum(s.amount for s in summary.subscriptions)
+        if total > 0:
+            n = len(summary.subscriptions)
+            candidates.append(SavingOpportunity(
+                kind="subscriptions",
+                label=f"정기 결제 {n}건",
+                monthly_saving=total,
+                basis=f"최근 {summary.months}개월 동안 매달 비슷한 금액으로 반복된 정기 결제 {n}건의 월 합계예요.",
+            ))
+
+    if summary.anomalies:
+        top = sorted(summary.anomalies, key=lambda a: -(a.amount - a.prev_amount))[0]
+        excess = top.amount - top.prev_amount
+        if excess > 0:
+            cat_label = top.category.value
+            candidates.append(SavingOpportunity(
+                kind="spike",
+                label=f"{cat_label} 급증분",
+                monthly_saving=excess,
+                basis=f"{cat_label} 지출이 전월 {top.prev_amount:,}원에서 이번 달 {top.amount:,}원으로 늘어난 만큼이에요.",
+            ))
+
+    discretionary_totals = [
+        c for c in summary.categories if c.category in _DISCRETIONARY_CATEGORIES and c.amount > 0
+    ]
+    if discretionary_totals:
+        top_disc = sorted(discretionary_totals, key=lambda c: -c.amount)[0]
+        avg_monthly = top_disc.amount / summary.months
+        saving = round(avg_monthly * 0.15)
+        if saving > 0:
+            cat_label = top_disc.category.value
+            candidates.append(SavingOpportunity(
+                kind="discretionary",
+                label=f"{cat_label} 15% 절감",
+                monthly_saving=saving,
+                basis=f"최근 {summary.months}개월 {cat_label} 월평균 {round(avg_monthly):,}원의 15%를 줄인 금액이에요.",
+            ))
+
+    candidates.sort(key=lambda o: -o.monthly_saving)
+    return candidates[:3]

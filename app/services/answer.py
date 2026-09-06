@@ -36,8 +36,10 @@ from app.models import (
     PolicyParams,
     ProductCategory,
     SpendingFeatures,
+    SpendingLinkedAction,
     SpendingSummary,
     UserProfile,
+    WhatIfResult,
 )
 # insights.py가 이미 만들어 둔 공공·업권 일반어 판별 어휘를 재사용한다(SEV4 2026-09-06
 # 리뷰: external 요약의 "OO은행"류 패턴 검사가 같은 기준으로 오탐을 피하게 한다).
@@ -659,12 +661,16 @@ def build_direct_answer(
 
 def format_spending_answer(
     summary: SpendingSummary, features: SpendingFeatures, profile: UserProfile, months: int,
+    linked_actions: Optional[list[SpendingLinkedAction]] = None,
 ) -> str:
     """`POST /api/chat/attach` 응답 마크다운을 코드 템플릿으로 만든다(LLM 호출 없음).
 
     숫자는 전부 `app/core/spending.py`가 계산한 값이고 이 함수는 문장만 조립한다.
     가맹점 이름(마스킹된 것 포함)은 쓰지 않고 카테고리 라벨과 생애 이벤트 라벨만 쓴다
     (app/core/spending.py의 라벨 맵을 그대로 재사용).
+
+    `linked_actions`(SPEC 2.15, 선택)가 있으면 `**이렇게 연결돼요**` 목록(최대 2개, 각 항목의
+    `sentence`)을 덧붙인다.
     """
     avg = summary.avg_monthly_spend
     if profile.monthly_income > 0:
@@ -696,6 +702,67 @@ def format_spending_answer(
 
     lines = [headline, "", "**핵심**"]
     lines.extend(f"- {p}" for p in points)
+    if linked_actions:
+        lines.append("")
+        lines.append("**이렇게 연결돼요**")
+        lines.extend(f"- {a.sentence}" for a in linked_actions[:2])
     lines.append("")
     lines.append("원본 거래내역은 저장하지 않고 요약만 남겨요.")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 계산형 자유 질의(what-if) 답변 마크다운 (SPEC 2.13) - 코드 템플릿, 결론 문장만 교체 가능
+# ---------------------------------------------------------------------------
+
+
+def _whatif_calc_bullets(result: WhatIfResult) -> list[str]:
+    """"계산 근거" 목록 3개(코드 템플릿, LLM 미사용). 도구별로 전후 수치를 나열한다."""
+    if result.tool == "extra_payment":
+        return [
+            f"매월 추가 상환액: {result.inputs.get('extra_monthly', 0):,}원",
+            (f"단축 개월: {result.deltas.get('months_saved', 0):,}개월 "
+             f"({result.before.get('months', 0):,}개월 -> {result.after.get('months', 0):,}개월)"),
+            (f"절감 이자: {result.deltas.get('interest_saved', 0):,}원 "
+             f"(총이자 {result.before.get('total_interest', 0):,}원 -> {result.after.get('total_interest', 0):,}원)"),
+        ]
+    if result.tool == "lump_sum":
+        fee = result.after.get("fee", 0) or 0
+        amount_line = f"일시 상환액: {result.inputs.get('amount', 0):,}원"
+        if fee > 0:
+            amount_line += f"(중도상환수수료 {fee:,}원 별도)"
+        return [
+            amount_line,
+            (f"단축 개월: {result.deltas.get('months_saved', 0):,}개월 "
+             f"({result.before.get('months', 0):,}개월 -> {result.after.get('months', 0):,}개월)"),
+            (f"절감 이자: {result.deltas.get('interest_saved', 0):,}원 "
+             f"(총이자 {result.before.get('total_interest', 0):,}원 -> {result.after.get('total_interest', 0):,}원)"),
+        ]
+    if result.tool == "refinance":
+        breakeven = result.deltas.get("breakeven_months")
+        breakeven_text = f"{breakeven:,}개월" if breakeven is not None else "확인 필요"
+        return [
+            f"적용 금리: 연 {result.inputs.get('new_rate', 0):.4g}%로 변경",
+            (f"월 납입액: {result.before.get('monthly', 0):,}원 -> {result.after.get('monthly', 0):,}원 "
+             f"(차이 {result.deltas.get('monthly_delta', 0):,}원)"),
+            (f"총이자: {result.before.get('total_interest', 0):,}원 -> {result.after.get('total_interest', 0):,}원 "
+             f"(차이 {result.deltas.get('total_cost_delta', 0):,}원), 수수료 회수 {breakeven_text}"),
+        ]
+    # retirement_age
+    return [
+        f"은퇴 나이: {result.before.get('retirement_age', 0)}세 -> {result.after.get('retirement_age', 0)}세",
+        (f"월 부족액: {result.before.get('monthly_gap', 0):,}원 -> {result.after.get('monthly_gap', 0):,}원"),
+        (f"노후 부족액: {result.before.get('shortfall', 0):,}원 -> {result.after.get('shortfall', 0):,}원 "
+         f"(추가 월 저축 {result.after.get('required_monthly_saving', 0):,}원 기준)"),
+    ]
+
+
+def format_whatif_answer(result: WhatIfResult, conclusion: str) -> str:
+    """SPEC 2.13 답변 마크다운: 결론 1문장(LLM 슬롯 필링 또는 템플릿) + `**계산 근거**`
+    목록 3개(코드 템플릿) + 가정 1줄. 계산 근거와 가정은 항상 코드가 만든다."""
+    lines = [conclusion, "", "**계산 근거**"]
+    lines.extend(f"- {b}" for b in _whatif_calc_bullets(result))
+    if result.assumptions:
+        lines.append("")
+        lines.append(result.assumptions[0])
     return "\n".join(lines)

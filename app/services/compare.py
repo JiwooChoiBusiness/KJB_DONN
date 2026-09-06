@@ -17,6 +17,8 @@ import uuid
 from datetime import date, datetime
 from typing import Any, Optional
 
+from pydantic import ValidationError
+
 from app.core import hashing, ranking
 from app.core.schedule import build_schedule
 from app.data import policy as policy_data
@@ -24,6 +26,7 @@ from app.data import products
 from app.models import (
     ENGINE_VERSION,
     CompareContext,
+    CompareDelta,
     CompareResult,
     DecisionRecord,
     LenderGroup,
@@ -68,6 +71,22 @@ _ESTIMATED_FIELD_LABELS_KR: dict[str, str] = {
     "repay_method": "상환방식",
     "target_loan_id": "대상 대출",
 }
+
+# SPEC 2.14: 이전 결과 대비 변화(CompareDelta)의 changed_fields 라벨. app/api/routes.py의
+# `_FOLLOWUP_LABELS`와 같은 내용이다(순환 임포트를 피하려고 이 표를 그대로 복제한다 -
+# routes.py가 이미 이 모듈을 임포트하므로 반대 방향 임포트는 만들 수 없다).
+_DELTA_FIELD_LABELS_KR: dict[str, str] = {
+    "amount": "금액", "term_months": "기간", "max_rate": "금리 상한", "category": "카테고리",
+    "sort_key": "정렬 기준", "exclude_companies": "제외 회사", "credit_band": "신용 구간",
+    "repay_method": "상환방식", "rate_type": "금리 유형", "lender_groups": "취급 기관",
+}
+
+# changed_fields 비교 대상 필드(순서대로 검사). category는 아예 다르면 delta 자체를
+# 만들지 않으므로(아래 _compute_delta) 이 목록에는 넣지 않는다.
+_DELTA_COMPARE_FIELDS = (
+    "amount", "term_months", "max_rate", "sort_key", "exclude_companies",
+    "repay_method", "rate_type", "credit_band", "lender_groups",
+)
 
 
 def _format_disclosure_month(raw: str) -> str:
@@ -222,12 +241,74 @@ def prepare_context(profile: Optional[UserProfile], intent_params: dict[str, Any
     )
 
 
-def run_compare(ctx: CompareContext, profile: Optional[UserProfile], *, today: date) -> CompareResult:
+def _compute_delta(
+    previous_decision_id: str, ctx: CompareContext, result: CompareResult,
+) -> Optional[CompareDelta]:
+    """SPEC 2.14: 이전 결정(현재 세션 소유, kind=compare, 같은 카테고리)이 있으면 이번
+    결과와 비교한 CompareDelta를 만든다. 없거나 다른 세션·다른 kind·다른 카테고리면 None.
+
+    `decisions.get`이 이미 세션(sid) 소유 검사를 하므로(app/services/decisions.py:
+    `_owned_by_current_sid`), 다른 브라우저 세션의 decision_id는 여기서 자연히 None이 된다.
+    """
+    previous_record = decisions.get(previous_decision_id)
+    if previous_record is None or previous_record.kind != "compare":
+        return None
+    try:
+        previous_ctx = CompareContext.model_validate(previous_record.context)
+    except (ValidationError, ValueError):
+        return None
+    if previous_ctx.category != ctx.category:
+        return None
+
+    new_dump = ctx.model_dump(mode="json")
+    prev_dump = previous_ctx.model_dump(mode="json")
+    changed_fields: list[str] = []
+    for field in _DELTA_COMPARE_FIELDS:
+        old_v = prev_dump.get(field)
+        new_v = new_dump.get(field)
+        if isinstance(old_v, list) or isinstance(new_v, list):
+            old_v, new_v = sorted(old_v or []), sorted(new_v or [])
+        if old_v != new_v:
+            changed_fields.append(_DELTA_FIELD_LABELS_KR.get(field, field))
+
+    previous_result_raw = previous_record.result or {}
+    candidates_before = int(previous_result_raw.get("candidates_total") or 0)
+
+    prev_items = previous_result_raw.get("items") or []
+    top_before = prev_items[0] if prev_items else None
+    top_after = result.items[0] if result.items else None
+
+    top_before_ref = top_before.get("product_ref") if top_before else None
+    top_after_ref = top_after.product_ref if top_after else None
+
+    return CompareDelta(
+        previous_decision_id=previous_decision_id,
+        changed_fields=changed_fields,
+        candidates_before=candidates_before,
+        candidates_after=result.candidates_total,
+        top_before_label=(top_before.get("anon_label") if top_before else None),
+        top_after_label=(top_after.anon_label if top_after else None),
+        top_changed=(top_before_ref or None) != (top_after_ref or None),
+        top_total_interest_before=(top_before.get("total_interest") if top_before else None),
+        top_total_interest_after=(top_after.total_interest if top_after else None),
+        top_monthly_before=(top_before.get("monthly_payment") if top_before else None),
+        top_monthly_after=(top_after.monthly_payment if top_after else None),
+    )
+
+
+def run_compare(
+    ctx: CompareContext, profile: Optional[UserProfile], *, today: date,
+    previous_decision_id: Optional[str] = None,
+) -> CompareResult:
     """SPEC 2.3: user_confirmed가 False면 ValueError(호출부가 HTTP 422로 변환).
     products.query -> ranking.eligible/rank -> result_hash -> decisions.save.
 
     결정 D5: category가 예금/적금이면 순위 비교 자체를 거부한다(호출부가 마찬가지로
     422로 변환, 2026-09-06 리뷰).
+
+    `previous_decision_id`(SPEC 2.14, 선택): 있으면 이전 결정과 비교한 `CompareDelta`를
+    `result.delta`에 채운다. `result_hash`/`fingerprint`/`DecisionRecord.context`에는
+    영향을 주지 않고(재현성 불변), 저장되는 `DecisionRecord.result`(JSON)에는 함께 담긴다.
     """
     if ctx.category in _NO_RANKING_CATEGORIES:
         raise ValueError(NO_RANKING_CATEGORY_MESSAGE)
@@ -292,6 +373,11 @@ def run_compare(ctx: CompareContext, profile: Optional[UserProfile], *, today: d
         created_at=created_at,
         candidates_total=len(eligible_products),
     )
+
+    if previous_decision_id:
+        # SPEC 2.14: result_hash_value는 이미 계산됐으므로(위) delta는 재현성에 영향을
+        # 주지 않는다. result.model_dump에는 포함되어 DecisionRecord.result(JSON)에 남는다.
+        result = result.model_copy(update={"delta": _compute_delta(previous_decision_id, ctx, result)})
 
     # current_total_interest는 CompareContext 모델 필드가 아니라서 재현(replay)을 위해
     # context_json에 비공개 키로 함께 넣어 둔다. CompareContext.model_validate는 알 수

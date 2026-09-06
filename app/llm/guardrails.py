@@ -92,10 +92,87 @@ _DIRECT_KEYWORDS = ("안녕", "반가", "고마", "뭐 할 수 있", "뭘 할 �
 # P7 생애주기 층(SPEC 2.7): retirement(노후·연금·은퇴), saving(저축률·자동이체),
 # liquidity(비상금·비상자금)는 app/api/routes.py가 재무비율·노후자금 격차 수치를 채워 답한다.
 # direct(SPEC 2.11)는 자료 없이 답할 수 있는 인사·잡담·사용법 문의다.
+# whatif(SPEC 2.13)는 "매달 30만 원 더 갚으면?" 같은 계산형 자유 질의다.
 _VALID_INTENTS = {
     "compare", "schedule", "scenario", "action", "faq", "spending",
-    "retirement", "saving", "liquidity", "direct",
+    "retirement", "saving", "liquidity", "direct", "whatif",
 }
+
+# ---------------------------------------------------------------------------
+# whatif(SPEC 2.13) 슬롯 감지: extra_monthly, lump_sum, new_rate, retirement_age, loan_hint
+# ---------------------------------------------------------------------------
+
+# "더 갚"/"추가로 갚"/"추가 상환"은 매월 추가상환(extra_monthly), "한번에 갚"/"일시 상환"/
+# "몰아서 갚"은 일시상환(lump_sum) 의도다. compare 키워드("갈아타")와 겹치는 "갈아타면"은
+# 금리 숫자("N%로")가 함께 있을 때만 대환(whatif) 의도로 본다(그렇지 않으면 compare로 둔다).
+_EXTRA_MONTHLY_KEYWORDS = ("더 갚", "추가로 갚", "추가 상환")
+_LUMP_SUM_KEYWORDS = ("한번에 갚", "일시 상환", "몰아서 갚")
+_WHATIF_RATE_TO_RE = re.compile(r"금리\s*(\d+(?:\.\d+)?)\s*%\s*로")
+_WHATIF_RETIREMENT_AGE_RE1 = re.compile(r"은퇴를?\s*(\d{1,3})\s*세")
+_WHATIF_RETIREMENT_AGE_RE2 = re.compile(r"(\d{1,3})\s*세에\s*은퇴")
+
+# loan_hint 매핑. 더 구체적인 표현을 먼저 검사한다(예: "신용대출"이 "신용"보다 먼저).
+_LOAN_HINT_KEYWORDS: list[tuple[str, str]] = [
+    ("마이너스통장", "overdraft"),
+    ("마통", "overdraft"),
+    ("카드론", "card_loan"),
+    ("주택담보", "mortgage"),
+    ("주담대", "mortgage"),
+    ("전세", "jeonse"),
+    ("학자금", "student"),
+    ("정책", "policy"),
+    ("신용대출", "credit"),
+    ("신용", "credit"),
+]
+
+
+def _is_whatif(text: str) -> bool:
+    """SPEC 2.13 규칙 키워드로 whatif 의도인지 본다. "갈아타면"은 compare의 "갈아타"와
+    겹치므로 금리 숫자("N%로")가 함께 있을 때만 whatif로 본다."""
+    if any(k in text for k in _EXTRA_MONTHLY_KEYWORDS):
+        return True
+    if any(k in text for k in _LUMP_SUM_KEYWORDS):
+        return True
+    if _WHATIF_RETIREMENT_AGE_RE1.search(text) or _WHATIF_RETIREMENT_AGE_RE2.search(text):
+        return True
+    if "갈아타면" in text and _WHATIF_RATE_TO_RE.search(text):
+        return True
+    return False
+
+
+def _detect_extra_monthly_and_lump_sum(text: str) -> tuple[Optional[int], Optional[int]]:
+    """"매달 30만 원 더" -> extra_monthly, "1,000만원 한번에" -> lump_sum. 두 키워드가
+    함께 있는 경우는 없다고 보고 먼저 매칭되는 쪽을 쓴다."""
+    amount = _detect_amount(text)
+    if amount is None:
+        return None, None
+    if any(k in text for k in _EXTRA_MONTHLY_KEYWORDS):
+        return amount, None
+    if any(k in text for k in _LUMP_SUM_KEYWORDS):
+        return None, amount
+    return None, None
+
+
+def _detect_new_rate(text: str) -> Optional[float]:
+    m = _WHATIF_RATE_TO_RE.search(text)
+    return float(m.group(1)) if m else None
+
+
+def _detect_whatif_retirement_age(text: str) -> Optional[int]:
+    m = _WHATIF_RETIREMENT_AGE_RE1.search(text)
+    if m:
+        return int(m.group(1))
+    m = _WHATIF_RETIREMENT_AGE_RE2.search(text)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _detect_loan_hint(text: str) -> Optional[str]:
+    for keyword, value in _LOAN_HINT_KEYWORDS:
+        if keyword in text:
+            return value
+    return None
 
 # 카테고리 키워드. "신용대출"이 "신용"보다 먼저 오도록(더 구체적인 것을 먼저)
 # 순서를 유지한다.
@@ -136,6 +213,8 @@ _EXCLUDE_RE2 = re.compile(r"([가-힣A-Za-z0-9]{1,12}?)(?:는|은|을|를)?\s*�
 def _detect_intent(text: str) -> Optional[str]:
     if any(k in text for k in _DIRECT_KEYWORDS) and not any(k in text for k in _DEBT_TOPIC_TOKENS):
         return "direct"
+    if _is_whatif(text):
+        return "whatif"
     for intent, keywords in _INTENT_KEYWORDS:
         if any(k in text for k in keywords):
             return intent
@@ -232,6 +311,10 @@ def parse_message(text: str) -> dict[str, Any]:
     max_rate = _detect_max_rate(text)
     exclude_companies = _detect_exclude_companies(text)
     sort_key = _detect_sort_key(text)
+    extra_monthly, lump_sum = _detect_extra_monthly_and_lump_sum(text)
+    new_rate = _detect_new_rate(text)
+    retirement_age = _detect_whatif_retirement_age(text)
+    loan_hint = _detect_loan_hint(text)
 
     intent = _detect_intent(text)
     if intent is None:
@@ -253,6 +336,16 @@ def parse_message(text: str) -> dict[str, Any]:
         result["exclude_companies"] = exclude_companies
     if sort_key is not None:
         result["sort_key"] = sort_key
+    if extra_monthly is not None:
+        result["extra_monthly"] = extra_monthly
+    if lump_sum is not None:
+        result["lump_sum"] = lump_sum
+    if new_rate is not None:
+        result["new_rate"] = new_rate
+    if retirement_age is not None:
+        result["retirement_age"] = retirement_age
+    if loan_hint is not None:
+        result["loan_hint"] = loan_hint
     return result
 
 

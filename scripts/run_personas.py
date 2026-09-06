@@ -520,6 +520,13 @@ def run_persona(
             attach_violations = find_text_violations(attach_body, banned)
             pr.add("chat-attach-no-banned-text", not attach_violations, hard=False,
                    detail="; ".join(attach_violations))
+            # SPEC 2.15: 첨부 분석이 저장한 최신 소비 패턴 결과에 linked_actions가 있는지
+            # soft로만 확인한다(합성 데이터 구성에 따라 절감 후보가 없을 수도 있다).
+            r_spending_after_attach = client.get("/api/spending")
+            if r_spending_after_attach.status_code == 200:
+                spending_after_body = r_spending_after_attach.json()
+                pr.add("chat-attach-linked-actions-present", bool(spending_after_body.get("linked_actions")),
+                       hard=False, detail=f"linked_actions={spending_after_body.get('linked_actions')}")
             client.delete(f"/api/chats/{attach_body['chat_id']}")
 
     # ---- 공시 비교: prepare -> confirm -> run x2 -> replay ----

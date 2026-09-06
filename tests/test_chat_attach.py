@@ -25,7 +25,13 @@ def test_chat_attach_p3_roundtrip_markdown_resources_log_and_spending():
     assert client.post("/api/session/persona/P3").status_code == 200
     try:
         transactions = synthetic.generate_transactions("P3", months=3, seed=42, end=date.today())
-        merchants = {t.merchant for t in transactions}
+        # 대출상환 항목의 "가맹점"은 합성 데이터에서 loan.name을 그대로 쓴다(app/data/synthetic.py).
+        # P3-L2의 loan.name이 우연히 일반 대출종류 라벨("카드론")과 같은 문자열이라, SPEC 2.15
+        # 답변("이렇게 연결돼요")이 정당하게 쓰는 대출종류 라벨(app/services/spending.py의
+        # _LOAN_TYPE_LABELS_KR, 실명이 아닌 일반 명사)까지 "가맹점명 유출"로 오탐하지 않도록
+        # 대출 표시명은 이 검사에서 제외한다(가맹점 자체는 아니다).
+        loan_names = {loan.name for loan in synthetic.get_persona("P3").loans}
+        merchants = {t.merchant for t in transactions} - loan_names
         payload = {
             "filename": "P3_거래내역.csv",
             "months": 3,
@@ -51,9 +57,10 @@ def test_chat_attach_p3_roundtrip_markdown_resources_log_and_spending():
         assert "calc" in kinds
         assert "profile" in kinds
 
-        # 칩 1개, spending 의도
-        assert len(body["chips"]) == 1
-        assert body["chips"][0]["intent"] == "spending"
+        # 칩: 소비 패턴 보기(항상 있음) + 시나리오로 확인하기(SPEC 2.15, 절감 연결이 있으면)
+        chip_intents = [c["intent"] for c in body["chips"]]
+        assert "spending" in chip_intents
+        assert set(chip_intents) <= {"spending", "scenario"}
 
         # 액션: 소비 패턴 화면으로 이동
         assert body["action"] == {"type": "open_view", "payload": {"view": "spending"}}

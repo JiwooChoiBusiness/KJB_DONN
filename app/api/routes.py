@@ -62,6 +62,7 @@ from app.models import (
     ScenarioResult,
     SortKey,
     UserProfile,
+    WhatIfResult,
 )
 from app.services import actions as actions_service
 from app.services import answer as answer_service
@@ -72,6 +73,7 @@ from app.services import insights as insights_service
 from app.services import lifecycle as lifecycle_service
 from app.services import session as session_service
 from app.services import spending as spending_service
+from app.services import whatif as whatif_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -251,10 +253,16 @@ def post_compare_prepare(body: ComparePrepareRequest) -> CompareContext:
 
 
 @router.post("/compare/run", response_model=CompareResult)
-def post_compare_run(ctx: CompareContext) -> CompareResult:
+def post_compare_run(
+    ctx: CompareContext, previous_decision_id: Optional[str] = Query(None),
+) -> CompareResult:
+    """SPEC 2.14: `previous_decision_id`가 있으면 이전 결정과 비교한 `CompareResult.delta`를
+    채운다(현재 세션 소유가 아니거나 kind·카테고리가 다르면 delta는 None)."""
     profile = session_service.get_profile()
     try:
-        return compare_service.run_compare(ctx, profile, today=date.today())
+        return compare_service.run_compare(
+            ctx, profile, today=date.today(), previous_decision_id=previous_decision_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -348,10 +356,14 @@ def _profile_or_guest() -> UserProfile:
 
 def _spending_payload(summary, features, profile: UserProfile) -> dict[str, Any]:
     cards = spending_core.build_spending_cards(features, summary, profile)
+    opportunities = spending_core.savings_opportunities(summary, features)
+    linked_actions = spending_service.link_savings_to_debt(profile, opportunities, today=date.today())
     return {
         "summary": summary.model_dump(mode="json"),
         "features": features.model_dump(mode="json"),
         "cards": [c.model_dump(mode="json") for c in cards],
+        "opportunities": [o.model_dump(mode="json") for o in opportunities],
+        "linked_actions": [a.model_dump(mode="json") for a in linked_actions],
     }
 
 
@@ -421,7 +433,7 @@ _CHAT_EXTRACT_SCHEMA: dict[str, Any] = {
     "properties": {
         "intent": {"type": "STRING", "enum": [
             "compare", "schedule", "scenario", "action", "faq", "spending",
-            "retirement", "saving", "liquidity", "direct",
+            "retirement", "saving", "liquidity", "direct", "whatif",
         ]},
         "category": {"type": "STRING", "enum": ["deposit", "saving", "mortgage", "jeonse", "credit", "policy"]},
         "amount": {"type": "INTEGER"},
@@ -429,6 +441,14 @@ _CHAT_EXTRACT_SCHEMA: dict[str, Any] = {
         "max_rate": {"type": "NUMBER"},
         "exclude_companies": {"type": "ARRAY", "items": {"type": "STRING"}},
         "sort_key": {"type": "STRING", "enum": ["total_cost", "monthly_payment", "rate"]},
+        # SPEC 2.13: 계산형 자유 질의(what-if) 슬롯.
+        "extra_monthly": {"type": "INTEGER"},
+        "lump_sum": {"type": "INTEGER"},
+        "new_rate": {"type": "NUMBER"},
+        "retirement_age": {"type": "INTEGER"},
+        "loan_hint": {"type": "STRING", "enum": [
+            "card_loan", "credit", "overdraft", "mortgage", "jeonse", "student", "policy",
+        ]},
     },
     "required": ["intent"],
 }
@@ -440,7 +460,7 @@ _CATEGORY_LABELS_KR = {
 
 _VALID_CHAT_INTENTS = {
     "compare", "schedule", "scenario", "action", "faq", "spending",
-    "retirement", "saving", "liquidity", "direct",
+    "retirement", "saving", "liquidity", "direct", "whatif",
 }
 
 # SPEC 2.11: internal 경로인데 faq가 아닌 의도들. 이 의도들은 발화에 제도 키워드(KB
@@ -495,10 +515,11 @@ def _ground_numeric_slots(slots: dict[str, Any], text: str) -> dict[str, Any]:
 
     규칙 파서가 같은 필드를 찾으면 그 값을 우선하고, 규칙 파서가 못 찾은 숫자는 발화에 정수부가
     그대로 등장할 때만 남긴다. 숫자는 결정론 코드의 입력이므로 근거 없는 값은 버린다.
+    SPEC 2.13: whatif 슬롯(extra_monthly·lump_sum·new_rate·retirement_age)도 같은 규칙을 쓴다.
     """
     rule = guardrails.parse_message(text)
     norm_text = text.replace(",", "")
-    for key in ("amount", "term_months", "max_rate"):
+    for key in ("amount", "term_months", "max_rate", "extra_monthly", "lump_sum", "new_rate", "retirement_age"):
         value = slots.get(key)
         if value in (None, "", []):
             continue
@@ -678,8 +699,28 @@ _STAGE_LABELS: dict[str, str] = {
 _INTENT_LABELS_KR: dict[str, str] = {
     "compare": "공시 비교", "schedule": "상환표", "scenario": "시나리오", "action": "행동 제안",
     "faq": "제도 안내", "spending": "소비 패턴", "retirement": "노후자금", "saving": "저축률",
-    "liquidity": "비상자금", "direct": "일반 안내",
+    "liquidity": "비상자금", "direct": "일반 안내", "whatif": "가정 계산",
 }
+
+# SPEC 2.13: whatif 도구별 표시 라벨(노드 detail·리소스 title에 쓴다).
+_WHATIF_TOOL_LABELS_KR: dict[str, str] = {
+    "extra_payment": "추가 상환",
+    "lump_sum": "일시 상환",
+    "refinance": "대환",
+    "retirement_age": "은퇴 시점 변경",
+}
+_WHATIF_CALC_TITLES_KR: dict[str, str] = {
+    "extra_payment": "추가 상환 효과",
+    "lump_sum": "일시 상환 효과",
+    "refinance": "대환 효과",
+    "retirement_age": "은퇴 시점 변경",
+}
+
+
+def _whatif_calc_detail(result: WhatIfResult) -> str:
+    if result.tool == "retirement_age":
+        return f"은퇴 {result.before.get('retirement_age')}세 -> {result.after.get('retirement_age')}세"
+    return f"{result.before.get('months')}개월 -> {result.after.get('months')}개월"
 
 
 class _StageEmitter:
@@ -1055,6 +1096,88 @@ def _build_chat_reply(
                 stages.start("explain")
                 stages.finish("explain", "skip", "준비된 문장을 그대로 썼어요")
 
+    elif intent == "whatif":
+        # SPEC 2.13: 계산형 자유 질의("매달 30만 원 더 갚으면?" 등). 슬롯이 없으면 되묻고,
+        # 프로필이 없으면 온보딩 안내로 답한다(둘 다 debt_data/calc 노드를 열지 않는다 -
+        # "노드는 intent까지").
+        whatif_input = {k: slots.get(k) for k in
+                         ("extra_monthly", "lump_sum", "new_rate", "retirement_age", "loan_hint")}
+        has_calc_slot = any(
+            whatif_input.get(k) not in (None, "", []) for k in
+            ("extra_monthly", "lump_sum", "new_rate", "retirement_age")
+        )
+        if profile is None:
+            stages.start("debt_data")
+            reply_text = (
+                "아직 프로필이 없어요. 페르소나를 선택하거나 내 부채 화면에서 정보를 입력하면 "
+                "가정 계산을 도와드릴게요."
+            )
+            chips.append(Chip(id="chip-chat-onboarding-whatif", text="페르소나 선택하러 가기", tier=1,
+                               intent="onboarding", params={}))
+            stages.finish("debt_data", "done", "프로필이 없어 계산하지 못했어요")
+            stages.start("explain")
+            stages.finish("explain", "skip", "준비된 문장을 그대로 썼어요")
+        elif not has_calc_slot:
+            reply_text = "매달 얼마를 더 갚을지, 또는 어떤 금리·은퇴 나이를 가정할지 알려주세요(예: 30만 원 더 갚으면?)"
+            stages.start("explain")
+            stages.finish("explain", "skip", "준비된 문장을 그대로 썼어요")
+        else:
+            params_policy = policy.load_policy_params()
+            result = whatif_service.run_whatif(profile, params_policy, whatif_input, today=date.today())
+            stages.start("debt_data")
+            if result is None:
+                stages.finish("debt_data", "done", "계산할 수 있는 대출 정보가 없어요")
+                reply_text = "계산할 수 있는 대출 정보가 없어요. 내 부채 화면에서 대출 정보를 입력해 주세요."
+                stages.start("explain")
+                stages.finish("explain", "skip", "준비된 문장을 그대로 썼어요")
+            else:
+                resources.extend(answer_service.profile_resources(profile))
+                if result.tool == "retirement_age":
+                    stages.finish("debt_data", "done", "은퇴 계획 정보를 확인했어요",
+                                  steps=["프로필의 자산·저축 정보를 참조했어요."],
+                                  resource_refs=[r.ref for r in resources])
+                else:
+                    n_loans = len(profile.loans)
+                    stages.finish("debt_data", "done", f"대출 {n_loans}건 중 {result.target_loan_label}을 골랐어요",
+                                  steps=["내 대출 자료를 참조했어요."], resource_refs=[r.ref for r in resources])
+
+                stages.start("calc")
+                tool_label = _WHATIF_TOOL_LABELS_KR.get(result.tool, result.tool)
+                calc_res = answer_service.calc_resource(
+                    _WHATIF_CALC_TITLES_KR.get(result.tool, tool_label), f"whatif:{result.tool}",
+                    _whatif_calc_detail(result),
+                )
+                resources.append(calc_res)
+                stages.finish("calc", "done", f"{tool_label} 효과를 계산했어요",
+                              steps=[f"{tool_label} 효과를 계산했어요."], resource_refs=[calc_res.ref])
+
+                stages.start("explain")
+                conclusion, w_llm_used, w_model, w_latency_ms, w_problems = explain_service.explain_chat_whatif(
+                    result, _llm_provider,
+                )
+                if w_llm_used:
+                    stages.finish("explain", "done", "설명을 썼어요", tech=f"Gemini {w_model} · {_fmt_seconds(w_latency_ms)}")
+                    explain_llm_used = True
+                    explain_model = w_model
+                else:
+                    first_problem = w_problems[0] if w_problems else "template"
+                    stages.finish("explain", "fallback", "AI 대신 준비된 문장을 썼어요", tech=f"템플릿({first_problem})")
+
+                reply_text = answer_service.format_whatif_answer(result, conclusion)
+                answer_format = "markdown"
+
+                chips.append(Chip(id="chip-chat-whatif-scenario", text="시나리오로 확인하기", tier=1,
+                                   intent="scenario", params={}))
+                chips.append(Chip(id="chip-chat-whatif-schedule", text="상환표 보기", tier=1,
+                                   intent="schedule", params={}))
+                if result.tool == "refinance":
+                    sp = result.scenario_params
+                    chips.append(Chip(
+                        id="chip-chat-whatif-compare", text="내 조건으로 공시 비교", tier=1, intent="compare",
+                        params={"amount": sp.get("amount"), "term_months": sp.get("term_months"),
+                                "target_loan_id": sp.get("loan_id")},
+                    ))
+
     else:  # faq: internal(KB 히트) 또는 external(KB 미달·시점성 질문)
         # 라우팅 근거는 두 단계다. (1) 발화에 문서 키워드가 그대로 들어있으면(고정밀) 그 문서로
         # internal. (2) 아니면 바이그램 점수가 임계값을 넘고 시점성 질문이 아닐 때만 internal.
@@ -1365,7 +1488,11 @@ def post_chat_attach(body: ChatAttachRequest) -> ChatReply:
     spending_service.save(profile.id, summary, features)
     t2 = time.monotonic()
 
-    markdown = answer_service.format_spending_answer(summary, features, profile, months)
+    # SPEC 2.15: 지출 절감 후보를 상환 효과로 연결해 답변에 "이렇게 연결돼요" 목록으로 붙인다.
+    opportunities = spending_core.savings_opportunities(summary, features)
+    linked_actions = spending_service.link_savings_to_debt(profile, opportunities, today=date.today())
+
+    markdown = answer_service.format_spending_answer(summary, features, profile, months, linked_actions)
     banned = insights_service.get_banned_terms()
     if guardrails.check_text(markdown, banned) or any(p in markdown for p in slotfill.FORBIDDEN_PHRASES):
         markdown = "분석 요약을 표시할 수 없어 소비 패턴 화면에서 확인해 주세요."
@@ -1381,6 +1508,9 @@ def post_chat_attach(body: ChatAttachRequest) -> ChatReply:
         *answer_service.profile_resources(profile),
     ]
     chips = [Chip(id="chip-chat-attach-spending", text="소비 패턴 자세히 보기", tier=1, intent="spending", params={})]
+    if linked_actions:
+        chips.append(Chip(id="chip-chat-attach-scenario", text="시나리오로 확인하기", tier=1,
+                           intent="scenario", params={}))
     action: dict[str, Any] = {"type": "open_view", "payload": {"view": "spending"}}
     trace = [
         {"id": "attach_read", "label": "파일 확인", "status": "done", "detail": f"거래 {n}건을 읽었어요",

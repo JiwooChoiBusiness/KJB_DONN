@@ -40,6 +40,7 @@ from app.models import (
     RateSemantics,
     SortKey,
     UserProfile,
+    WhatIfResult,
 )
 from app.services import actions as actions_service
 from app.services import decisions as decisions_service
@@ -160,6 +161,13 @@ PLACEHOLDER_CONTEXT: dict[str, tuple[str, ...]] = {
     "vs_a": ("절감", "줄", "더들", "차이", "아낄"),
     "vs_b": ("절감", "줄", "더들", "차이", "아낄"),
     "vs_c": ("절감", "줄", "더들", "차이", "아낄"),
+    # SPEC 2.13 whatif_v1
+    "lump_sum_amount": ("일시상환", "한번에", "목돈", "상환"),
+    "new_rate": ("금리",),
+    "total_cost_delta": ("총이자", "이자", "차이"),
+    "monthly_delta": ("납입", "월", "차이"),
+    "retirement_age_after": ("은퇴", "나이", "세"),
+    "shortfall_delta": ("부족액", "부족", "노후"),
 }
 
 # 각 플레이스홀더 앞/뒤로 살펴볼 문자 수(공백 제거 후). 한국어 어순상 설명어가 값
@@ -904,3 +912,141 @@ def explain_chat_compare(ctx: CompareContext, followup_changed: list[str], provi
         cached=False,
         created_at=datetime.now(),
     )
+
+
+# ---------------------------------------------------------------------------
+# 계산형 자유 질의(what-if) 결론 문장 (SPEC 2.13, 2.8 재사용)
+# ---------------------------------------------------------------------------
+
+WHATIF_SCHEMA: dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {"summary": {"type": "STRING"}},
+    "required": ["summary"],
+}
+
+_WHATIF_TOOL_LABELS_KR: dict[str, str] = {
+    "extra_payment": "추가 상환",
+    "lump_sum": "일시 상환",
+    "refinance": "대환",
+    "retirement_age": "은퇴 시점 변경",
+}
+
+_WHATIF_DIGIT_PAREN_RE = re.compile(r"\s*\([^)]*\)")
+
+
+def _loan_type_label_no_digits(label: Optional[str]) -> str:
+    """`WhatIfResult.target_loan_label`(예: "카드론(잔액 2,400,000원, 17.5%)")에서 괄호 안
+    숫자 부분을 떼어 낸 숫자 없는 대출 종류 라벨만 남긴다(D4: facts는 숫자를 보내면 안 된다)."""
+    if not label:
+        return "대출"
+    return _WHATIF_DIGIT_PAREN_RE.sub("", label).strip() or "대출"
+
+
+def whatif_slots(result: WhatIfResult) -> tuple[dict, dict, dict]:
+    """what-if 결과 1건으로 (facts, placeholders, values)를 만든다. facts=도구·대출 종류·
+    방향(숫자 없음), placeholders/values=금액·개월·이자(도구별로 있는 것만)."""
+    facts: dict[str, Any] = {
+        "tool": _WHATIF_TOOL_LABELS_KR.get(result.tool, result.tool),
+        "loan_type": _loan_type_label_no_digits(result.target_loan_label),
+    }
+    placeholders: dict[str, str] = {}
+    values: dict[str, str] = {}
+
+    def add(key: str, raw_value: Any, label: str, formatter) -> None:
+        if raw_value is None:
+            return
+        placeholders[key] = label
+        values[key] = formatter(raw_value)
+
+    won = lambda v: f"{v:,}원"
+    months = lambda v: f"{v:,}개월"
+
+    if result.tool == "extra_payment":
+        facts["direction"] = "상환 기간 단축"
+        add("extra_monthly", result.inputs.get("extra_monthly"), "매월 추가 상환액", won)
+        add("months_saved", result.deltas.get("months_saved"), "단축 개월", months)
+        add("interest_saved", result.deltas.get("interest_saved"), "절감 이자", won)
+    elif result.tool == "lump_sum":
+        facts["direction"] = "상환 기간 단축"
+        add("lump_sum_amount", result.inputs.get("amount"), "일시 상환액", won)
+        add("months_saved", result.deltas.get("months_saved"), "단축 개월", months)
+        add("interest_saved", result.deltas.get("interest_saved"), "절감 이자", won)
+    elif result.tool == "refinance":
+        delta = result.deltas.get("total_cost_delta") or 0
+        facts["direction"] = "총이자 절감" if delta < 0 else ("총이자 증가" if delta > 0 else "총이자 변화 없음")
+        add("new_rate", result.inputs.get("new_rate"), "새 금리", lambda v: f"{v:.4g}%")
+        add("total_cost_delta", abs(delta) if delta else 0, "총이자 차이", won)
+    else:  # retirement_age
+        delta = result.deltas.get("shortfall_delta") or 0
+        facts["direction"] = "부족액 감소" if delta < 0 else ("부족액 증가" if delta > 0 else "부족액 변화 없음")
+        add("retirement_age_after", result.after.get("retirement_age"), "새 은퇴 나이", lambda v: f"{v}세")
+        add("shortfall_delta", abs(delta), "노후 부족액 차이", won)
+
+    return facts, placeholders, values
+
+
+def _template_whatif_conclusion(result: WhatIfResult) -> str:
+    """LLM 실패/검증 실패 시 쓰는 결론 문장(template_id whatif_v1)."""
+    label = result.target_loan_label or "대상 대출"
+    if result.tool == "extra_payment":
+        return (
+            f"매달 {result.inputs.get('extra_monthly', 0):,}원을 {label}에 추가로 갚으면 "
+            f"{result.deltas.get('months_saved', 0):,}개월 빨리 끝나고 이자 "
+            f"{result.deltas.get('interest_saved', 0):,}원을 아껴요."
+        )
+    if result.tool == "lump_sum":
+        return (
+            f"{result.inputs.get('amount', 0):,}원을 {label}에 한 번에 갚으면 "
+            f"{result.deltas.get('months_saved', 0):,}개월 빨리 끝나고 이자 "
+            f"{result.deltas.get('interest_saved', 0):,}원을 아껴요."
+        )
+    if result.tool == "refinance":
+        delta = result.deltas.get("total_cost_delta", 0) or 0
+        direction = "줄어요" if delta < 0 else ("늘어요" if delta > 0 else "그대로예요")
+        return (
+            f"{label}을 금리 {result.inputs.get('new_rate', 0):.4g}%로 갈아타면 총이자가 "
+            f"{abs(delta):,}원 {direction}."
+        )
+    # retirement_age
+    delta = result.deltas.get("shortfall_delta", 0) or 0
+    direction = "줄어요" if delta < 0 else ("늘어요" if delta > 0 else "그대로예요")
+    return (
+        f"은퇴를 {result.after.get('retirement_age', 0)}세로 하면 노후 부족액이 "
+        f"{abs(delta):,}원 {direction}."
+    )
+
+
+def explain_chat_whatif(
+    result: WhatIfResult, provider: Any,
+) -> tuple[str, bool, Optional[str], int, list[str]]:
+    """SPEC 2.13: what-if 결론 1문장을 LLM 슬롯 필링으로 만든다. 실패·불가 시 템플릿.
+
+    반환: (text, llm_used, model, latency_ms, problems). `ExplainResult`는 kind가
+    "compare"|"action"으로 고정돼 있어(app/models.py) whatif 전용 kind를 담을 수 없으므로,
+    `explain_chat_compare`와 달리 저장하지 않고 이 얕은 튜플만 돌려준다(대화 로그가 이미
+    응답 문장을 기록한다).
+    """
+    facts, placeholders, values = whatif_slots(result)
+    banned = get_banned_terms()
+    allowed = set(placeholders.keys())
+
+    data, model, latency_ms, problems = _call_llm_explain(
+        provider, facts, placeholders, "whatif_v1", WHATIF_SCHEMA,
+        deadline_seconds=CHAT_EXPLAIN_DEADLINE_SECONDS,
+    )
+
+    all_problems: list[str] = list(problems)
+    summary_text: Optional[str] = None
+
+    if data is not None:
+        summary_text, summary_problems = _process_text(
+            data.get("summary"), allowed, banned, values, max_chars=160, max_sentences=1, location="summary",
+        )
+        all_problems.extend(summary_problems)
+
+    if summary_text is not None and not all_problems:
+        return summary_text, True, model, latency_ms, all_problems
+
+    template_text = _template_whatif_conclusion(result)
+    template_text, _ = _guard_template(template_text, {}, banned)
+    return template_text, False, None, latency_ms, all_problems
