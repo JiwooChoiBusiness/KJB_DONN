@@ -1,5 +1,5 @@
 /* =========================================================
-   DONN 부채 코치 PoC - app.js
+   DONN 부채 전문 AI Agent PoC - app.js
    구성 순서: 0 상수/라벨, 1 DOM 헬퍼, 2 포맷 헬퍼, 3 API 헬퍼,
              4 상태, 5 라우터, 6 공용 UI 컴포넌트,
              7~12 화면별 렌더 함수, 13 채팅, 14 사이드바/설정,
@@ -788,7 +788,7 @@ async function renderHome() {
 
   const hero = h('div', { class: 'home-hero' });
   hero.appendChild(h('h1', { class: 'home-title' }, 'DONN'));
-  hero.appendChild(h('p', { class: 'home-subtitle' }, '빚 걱정을 계산으로 바꿉니다'));
+  hero.appendChild(h('p', { class: 'home-subtitle' }, '걱정을 덜어드리는 AI Agent'));
   root.appendChild(hero);
 
   const cardsWrap = h('div', { class: 'insight-cards-wrap' });
