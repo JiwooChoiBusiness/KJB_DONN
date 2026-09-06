@@ -13,9 +13,13 @@ D4 대상이 아니므로(SPEC 2.11 본문), 여기서는 숫자를 그대로 �
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from typing import Any, Optional
+from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 from app.data import products
 # 주의: `from app.kb import search as kb_search`는 쓰지 않는다. app/kb/__init__.py가
@@ -28,6 +32,9 @@ from app import kb as kb_search
 from app.llm import guardrails, slotfill
 from app.llm.provider import LLMUnavailable
 from app.models import ChatResource, PolicyParams, ProductCategory, UserProfile
+# insights.py가 이미 만들어 둔 공공·업권 일반어 판별 어휘를 재사용한다(SEV4 2026-09-06
+# 리뷰: external 요약의 "OO은행"류 패턴 검사가 같은 기준으로 오탐을 피하게 한다).
+from app.services.insights import _PUBLIC_TOKENS, _SECTOR_WORDS
 
 _CATEGORY_LABELS_KR: dict[str, str] = {
     "deposit": "예금", "saving": "적금", "mortgage": "주택담보대출",
@@ -183,7 +190,8 @@ KB_ANSWER_SYSTEM = (
     "당신은 한국어 개인 부채 코치 앱 DONN의 제도 안내 요약 작성기입니다. 제공된 문단만 "
     "근거로 요약 1문장과 핵심 3개(각 1문장, 문단당 1개)를 JSON으로 돌려주세요. 문단에 없는 "
     "숫자나 사실을 지어내지 마세요. 특정 금융회사나 상품 이름, 가입을 권유하는 표현을 쓰지 "
-    "마세요. 해요체로 짧고 명확하게 쓰세요."
+    "마세요. 숫자를 한글 수사로 바꿔 쓰지 말고 아라비아 숫자 그대로 쓰세요. 해요체로 짧고 "
+    "명확하게 쓰세요."
 )
 
 KB_ANSWER_SCHEMA: dict[str, Any] = {
@@ -195,14 +203,30 @@ KB_ANSWER_SCHEMA: dict[str, Any] = {
     "required": ["summary", "points"],
 }
 
-_NUMBER_TOKEN_RE = re.compile(r"\d[\d,.]*")
+# SEV3 2026-09-06 리뷰: 숫자를 "바로 뒤 단위"까지 포함해 토큰화하고 쉼표는 정규화한다
+# (참조 "2000만원"과 출력 "2,000만원"을 같은 토큰으로 본다). 단위가 없는 맨 숫자도
+# 여전히 토큰이 된다(선택 그룹).
+_NUMBER_TOKEN_RE = re.compile(r"\d[\d,.]*\s*(?:%|원|만원|개월|년|일|배|세)?")
 _LEADING_BULLET_RE = re.compile(r"^[\s\-•]+")
 _WS_RE = re.compile(r"\s+")
 _SENTENCE_END_RE = re.compile(r"[.!?]")
 
+# 숫자를 한글 수사로 바꿔 써서 숫자 기반 그라운딩 검사를 피해가는 것을 막는다(예:
+# "이천만원"은 _NUMBER_TOKEN_RE로 잡히지 않지만 실제로는 지어낸 숫자일 수 있다).
+_HANGUL_NUMERAL_RE = re.compile(r"[일이삼사오육칠팔구십백천만억]{2,}\s*(?:원|퍼센트|개월|년)")
+
+
+def _normalize_number_token(raw: str) -> str:
+    """쉼표와 공백을 지운다(표기 차이만 다른 같은 숫자를 같은 토큰으로 만든다)."""
+    return re.sub(r"[,\s]", "", raw)
+
 
 def _number_tokens(text: str) -> set[str]:
-    return set(_NUMBER_TOKEN_RE.findall(text or ""))
+    return {_normalize_number_token(m.group(0)) for m in _NUMBER_TOKEN_RE.finditer(text or "") if m.group(0).strip()}
+
+
+def _has_hangul_numeral(text: str) -> bool:
+    return bool(_HANGUL_NUMERAL_RE.search(text or ""))
 
 
 def _first_sentence(text: str, max_len: int = 140) -> str:
@@ -217,6 +241,44 @@ def _first_sentence(text: str, max_len: int = 140) -> str:
     if len(sentence) > max_len:
         sentence = sentence[:max_len].rstrip() + "..."
     return sentence
+
+
+def _split_sentences(cleaned: str) -> list[str]:
+    """이미 공백이 정리된 문자열을 문장 종결부호 뒤에서 나눈다(구분자는 각 조각 끝에 남긴다)."""
+    sentences: list[str] = []
+    start = 0
+    for m in _SENTENCE_END_RE.finditer(cleaned):
+        piece = cleaned[start : m.end()].strip()
+        if piece:
+            sentences.append(piece)
+        start = m.end()
+    tail = cleaned[start:].strip()
+    if tail:
+        sentences.append(tail)
+    return sentences
+
+
+def _first_clean_sentence(text: str, max_len: int = 140) -> str:
+    """섹션 본문에서 권유 표현(`slotfill.FORBIDDEN_PHRASES`)이 없는 첫 문장을 고른다.
+
+    (SEV3 2026-09-06 리뷰: kb/*.md 본문 중 "청약철회권: 보장성 상품(보험 등)..." 같은
+    문장은 "보장"이 부분 문자열로 걸리지만 실제로는 권유 표현이 아니다. 이런 문장을
+    통째로 버리는 대신 같은 섹션의 다음 문장으로 건너뛴다. 모든 문장이 걸리면 빈 문자열
+    (호출부가 그 섹션은 건너뛴다).)
+    """
+    if not text:
+        return ""
+    cleaned = _LEADING_BULLET_RE.sub("", text.strip())
+    cleaned = _WS_RE.sub(" ", cleaned).strip()
+    if not cleaned:
+        return ""
+    for sentence in _split_sentences(cleaned):
+        if any(phrase in sentence for phrase in slotfill.FORBIDDEN_PHRASES):
+            continue
+        if len(sentence) > max_len:
+            sentence = sentence[:max_len].rstrip() + "..."
+        return sentence
+    return ""
 
 
 def kb_reference_sections(doc: Any, limit: int = 3) -> list[str]:
@@ -251,10 +313,12 @@ def _render_kb_markdown(summary: str, points: list[str], needs_verification: boo
 def _rule_based_kb_answer(doc: Any, sections: list[str]) -> tuple[str, list[str]]:
     if not sections:
         return doc.title, []
-    summary = _first_sentence(doc.sections.get(sections[0], ""))
+    summary = _first_clean_sentence(doc.sections.get(sections[0], ""))
+    if not summary:
+        summary = doc.title
     points = []
     for name in sections:
-        sentence = _first_sentence(doc.sections.get(name, ""))
+        sentence = _first_clean_sentence(doc.sections.get(name, ""))
         if sentence:
             points.append(f"**{name}**: {sentence}")
     return summary, points
@@ -294,6 +358,12 @@ def format_kb_answer(
             latency_ms = int((time.monotonic() - started) * 1000)
             problems.append("llm_unavailable")
             result = None
+        except Exception:  # noqa: BLE001 - SEV4 2026-09-06 리뷰: 예상 밖 예외도 규칙
+            # 렌더링으로 떨어지게 하고, 원문은 로그로만 남긴다.
+            latency_ms = int((time.monotonic() - started) * 1000)
+            logger.exception("KB 답변 LLM 호출 실패, 규칙 렌더링으로 대체")
+            problems.append("llm_error")
+            result = None
 
         if result is not None:
             data = result.data if isinstance(result.data, dict) else None
@@ -323,6 +393,10 @@ def format_kb_answer(
                     output_numbers |= _number_tokens(p)
                 if not output_numbers.issubset(reference_numbers):
                     candidate_problems.append("ungrounded_number")
+                if _has_hangul_numeral(raw_summary) or any(_has_hangul_numeral(p) for p in raw_points):
+                    # SEV3 2026-09-06 리뷰: 숫자를 한글 수사로 바꿔 쓰면 _number_tokens가
+                    # 숫자를 못 잡아 ungrounded_number 검사를 그대로 피해간다. 별도로 잡는다.
+                    candidate_problems.append("hangul_numeral")
 
                 if candidate_problems:
                     problems.extend(candidate_problems)
@@ -357,19 +431,71 @@ _OFFICIAL_DOMAIN_WHITELIST = (
 )
 
 
+def _is_official_domain(url: str) -> bool:
+    """`urlparse(url).hostname`이 허용 도메인 자체이거나 그 하위 도메인으로 끝나는지 본다.
+
+    (SEV2 2026-09-06 리뷰: 기존 `domain in url` 부분 문자열 검사는
+    "https://evil.example/fss.or.kr"이나 "https://fss.or.kr.evil.example" 같은 URL도
+    통과시킬 수 있었다. hostname만 잘라 비교하면 이런 스푸핑을 막는다.)
+    """
+    try:
+        hostname = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if not hostname:
+        return False
+    return any(hostname == domain or hostname.endswith(f".{domain}") for domain in _OFFICIAL_DOMAIN_WHITELIST)
+
+
 def _official_kb_link_fallback(limit: int = 5) -> list[ChatResource]:
     seen: set[str] = set()
     out: list[ChatResource] = []
     for doc in kb_search.load_docs():
         for src in doc.sources:
             url = (src or {}).get("url") or ""
-            if not url or url in seen or not any(domain in url for domain in _OFFICIAL_DOMAIN_WHITELIST):
+            if not url or url in seen or not _is_official_domain(url):
                 continue
             seen.add(url)
             out.append(ChatResource(kind="external", title=(src or {}).get("title") or url, ref=url, url=url))
             if len(out) >= limit:
                 return out
     return out
+
+
+# SEV4 2026-09-06 리뷰: 검색 질의로 나가기 전에 숫자·금액 토큰을 지운다(D4/G3: 개인
+# 신용정보 파생 수치가 외부로 나가지 않게 한다). 단위가 없는 맨 숫자도 지운다.
+_QUERY_NUMBER_RE = re.compile(r"\d[\d,.]*\s*(?:원|만원|천만원|억|%|개월|년|세|배)?")
+
+# "OO은행"류 패턴에서 앞 토큰이 공공·업권 일반어면 회사명이 아니다(SEV4 2026-09-06 리뷰).
+# "한국"은 중앙은행 "한국은행"(공적 기관, 기준금리를 정하는 곳이라 외부 검색 요약에
+# 자연스럽게 자주 등장한다)을 오탐하지 않기 위해 포함한다. 민간 은행("한국씨티은행" 등)은
+# 정규식이 접두 토큰을 "씨티"까지 최소 확장해 잡아내므로 여기 포함해도 안전하다.
+_GENERIC_SECTOR_PREFIX_WORDS = {
+    "시중", "인터넷", "저축", "지방", "국책", "특수", "일반", "제1금융권", "제2금융권", "한국",
+}
+_COMPANY_NAME_PATTERN_RE = re.compile(r"([가-힣A-Za-z]{2,}?)(은행|저축은행|캐피탈|카드|생명|화재|증권|금고|보험)")
+
+
+def _strip_numeric_tokens(text: str) -> str:
+    """검색 질의에서 숫자·금액 토큰을 제거하고 공백을 정리한다."""
+    stripped = _QUERY_NUMBER_RE.sub(" ", text or "")
+    return _WS_RE.sub(" ", stripped).strip()
+
+
+def _has_ungrounded_company_name(text: str) -> bool:
+    """"OO은행"류 패턴이 있고 앞 토큰이 공공·업권 일반어가 아니면 True.
+
+    (SEV4 2026-09-06 리뷰: banned 목록은 현재 적재된 상품의 회사명만 담고 있어, 외부
+    검색 요약이 그 목록에 없는 다른 실존 금융회사명을 그대로 인용해도 걸러지지 않았다.)
+    """
+    for m in _COMPANY_NAME_PATTERN_RE.finditer(text or ""):
+        prefix = m.group(1)
+        if prefix in _SECTOR_WORDS or prefix in _GENERIC_SECTOR_PREFIX_WORDS:
+            continue
+        if any(tok in prefix for tok in _PUBLIC_TOKENS):
+            continue
+        return True
+    return False
 
 
 def external_answer(
@@ -385,12 +511,23 @@ def external_answer(
         reason = "search_unavailable" if search_fn is None or not available else "external_search_disabled"
         return EXTERNAL_NO_GROUNDING_TEXT, _official_kb_link_fallback(), False, None, [reason], None
 
+    # SEV4 2026-09-06 리뷰: 개인 수치(G3)가 검색 질의에 그대로 나가지 않도록 숫자·금액
+    # 토큰을 제거한 질의만 외부로 보낸다. 제거 후에도 숫자가 남거나(단위 없이 이어진
+    # 숫자 등) 질의가 너무 짧아지면(문맥이 사실상 사라진 것) 그라운딩 자체를 건너뛰고
+    # 공식 링크로 폴백한다.
+    safe_query = _strip_numeric_tokens(question_masked)
+    if any(ch.isdigit() for ch in safe_query):
+        return EXTERNAL_NO_GROUNDING_TEXT, _official_kb_link_fallback(), False, None, ["query_has_digits"], None
+    if len(safe_query) < 5:
+        return EXTERNAL_NO_GROUNDING_TEXT, _official_kb_link_fallback(), False, None, ["query_too_short"], None
+
     try:
-        result = search_fn(question_masked, EXTERNAL_ANSWER_SYSTEM, deadline_seconds=deadline_seconds)
+        result = search_fn(safe_query, EXTERNAL_ANSWER_SYSTEM, deadline_seconds=deadline_seconds)
     except LLMUnavailable:
         return EXTERNAL_NO_GROUNDING_TEXT, _official_kb_link_fallback(), False, None, ["llm_unavailable"], None
-    except Exception as exc:  # noqa: BLE001 - 네트워크/파싱 등 예상 밖 오류도 안전하게 폴백
-        return EXTERNAL_NO_GROUNDING_TEXT, _official_kb_link_fallback(), False, None, [f"error:{type(exc).__name__}"], None
+    except Exception:  # noqa: BLE001 - 네트워크/파싱 등 예상 밖 오류도 안전하게 폴백
+        logger.exception("external 검색 LLM 호출 실패, 공식 링크로 대체")
+        return EXTERNAL_NO_GROUNDING_TEXT, _official_kb_link_fallback(), False, None, ["llm_error"], None
 
     data = result.data if isinstance(result.data, dict) else {}
     sources = data.get("sources") or []
@@ -402,7 +539,17 @@ def external_answer(
     if guardrails.check_text(text, banned) or any(p in text for p in slotfill.FORBIDDEN_PHRASES):
         text = EXTERNAL_BANNED_FALLBACK_TEXT
         problems.append("banned_term_removed")
+    elif _has_ungrounded_company_name(text):
+        # SEV4 2026-09-06 리뷰: banned 목록에 없는 금융회사명 패턴이 잡히면 요약을 버리고
+        # 출처 링크만 남긴다("추천"처럼 명백한 금칙어는 아니지만 M0 원칙(실명 비노출)
+        # 위반이라 같은 방식으로 처리한다).
+        text = EXTERNAL_BANNED_FALLBACK_TEXT
+        problems.append("company_pattern")
     elif text:
+        if any(ch.isdigit() for ch in text):
+            # 그라운딩 요약에 숫자가 그대로 나오면 검증되지 않은 수치이므로 확인 필요
+            # 문구를 붙인다(SEV4 2026-09-06 리뷰).
+            text = f"{text} (수치는 확인 필요)"
         text = f"{text} {EXTERNAL_GROUNDED_SUFFIX}"
     else:
         text = EXTERNAL_BANNED_FALLBACK_TEXT
@@ -457,6 +604,11 @@ def build_direct_answer(
     except LLMUnavailable:
         latency_ms = int((time.monotonic() - started) * 1000)
         return DIRECT_ANSWER_FALLBACK_TEXT, False, None, latency_ms, ["llm_unavailable"]
+    except Exception:  # noqa: BLE001 - SEV4 2026-09-06 리뷰: 예상 밖 예외도 고정 안내
+        # 문장으로 떨어지게 하고, 원문은 로그로만 남긴다.
+        latency_ms = int((time.monotonic() - started) * 1000)
+        logger.exception("direct 답변 LLM 호출 실패, 고정 안내로 대체")
+        return DIRECT_ANSWER_FALLBACK_TEXT, False, None, latency_ms, ["llm_error"]
     latency_ms = int((time.monotonic() - started) * 1000)
 
     data = result.data if isinstance(result.data, dict) else None

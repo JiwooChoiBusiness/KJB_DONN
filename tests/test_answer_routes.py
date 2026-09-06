@@ -155,8 +155,10 @@ def test_compare_intent_resources_include_products_and_profile(monkeypatch):
     assert "loan" in kinds
     products_res = next(r for r in body["resources"] if r["kind"] == "products")
     assert "건" in products_res["title"]
-    compute_stage = next(s for s in body["trace"] if s["id"] == "compute")
-    assert compute_stage["steps"]
+    # SEV2 2026-09-06 리뷰: compare 의도는 이제 "compute" 대신 "products"(공시 자료)
+    # 노드를 실제로 방출한다.
+    products_stage = next(s for s in body["trace"] if s["id"] == "products")
+    assert products_stage["steps"]
     client.delete(f"/api/chats/{body['chat_id']}")
     client.delete("/api/session")
 
@@ -200,7 +202,8 @@ def test_multi_node_not_attached_for_generic_schedule_message(monkeypatch):
     monkeypatch.setattr(routes_module, "_llm_provider", _FakeUnavailableProvider())
     _clear_session()
     body = _reply_route_body("상환표 보여줘")
-    assert [s["id"] for s in body["trace"]] == ["guard", "intent", "compute", "explain", "check"]
+    # SEV2 2026-09-06 리뷰: schedule 의도는 이제 "debt_data" 노드를 방출한다.
+    assert [s["id"] for s in body["trace"]] == ["guard", "intent", "debt_data", "explain", "check"]
 
 
 # ---------------------------------------------------------------------------

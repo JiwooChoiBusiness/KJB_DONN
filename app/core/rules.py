@@ -82,7 +82,7 @@ def _rule_r0(profile: UserProfile, capacity: Capacity) -> Optional[ActionCard]:
             "net_monthly": capacity.net_monthly,
         },
         assumptions=["연체 신호가 있거나, 상환비율이 70% 이상이거나, 이번 달 남는 돈이 마이너스이면 안전 모드로 안내해요."],
-        caveats=["이 안내는 상담 신청을 돕는 정보이고, 특정 상품 가입을 권하지 않아요."],
+        caveats=["이 안내는 상담 신청을 돕는 정보이고, 특정 상품 가입을 유도하지 않아요."],
         steps=[_COUNSELING_STEP],
         priority=0,
         safe_mode=True,

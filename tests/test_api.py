@@ -15,6 +15,12 @@ os.environ["DONN_DB_PATH"] = os.path.join(_TMP_DIR, "test.db")
 # 실제로 Gemini를 호출하는 테스트는 전부 _llm_provider를 monkeypatch해서 통제한다.
 os.environ["GEMINI_API_KEYS"] = "test-key-1,test-key-2"
 os.environ["GEMINI_MODEL_CHAIN"] = "test-model-a,test-model-b"
+# 호출 횟수 제한(app.main)은 기본값(20/150)이 켜져 있으면 이 파일과 다른 테스트 파일이
+# 공유하는 TestClient(같은 sid)가 수많은 /api/chat 호출을 누적해 429로 실패할 수 있다.
+# 테스트는 제한을 끄고, 제한 자체는 tests/test_session_isolation.py에서 monkeypatch로
+# 낮은 값을 걸어 별도로 검증한다.
+os.environ.setdefault("DONN_RATE_LIMIT_PER_5MIN", "0")
+os.environ.setdefault("DONN_RATE_LIMIT_GLOBAL_PER_5MIN", "0")
 
 from datetime import date  # noqa: E402
 

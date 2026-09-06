@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 import queue
+import contextvars
 import re
 import threading
 import time
@@ -12,6 +15,7 @@ from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 
 from app.api.schemas import (ChatCreateRequest,
     ChatRequest,
@@ -33,7 +37,7 @@ from app.core import retirement as retirement_core
 from app.core import spending as spending_core
 from app.data import policy, products, synthetic
 from app.data.finlife import CRDT_GRADE_LABELS
-from app.llm import guardrails
+from app.llm import guardrails, slotfill
 from app.llm.gemini import GeminiProvider
 from app.llm.provider import LLMUnavailable
 from app.services import chatlog
@@ -69,6 +73,7 @@ from app.services import session as session_service
 from app.services import spending as spending_service
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # 모듈 임포트 시 한 번 만든다(SPEC: 키 값은 절대 로그/코드에 남기지 않고 .env에서만 읽는다).
 # 테스트는 이 이름(app.api.routes._llm_provider)을 monkeypatch해서 LLM 경로를 통제한다.
@@ -267,6 +272,8 @@ def post_compare_explain(decision_id: str, body: Optional[ExplainRequest] = None
 @router.get("/compare/{decision_id}/explain", response_model=ExplainResult)
 def get_compare_explain(decision_id: str) -> ExplainResult:
     """저장된 설명만 돌려준다(생성하지 않음). 없으면 404."""
+    if decisions_service.get(decision_id) is None:  # 다른 브라우저 세션의 결정 기록은 없는 것으로 본다
+        raise HTTPException(status_code=404, detail="저장된 설명이 없습니다.")
     result = explain_service.get_stored("compare", decision_id)
     if result is None:
         raise HTTPException(status_code=404, detail="저장된 설명이 없습니다.")
@@ -456,12 +463,29 @@ def _normalize_intent(value: Any) -> str:
     return value if isinstance(value, str) and value in _VALID_CHAT_INTENTS else "faq"
 
 
+_POSITIVE_NUMERIC_SLOT_KEYS = ("amount", "term_months", "max_rate")
+
+
 def _clean_compare_params(slots: dict[str, Any]) -> dict[str, Any]:
+    """추출된 슬롯 중 실제 CompareContext 구성에 쓸 값만 남긴다.
+
+    금액·기간·금리 상한은 0·음수·숫자가 아닌 값이면 거른다(SEV5 2026-09-06 리뷰: "0원
+    신용대출 비교해줘" 같은 평범한 발화가 그대로 CompareContext 검증(amount > 0)까지
+    흘러가 500으로 이어지던 문제). 거른 값은 추정값으로 채워지도록 아예 슬롯에서 뺀다.
+    """
     params: dict[str, Any] = {}
     for key in ("category", "amount", "term_months", "max_rate", "exclude_companies", "sort_key"):
         value = slots.get(key)
-        if value not in (None, "", []):
-            params[key] = value
+        if value in (None, "", []):
+            continue
+        if key in _POSITIVE_NUMERIC_SLOT_KEYS:
+            try:
+                num = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(num) or num <= 0:
+                continue
+        params[key] = value
     return params
 
 
@@ -607,7 +631,15 @@ def _merge_followup(base: dict[str, Any], new_params: dict[str, Any]) -> tuple[d
     changed: list[str] = []
     for k, v in new_params.items():
         if k == "exclude_companies":
-            v = sorted(set(list(merged.get("exclude_companies") or []) + list(v or [])))
+            # SEV2 2026-09-06 리뷰: exclude_companies는 항상 리스트여야 하지만, 문자열
+            # 하나만 온 경우(추출 스키마를 우회한 값 등)에도 리스트로 감싸 안전하게
+            # 합친다(그렇지 않으면 list(v)가 문자열을 글자 단위로 쪼갠다).
+            if isinstance(v, str):
+                v = [v]
+            prev = merged.get("exclude_companies") or []
+            if isinstance(prev, str):
+                prev = [prev]
+            v = sorted(set(list(prev) + list(v or [])))
         if merged.get(k) != v:
             changed.append(k)
         merged[k] = v
@@ -653,12 +685,26 @@ class _StageEmitter:
     모든 이벤트에 항상 존재한다(없으면 빈 리스트).
     """
 
-    def __init__(self, emit: Optional[Callable[[dict[str, Any]], None]]):
+    def __init__(
+        self,
+        emit: Optional[Callable[[dict[str, Any]], None]],
+        cancel_event: Optional[threading.Event] = None,
+    ):
         self._emit = emit
+        # SEV3 2026-09-06 리뷰: SSE 클라이언트가 스트림을 도중에 닫으면 `POST
+        # /api/chat/stream`이 이 Event를 set한다. set된 뒤에는 start/finish가 조기
+        # 반환하며 큐에 더 넣지 않는다(워커 스레드 자체의 계산은 계속 끝까지 돌되, 더는
+        # 아무도 읽지 않는 큐에 이벤트를 쌓지 않는다).
+        self._cancel_event = cancel_event
         self.trace: list[dict[str, Any]] = []
         self._started_at: dict[str, float] = {}
 
+    def _cancelled(self) -> bool:
+        return self._cancel_event is not None and self._cancel_event.is_set()
+
     def start(self, stage_id: str) -> None:
+        if self._cancelled():
+            return
         self._started_at[stage_id] = time.monotonic()
         self._send({
             "id": stage_id, "label": _STAGE_LABELS[stage_id], "status": "start", "detail": "", "ms": 0,
@@ -669,6 +715,8 @@ class _StageEmitter:
         self, stage_id: str, status: str, detail: str,
         *, steps: Optional[list[str]] = None, resource_refs: Optional[list[str]] = None,
     ) -> None:
+        if self._cancelled():
+            return
         started = self._started_at.get(stage_id)
         ms = int((time.monotonic() - started) * 1000) if started is not None else 0
         event = {
@@ -709,11 +757,14 @@ def _build_chat_reply(
     message: str,
     base_params: Optional[dict[str, Any]] = None,
     emit: Optional[Callable[[dict[str, Any]], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> _ChatBuildResult:
     """SPEC 2.9: 단계별로 `stages.start`/`stages.finish`를 호출해 "생각 과정"을 기록·방출한다.
     수치·판단 자체는 기존과 동일한 코드 경로(규칙 파서/코드 계산)로 만든다. LLM은 의도
-    추출(intent 단계)과 문장 설명(explain 단계)에만 관여한다."""
-    stages = _StageEmitter(emit)
+    추출(intent 단계)과 문장 설명(explain 단계)에만 관여한다. `cancel_event`가 set되면
+    (SSE 클라이언트가 스트림을 닫음) 단계 이벤트만 더 이상 큐에 넣지 않는다(계산 자체는
+    끝까지 마친다, SEV3 2026-09-06 리뷰)."""
+    stages = _StageEmitter(emit, cancel_event)
     banned = insights_service.get_banned_terms()
 
     # ---- guard: PII 마스킹 + 위기 신호 확인 ----
@@ -728,7 +779,9 @@ def _build_chat_reply(
         stages.finish("explain", "skip", "규칙 문장")
         text, chips, action = _crisis_reply(crisis, session_service.get_profile())
         stages.start("check")
-        if guardrails.check_text(text, banned):
+        # SEV3 2026-09-06 리뷰: guardrails.check_text(상품·회사명) 외에 권유 표현
+        # (slotfill.FORBIDDEN_PHRASES)도 경로 무관하게 검사한다.
+        if guardrails.check_text(text, banned) or any(p in text for p in slotfill.FORBIDDEN_PHRASES):
             stages.finish("check", "fallback", "금칙어 감지로 기본 안내로 대체")
             text = "안내 문구를 표시할 수 없어 기본 안내로 대체했습니다. 메뉴에서 원하는 화면을 선택해주세요."
         else:
@@ -751,6 +804,10 @@ def _build_chat_reply(
                 llm_used = True
                 extract_model = result.model
         except LLMUnavailable:
+            slots = {}
+        except Exception:  # noqa: BLE001 - SEV4 2026-09-06 리뷰: 어떤 이유로 실패해도
+            # 규칙 파서 폴백으로 떨어져야 한다(예: resp.json() 실패 같은 예상 밖 예외).
+            logger.exception("chat intent extract 실패, 규칙 파서로 대체")
             slots = {}
 
     if not slots:
@@ -809,60 +866,78 @@ def _build_chat_reply(
         chips.extend(_static_faq_chips)
 
     elif intent == "compare":
-        stages.start("compute")
+        # SEV2 2026-09-06 리뷰: "compute"라는 뭉뚱그린 id 대신 SPEC 2.11의 노드 어휘
+        # (debt_data/calc/products) 중 이 의도의 계산 성격에 맞는 "products"(공시 자료)를
+        # 실제로 방출한다(그동안 _STAGE_LABELS에만 있고 어디서도 emit되지 않았다).
+        stages.start("products")
         params = _clean_compare_params(slots)
         followup_changed: list[str] = []
-        if base_params and params.get("category") in (None, base_params.get("category")):
-            merged, followup_changed = _merge_followup(base_params, params)
-            try:
-                ctx = CompareContext.model_validate(merged)
-            except Exception:  # 직전 조건이 깨졌으면 새 추정으로 되돌아간다
+        ctx: Optional[CompareContext] = None
+        try:
+            if base_params and params.get("category") in (None, base_params.get("category")):
+                merged, followup_changed = _merge_followup(base_params, params)
+                try:
+                    ctx = CompareContext.model_validate(merged)
+                except (ValidationError, ValueError):  # 직전 조건이 깨졌으면 새 추정으로 되돌아간다
+                    ctx = compare_service.prepare_context(profile, params)
+            else:
                 ctx = compare_service.prepare_context(profile, params)
-        else:
-            ctx = compare_service.prepare_context(profile, params)
-        category_label = _CATEGORY_LABELS_KR.get(ctx.category.value, ctx.category.value)
+        except (ValidationError, ValueError):
+            # SEV5 2026-09-06 리뷰: 평범한 발화("0원 신용대출 비교해줘" 등)가 조건 추정/검증
+            # 단계에서 예외를 내면 안내 문장으로 답하고, 500으로 새지 않게 한다.
+            ctx = None
 
-        if ctx.category in (ProductCategory.DEPOSIT, ProductCategory.SAVING):
-            # 결정 D5: 예·적금은 순위 비교 대상이 아니다. 비교 화면으로 보내는 대신
-            # 공시 열람만 안내하고, prepare_compare 액션은 만들지 않는다(2026-09-06 리뷰).
-            stages.finish("compute", "done", f"비교 조건 준비: {category_label}, 예·적금은 순위 비교 대상 아님")
-            reply_text = compare_service.NO_RANKING_CATEGORY_MESSAGE
+        if ctx is None:
+            stages.finish("products", "fallback", "비교 조건을 이해하지 못함")
+            reply_text = "조건을 이해하지 못했어요. 금액과 기간(최대 600개월)을 다시 알려주세요."
             stages.start("explain")
             stages.finish("explain", "skip", "규칙 문장")
         else:
-            resources.extend(answer_service.profile_resources(profile))
-            products_res = answer_service.products_resource(ctx.category)
-            resources.append(products_res)
-            compute_steps = [f"{products_res.title}을 조건에 맞춰 준비했어요."]
-            followup_labels = [_FOLLOWUP_LABELS.get(k, k) for k in followup_changed]
-            if followup_labels:
-                stages.finish("compute", "done", f"이전 조건에서 {', '.join(followup_labels)}만 변경",
-                              steps=compute_steps, resource_refs=[r.ref for r in resources])
+            category_label = _CATEGORY_LABELS_KR.get(ctx.category.value, ctx.category.value)
+
+            if ctx.category in (ProductCategory.DEPOSIT, ProductCategory.SAVING):
+                # 결정 D5: 예·적금은 순위 비교 대상이 아니다. 비교 화면으로 보내는 대신
+                # 공시 열람만 안내하고, prepare_compare 액션은 만들지 않는다(2026-09-06 리뷰).
+                stages.finish("products", "done", f"비교 조건 준비: {category_label}, 예·적금은 순위 비교 대상 아님")
+                reply_text = compare_service.NO_RANKING_CATEGORY_MESSAGE
+                stages.start("explain")
+                stages.finish("explain", "skip", "규칙 문장")
             else:
-                stages.finish(
-                    "compute", "done",
-                    f"비교 조건 준비: {category_label}, 금액 {ctx.amount:,}원, "
-                    f"기간 {ctx.term_months}개월(추정 {len(ctx.estimated_fields)}개)",
-                    steps=compute_steps, resource_refs=[r.ref for r in resources],
-                )
-            stages.start("explain")
-            explain_result = explain_service.explain_chat_compare(ctx, followup_labels, _llm_provider)
-            status, detail = _explain_stage_detail(explain_result)
-            stages.finish("explain", status, detail)
-            if explain_result.source == "llm":
-                explain_llm_used = True
-                explain_model = explain_result.model
-            reply_text = explain_result.summary + " 아래 버튼으로 조건을 확인하고 실행해보세요."
-            action = {"type": "prepare_compare", "payload": {"params": ctx.model_dump(mode="json")}}
+                resources.extend(answer_service.profile_resources(profile))
+                products_res = answer_service.products_resource(ctx.category)
+                resources.append(products_res)
+                compute_steps = [f"{products_res.title}을 조건에 맞춰 준비했어요."]
+                followup_labels = [_FOLLOWUP_LABELS.get(k, k) for k in followup_changed]
+                if followup_labels:
+                    stages.finish("products", "done", f"이전 조건에서 {', '.join(followup_labels)}만 변경",
+                                  steps=compute_steps, resource_refs=[r.ref for r in resources])
+                else:
+                    stages.finish(
+                        "products", "done",
+                        f"비교 조건 준비: {category_label}, 금액 {ctx.amount:,}원, "
+                        f"기간 {ctx.term_months}개월(추정 {len(ctx.estimated_fields)}개)",
+                        steps=compute_steps, resource_refs=[r.ref for r in resources],
+                    )
+                stages.start("explain")
+                explain_result = explain_service.explain_chat_compare(ctx, followup_labels, _llm_provider)
+                status, detail = _explain_stage_detail(explain_result)
+                stages.finish("explain", status, detail)
+                if explain_result.source == "llm":
+                    explain_llm_used = True
+                    explain_model = explain_result.model
+                reply_text = explain_result.summary + " 아래 버튼으로 조건을 확인하고 실행해보세요."
+                action = {"type": "prepare_compare", "payload": {"params": ctx.model_dump(mode="json")}}
 
     elif intent in ("schedule", "scenario"):
-        stages.start("compute")
+        # SEV2 2026-09-06 리뷰: 내 대출/프로필 자료만 참조하는 의도라 "debt_data"(내 부채
+        # 자료) 노드로 실제 방출한다("compute"는 더 이상 쓰지 않는다).
+        stages.start("debt_data")
         resources.extend(answer_service.profile_resources(profile))
         if resources:
-            stages.finish("compute", "done", "화면 안내", steps=["내 부채 자료를 참조했어요."],
+            stages.finish("debt_data", "done", "화면 안내", steps=["내 부채 자료를 참조했어요."],
                           resource_refs=[r.ref for r in resources])
         else:
-            stages.finish("compute", "done", "화면 안내")
+            stages.finish("debt_data", "done", "화면 안내")
         reply_text = "내 부채 화면에서 상환표와 시나리오를 확인할 수 있어요."
         action = {"type": "open_view", "payload": {"view": "debts"}}
         chips.append(Chip(id=f"chip-chat-{intent}", text="내 부채로 이동", tier=1, intent=intent, params={}))
@@ -870,20 +945,22 @@ def _build_chat_reply(
         stages.finish("explain", "skip", "규칙 문장")
 
     elif intent == "spending":
-        stages.start("compute")
+        stages.start("debt_data")
         resources.extend(answer_service.profile_resources(profile))
         if resources:
-            stages.finish("compute", "done", "화면 안내", steps=["내 부채 자료를 참조했어요."],
+            stages.finish("debt_data", "done", "화면 안내", steps=["내 부채 자료를 참조했어요."],
                           resource_refs=[r.ref for r in resources])
         else:
-            stages.finish("compute", "done", "화면 안내")
+            stages.finish("debt_data", "done", "화면 안내")
         reply_text = "소비 패턴 화면에서 합성 거래내역을 확인할 수 있어요."
         action = {"type": "open_view", "payload": {"view": "spending"}}
         stages.start("explain")
         stages.finish("explain", "skip", "규칙 문장")
 
     elif intent in ("retirement", "saving", "liquidity"):
-        stages.start("compute")
+        # SEV2 2026-09-06 리뷰: 재무비율·노후자금은 실제 계산이므로 "calc"(계산 엔진)
+        # 노드로 실제 방출한다.
+        stages.start("calc")
         resources.extend(answer_service.profile_resources(profile))
         if profile is not None:
             policy_keys = _LIFECYCLE_POLICY_KEYS.get(intent, [])
@@ -891,16 +968,18 @@ def _build_chat_reply(
                 resources.extend(answer_service.policy_resources(policy.load_policy_params(), policy_keys))
         reply_text, chips, action = _build_lifecycle_chat_reply(intent, profile)
         if profile is not None:
-            stages.finish("compute", "done", "재무비율·노후자금 계산",
+            stages.finish("calc", "done", "재무비율·노후자금 계산",
                           steps=["재무비율과 노후자금 격차를 계산했어요."],
                           resource_refs=[r.ref for r in resources])
         else:
-            stages.finish("compute", "done", "재무비율·노후자금 계산")
+            stages.finish("calc", "done", "재무비율·노후자금 계산")
         stages.start("explain")
         stages.finish("explain", "skip", "규칙 문장")
 
     elif intent == "action":
-        stages.start("compute")
+        # SEV2 2026-09-06 리뷰: 행동 규칙 평가는 계산 엔진의 산출물이므로 "calc" 노드로
+        # 실제 방출한다.
+        stages.start("calc")
         if profile is None:
             reply_text = (
                 "아직 프로필이 없어요. 페르소나를 선택하거나 내 부채 화면에서 정보를 입력하면 "
@@ -908,7 +987,7 @@ def _build_chat_reply(
             )
             chips.append(Chip(id="chip-chat-onboarding", text="페르소나 선택하러 가기", tier=1,
                                intent="onboarding", params={}))
-            stages.finish("compute", "done", "행동 규칙 평가: 프로필 없음")
+            stages.finish("calc", "done", "행동 규칙 평가: 프로필 없음")
             stages.start("explain")
             stages.finish("explain", "skip", "규칙 문장")
         else:
@@ -918,7 +997,7 @@ def _build_chat_reply(
             if cards:
                 top = cards[0]
                 resources.append(answer_service.calc_resource("행동 카드", top.id, top.title))
-                stages.finish("compute", "done", f"행동 규칙 평가: {len(cards)}건, 최우선 {top.title}",
+                stages.finish("calc", "done", f"행동 규칙 평가: {len(cards)}건, 최우선 {top.title}",
                               steps=[f"행동 규칙 {len(cards)}건을 평가해 최우선 카드를 골랐어요."],
                               resource_refs=[r.ref for r in resources])
                 if top.chip is not None:
@@ -938,7 +1017,7 @@ def _build_chat_reply(
                     stages.finish("explain", "skip", "규칙 문장")
                     reply_text = top.summary
             else:
-                stages.finish("compute", "done", "행동 규칙 평가: 0건", resource_refs=[r.ref for r in resources])
+                stages.finish("calc", "done", "행동 규칙 평가: 0건", resource_refs=[r.ref for r in resources])
                 reply_text = "지금은 특별히 안내할 행동이 없어요. 계속 잘 관리하고 계세요."
                 stages.start("explain")
                 stages.finish("explain", "skip", "규칙 문장")
@@ -1008,7 +1087,13 @@ def _build_chat_reply(
                 answer_service.external_answer(masked, _llm_provider, banned)
             )
             resources.extend(ext_resources)
-            grounded_ok = ext_llm_used and not ({"banned_term_removed", "no_grounding_sources"} & set(ext_problems))
+            # SEV3 2026-09-06 리뷰: 그라운딩 응답이 왔지만 요약이 비어(empty_summary) 폴백
+            # 문구로 대체된 경우도 실제로는 그라운딩에 실패한 것이므로, llm_used를 True로
+            # 만들지 않고 trace도 fallback으로 남긴다(그래야 화면이 "그라운딩 성공"으로
+            # 잘못 표시하지 않는다).
+            grounded_ok = ext_llm_used and not (
+                {"banned_term_removed", "no_grounding_sources", "empty_summary"} & set(ext_problems)
+            )
             if grounded_ok:
                 stages.finish("external", "done", f"Gemini {ext_model}, 출처 {len(ext_resources)}건",
                               steps=[reason_step, f"출처 {len(ext_resources)}건을 모았어요."],
@@ -1051,7 +1136,10 @@ def _build_chat_reply(
     # KB 응답도 예외 없이 검사한다(2026-09-06 리뷰: kb_reply 우회는 kb/*.md에 실제
     # 금융회사명이 남아있어도 그대로 통과시키는 구멍이었다). kb/*.md는 이제 상호금융권 등
     # 개별 기관 실명을 쓰지 않으므로(SEV5 #3) 15개 문서 전부 이 검사를 통과해야 한다.
-    if guardrails.check_text(reply_text, banned):
+    # SEV3 2026-09-06 리뷰: guardrails.check_text(products 테이블 기반 상품·회사명) 외에
+    # slotfill.FORBIDDEN_PHRASES(권유 표현)도 검사한다. LLM 문장뿐 아니라 규칙/KB 렌더링
+    # 경로도 예외 없이 통과해야 한다("경로 무관").
+    if guardrails.check_text(reply_text, banned) or any(p in reply_text for p in slotfill.FORBIDDEN_PHRASES):
         stages.finish("check", "fallback", "금칙어 감지로 기본 안내로 대체")
         reply_text = "안내 문구를 표시할 수 없어 기본 안내로 대체했습니다. 메뉴에서 원하는 화면을 선택해주세요."
         answer_format = "text"
@@ -1072,10 +1160,14 @@ def _current_profile_id() -> str:
 
 
 def run_chat(
-    body: ChatRequest, emit: Optional[Callable[[dict[str, Any]], None]] = None,
+    body: ChatRequest,
+    emit: Optional[Callable[[dict[str, Any]], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> ChatReply:
     """`/api/chat`과 `/api/chat/stream`이 공유하는 본체(SPEC 2.9). `emit`이 있으면 파이프라인
     단계 이벤트를 실시간으로 방출한다(없으면 무시하고 마지막에 `ChatReply.trace`로만 실린다).
+    `cancel_event`는 `/api/chat/stream`이 클라이언트 연결 종료를 알리는 데만 쓴다(SEV3
+    2026-09-06 리뷰, `_build_chat_reply` 문서 참고).
 
     대화 로그는 현재 프로필(페르소나)에 종속된다. chat_id가 없거나 다른 프로필 것이면
     새 대화를 만든다."""
@@ -1097,7 +1189,7 @@ def run_chat(
         chat_id = chatlog.create_chat(profile_id, title=title)["id"]
     chatlog.append_message(chat_id, "user", guardrails.mask_pii(body.message))
 
-    built = _build_chat_reply(body.message, base_params=base_params, emit=emit)
+    built = _build_chat_reply(body.message, base_params=base_params, emit=emit, cancel_event=cancel_event)
 
     # SPEC 2.11: route/resources/answer_format/model을 meta_json 한 컬럼에 함께 저장한다
     # (chatlog.get_messages가 응답 메시지마다 이 네 값을 돌려준다).
@@ -1118,10 +1210,18 @@ def run_chat(
     )
 
 
+_GENERIC_CHAT_ERROR_MESSAGE = "응답을 만들지 못했어요. 잠시 후 다시 시도해 주세요."
+
+
 @router.post("/chat", response_model=ChatReply)
 def post_chat(body: ChatRequest) -> ChatReply:
     """대화 로그는 현재 프로필(페르소나)에 종속된다. chat_id가 없거나 다른 프로필 것이면 새 대화를 만든다."""
-    return run_chat(body)
+    try:
+        return run_chat(body)
+    except Exception:  # noqa: BLE001 - SEV3 2026-09-06 리뷰: 예외 원문(모듈 경로,
+        # 트레이스백 등)을 사용자 응답에 노출하지 않는다. 원문은 로그로만 남긴다.
+        logger.exception("POST /api/chat 처리 실패")
+        raise HTTPException(status_code=500, detail=_GENERIC_CHAT_ERROR_MESSAGE)
 
 
 @router.post("/chat/stream")
@@ -1134,11 +1234,19 @@ def post_chat_stream(body: ChatRequest) -> StreamingResponse:
     스트림을 닫는다(스레드 예외를 큐로 전달해 조용히 사라지지 않게 한다).
     """
 
+    # SEV3 2026-09-06 리뷰: 클라이언트가 스트림을 도중에 닫으면 제너레이터의 finally에서
+    # 이 Event를 set한다. _StageEmitter가 이를 보고 조기 반환해 더 이상 큐에 넣지 않는다.
+    cancel_event = threading.Event()
+
     def worker(q: "queue.Queue[tuple[str, Any]]") -> None:
         try:
-            reply = run_chat(body, emit=lambda stage: q.put(("stage", stage)))
-        except Exception as exc:  # noqa: BLE001 - 스레드 예외를 그대로 SSE error 프레임으로 전달
-            q.put(("error", str(exc)))
+            reply = run_chat(
+                body, emit=lambda stage: q.put(("stage", stage)), cancel_event=cancel_event,
+            )
+        except Exception:  # noqa: BLE001 - SEV3 2026-09-06 리뷰: 원문 예외를 그대로
+            # 클라이언트에 보내지 않는다(모듈 경로·트레이스백 노출 방지). 원문은 로그로만.
+            logger.exception("POST /api/chat/stream 처리 실패")
+            q.put(("error", _GENERIC_CHAT_ERROR_MESSAGE))
         else:
             q.put(("reply", reply))
         finally:
@@ -1146,26 +1254,36 @@ def post_chat_stream(body: ChatRequest) -> StreamingResponse:
 
     def event_stream():
         q: "queue.Queue[tuple[str, Any]]" = queue.Queue()
-        worker_thread = threading.Thread(target=worker, args=(q,), daemon=True)
+        # 요청 컨텍스트(브라우저 세션 sid 등 contextvars)는 스레드에 자동으로 전달되지 않으므로
+        # 스냅샷 안에서 워커를 실행한다(전역 threading 패치 대신 이 한 곳에서 명시적으로 처리).
+        request_ctx = contextvars.copy_context()
+        worker_thread = threading.Thread(target=request_ctx.run, args=(worker, q), daemon=True)
         worker_thread.start()
-        while True:
-            try:
-                kind, payload = q.get(timeout=0.1)
-            except queue.Empty:
-                # 스레드가 이미 끝났는데 큐도 비어 있으면(이론상 "done"이 먼저 와야 하지만
-                # 방어적으로) 더 기다리지 않고 종료한다.
-                if not worker_thread.is_alive() and q.empty():
+        try:
+            while True:
+                try:
+                    kind, payload = q.get(timeout=0.1)
+                except queue.Empty:
+                    # 스레드가 이미 끝났는데 큐도 비어 있으면(이론상 "done"이 먼저 와야 하지만
+                    # 방어적으로), 또는 클라이언트가 이미 연결을 닫아 취소되었으면 더 기다리지
+                    # 않고 종료한다(SEV3 2026-09-06 리뷰: 큐 대기 루프가 스레드 종료 또는
+                    # cancel 중 하나만 있어도 반드시 끝나야 한다).
+                    if cancel_event.is_set() or (not worker_thread.is_alive() and q.empty()):
+                        break
+                    continue
+                if kind == "stage":
+                    yield f"event: stage\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                elif kind == "reply":
+                    data = payload.model_dump(mode="json")
+                    yield f"event: reply\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+                elif kind == "error":
+                    yield f"event: error\ndata: {json.dumps({'message': payload}, ensure_ascii=False)}\n\n"
+                elif kind == "done":
                     break
-                continue
-            if kind == "stage":
-                yield f"event: stage\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-            elif kind == "reply":
-                data = payload.model_dump(mode="json")
-                yield f"event: reply\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-            elif kind == "error":
-                yield f"event: error\ndata: {json.dumps({'message': payload}, ensure_ascii=False)}\n\n"
-            elif kind == "done":
-                break
+        finally:
+            # 정상 종료든 클라이언트가 도중에 스트림을 닫아 GeneratorExit이 나든 항상
+            # 실행된다(SEV3 2026-09-06 리뷰: SSE 스레드 정리).
+            cancel_event.set()
 
     headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)

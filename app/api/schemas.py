@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.models import Transaction
 
@@ -14,7 +14,9 @@ class ComparePrepareRequest(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    message: str
+    # SEV2 2026-09-06 리뷰: 길이 상한이 없으면 아주 긴 발화가 그대로 LLM 페이로드와 KB
+    # 검색까지 흘러가 비용·성능 문제를 만들 수 있다. 초과분은 422로 거절한다.
+    message: str = Field(max_length=2000)
     chat_id: Optional[str] = None
 
 

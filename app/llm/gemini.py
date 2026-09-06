@@ -213,7 +213,18 @@ class GeminiProvider:
                 )
 
                 if status == 200:
-                    return resp.json(), model, key_index, latency_ms
+                    try:
+                        return resp.json(), model, key_index, latency_ms
+                    except ValueError:
+                        # SEV4 2026-09-06 리뷰: 200이어도 본문이 유효한 JSON이 아니면(빈 본문,
+                        # HTML 오류 페이지 등) 여기서 예외가 새어나가 호출부가 그대로 죽었다.
+                        # 다음 키로 넘어간다(같은 모델, 다음 키 인덱스).
+                        last_status = "bad_json"
+                        logger.warning(
+                            "gemini call model=%s key_index=%s latency_ms=%s status=200 bad_json",
+                            model, key_index, latency_ms,
+                        )
+                        continue
 
                 last_status = status
 

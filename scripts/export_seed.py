@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from sqlite3 import Connection
 from typing import Any
@@ -73,8 +72,15 @@ def build_seed_payload(conn: Connection) -> dict[str, Any]:
             by_source[row["source"]] = by_source.get(row["source"], 0) + 1
             by_category[row["category"]] = by_category.get(row["category"], 0) + 1
 
+    # SEV2 2026-09-06 리뷰: datetime.now()는 같은 DB로 몇 번을 다시 내보내도 매번 다른
+    # 값이 되어, 아래 export_seed()의 "mtime=0이면 내용이 같을 때 항상 같은 바이트가
+    # 나온다"는 재현성 주석과 실제 동작이 어긋났다. 데이터 자체에서 나오는 결정론적 값
+    # (내보낸 스냅샷들의 fetched_at 최댓값)으로 바꿔 실제로 재현 가능하게 한다(스냅샷이
+    # 하나도 없으면 빈 문자열).
+    generated_at = max((r["fetched_at"] for r in snapshots_rows), default="")
+
     meta = {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": generated_at,
         "engine_version": ENGINE_VERSION,
         "snapshot_count": len(snapshots_rows),
         "product_count": len(products_rows),

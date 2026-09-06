@@ -134,9 +134,15 @@ def _clear_ephemeral_state(conn) -> None:
 
 def apply_isolation(temp_db_path: Path, llm_mode: str) -> None:
     """임시 DB로 전환하고(환경변수 + 이미 임포트된 모듈 속성 둘 다), 세션 스코프 상태와
-    금칙어 캐시를 비우고, --llm rule이면 채팅 LLM 공급자를 더미로 바꾼다."""
+    금칙어 캐시를 비우고, --llm rule이면 채팅 LLM 공급자를 더미로 바꾼다.
+
+    app.main의 호출 횟수 제한(sid별/전체 슬라이딩 윈도)도 꺼둔다. 이 러너는
+    TestClient로 여러 페르소나·골든 질문을 연달아 호출하므로(같은 sid), 제한이
+    걸려 있으면 배포 기본값(20/150)에 걸려 결정론적 실행이 깨질 수 있다."""
     os.environ["DONN_DB_PATH"] = str(temp_db_path)
     db_module.DB_PATH = str(temp_db_path)
+    os.environ["DONN_RATE_LIMIT_PER_5MIN"] = "0"
+    os.environ["DONN_RATE_LIMIT_GLOBAL_PER_5MIN"] = "0"
     conn = db_module.init_db(db_module.get_conn())
     try:
         _clear_ephemeral_state(conn)
@@ -682,6 +688,8 @@ def run_all(
     tmp_db = make_temp_db_copy(source_db)
     prev_db_path = db_module.DB_PATH
     prev_env_db_path = os.environ.get("DONN_DB_PATH")
+    prev_env_rate_limit = os.environ.get("DONN_RATE_LIMIT_PER_5MIN")
+    prev_env_rate_limit_global = os.environ.get("DONN_RATE_LIMIT_GLOBAL_PER_5MIN")
     prev_banned_cache = insights_service._banned_cache
     prev_provider = routes_module._llm_provider
     try:
@@ -722,6 +730,14 @@ def run_all(
             os.environ.pop("DONN_DB_PATH", None)
         else:
             os.environ["DONN_DB_PATH"] = prev_env_db_path
+        if prev_env_rate_limit is None:
+            os.environ.pop("DONN_RATE_LIMIT_PER_5MIN", None)
+        else:
+            os.environ["DONN_RATE_LIMIT_PER_5MIN"] = prev_env_rate_limit
+        if prev_env_rate_limit_global is None:
+            os.environ.pop("DONN_RATE_LIMIT_GLOBAL_PER_5MIN", None)
+        else:
+            os.environ["DONN_RATE_LIMIT_GLOBAL_PER_5MIN"] = prev_env_rate_limit_global
         insights_service._banned_cache = prev_banned_cache
         routes_module._llm_provider = prev_provider
 

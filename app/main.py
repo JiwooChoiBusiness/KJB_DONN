@@ -8,29 +8,42 @@
 백그라운드로 추가 적재하며(`DONN_AUTOLOAD_PRODUCTS`), 정적 페이지 배포용 CORS를
 켤 수 있다(`DONN_CORS_ORIGINS`). 이 환경변수들은 전부 기본값이 기존 동작(서버 모드,
 CORS 없음)과 같아 기존 배포·테스트에는 영향이 없다.
+
+브라우저별 세션 분리 + 호출 횟수 제한: Render 무료 플랜에 공개 배포되면서 접속자가
+여러 명일 수 있으므로(`docs/DEPLOY.md` 참고), 요청마다 `donn_sid` 쿠키를 발급/유지해
+`app.services.session`의 프로필·대화·결정 기록·소비 분석 저장을 브라우저 단위로
+분리한다. 같은 미들웨어에서 Gemini 무료 티어를 보호하기 위해 LLM을 호출하는 경로에
+sid별 + 전체 합산 슬라이딩 윈도(5분) 호출 횟수 제한도 적용한다.
 """
 from __future__ import annotations
 
 import logging
 import os
+import re
+import secrets
 import threading
+import time
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router as api_router
 from app.data.db import init_db
 from app.data.products import ensure_seed_loaded, load_snapshot
+from app.services import session as session_service
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 WEB_DIR = BASE_DIR / "web"
 
 logger = logging.getLogger("donn.main")
+
+
 
 
 def _env_flag(name: str, default: str) -> bool:
@@ -85,6 +98,103 @@ async def no_cache_static(request, call_next):
     if path == "/" or path.startswith("/static"):
         response.headers["Cache-Control"] = "no-cache"
     return response
+
+
+SID_COOKIE_NAME = "donn_sid"
+SID_MAX_AGE_SECONDS = 30 * 24 * 3600  # 30일
+
+# LLM(Gemini)을 호출하는 경로만 호출 횟수 제한 대상이다. {decision_id}/{action_id}는
+# 슬래시가 없는 임의 문자열이라 [^/]+로 매칭한다.
+_RATE_LIMITED_PATTERNS = [re.compile(p) for p in (
+    r"^/api/chat$",
+    r"^/api/chat/stream$",
+    r"^/api/compare/[^/]+/explain$",
+    r"^/api/actions/[^/]+/explain$",
+)]
+_RATE_LIMIT_WINDOW_SECONDS = 300  # 5분
+
+_rate_limit_lock = threading.Lock()
+_rate_limit_hits_by_sid: dict[str, "deque[float]"] = {}
+_rate_limit_hits_global: "deque[float]" = deque()
+
+
+def _is_rate_limited_path(method: str, path: str) -> bool:
+    if method != "POST":
+        return False
+    return any(p.match(path) for p in _RATE_LIMITED_PATTERNS)
+
+
+def _prune_old_hits(hits: "deque[float]", now: float) -> None:
+    while hits and now - hits[0] > _RATE_LIMIT_WINDOW_SECONDS:
+        hits.popleft()
+
+
+def _rate_limit_env(name: str, default: int) -> int:
+    """요청마다 새로 읽는다(테스트가 monkeypatch로 즉시 반영되게 하기 위해)."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _check_rate_limit(sid: str) -> bool:
+    """허용되면 True. 값이 0이면 그 한도는 검사하지 않는다(무제한). 기본값은 세션당
+    5분에 20회, 전체 합산 5분에 150회(Gemini 무료 티어 보호, docs/DEPLOY.md 참고)."""
+    per_sid_limit = _rate_limit_env("DONN_RATE_LIMIT_PER_5MIN", 20)
+    global_limit = _rate_limit_env("DONN_RATE_LIMIT_GLOBAL_PER_5MIN", 150)
+    now = time.monotonic()
+    with _rate_limit_lock:
+        sid_hits = _rate_limit_hits_by_sid.setdefault(sid, deque())
+        _prune_old_hits(sid_hits, now)
+        _prune_old_hits(_rate_limit_hits_global, now)
+        if per_sid_limit > 0 and len(sid_hits) >= per_sid_limit:
+            return False
+        if global_limit > 0 and len(_rate_limit_hits_global) >= global_limit:
+            return False
+        sid_hits.append(now)
+        _rate_limit_hits_global.append(now)
+        return True
+
+
+@app.middleware("http")
+async def session_and_rate_limit(request, call_next):
+    """브라우저별 세션 쿠키(`donn_sid`)를 발급/유지하고, LLM을 호출하는 경로에 호출
+    횟수 제한을 적용한다(SPEC 2.3).
+
+    쿠키가 없으면 `secrets.token_urlsafe(24)`로 새로 발급해 요청을 처리하는 동안
+    `app.services.session`의 contextvar에 묶는다(다른 서비스 함수들이
+    `session.current_sid()`로 읽어 프로필·대화·결정 기록·소비 분석 저장을 분리한다).
+    응답 후에는 항상 contextvar를 되돌린다. 정적 파일과 "/"에도 똑같이 적용해 첫 화면
+    로드 때부터 쿠키가 생기게 한다.
+    """
+    sid = request.cookies.get(SID_COOKIE_NAME)
+    is_new_sid = not sid
+    if is_new_sid:
+        sid = secrets.token_urlsafe(24)
+
+    token = session_service.bind_sid(sid)
+    try:
+        if _is_rate_limited_path(request.method, request.url.path) and not _check_rate_limit(sid):
+            response = JSONResponse(
+                status_code=429,
+                content={"detail": "요청이 너무 많아요. 잠시 후 다시 시도해 주세요."},
+            )
+        else:
+            response = await call_next(request)
+    finally:
+        session_service.unbind_sid(token)
+
+    if is_new_sid:
+        is_https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+        response.set_cookie(
+            SID_COOKIE_NAME, sid, max_age=SID_MAX_AGE_SECONDS, httponly=True,
+            samesite="lax", secure=is_https, path="/",
+        )
+    return response
+
 
 _cors_origins = [o.strip() for o in os.environ.get("DONN_CORS_ORIGINS", "").split(",") if o.strip()]
 if _cors_origins:

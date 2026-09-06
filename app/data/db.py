@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     context_json      TEXT NOT NULL,
     result_json       TEXT NOT NULL,
     versions_json     TEXT NOT NULL,
-    created_at        TEXT NOT NULL
+    created_at        TEXT NOT NULL,
+    sid               TEXT
 );
 
 CREATE TABLE IF NOT EXISTS session (
@@ -112,9 +113,16 @@ def get_conn(db_path: str | None = None) -> sqlite3.Connection:
     parent = Path(path).parent
     if str(parent) not in ("", "."):
         parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    # 자동 적재 스레드와 SSE 워커 스레드가 동시에 쓸 수 있으므로 WAL과 넉넉한 잠금 대기를 켠다
+    # (2026-09-06 검토: 기본 journal 모드에서는 "database is locked"가 났다).
+    conn = sqlite3.connect(path, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 10000")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.DatabaseError:
+        pass  # 읽기 전용 파일시스템 등에서는 기본 모드로 동작한다
     return conn
 
 
@@ -137,6 +145,16 @@ def _migrate_chat_messages_meta_json(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def _migrate_decisions_sid(conn: sqlite3.Connection) -> None:
+    """기존 DB에 decisions.sid가 없으면 추가한다(브라우저 세션별 결정 기록 분리를 위한
+    컬럼, 이 컬럼이 생기기 전에 저장된 기존 행은 NULL로 남는다 - app.services.decisions가
+    NULL을 "local" 세션 소유로 취급한다)."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(decisions)").fetchall()}
+    if "sid" not in cols:
+        conn.execute("ALTER TABLE decisions ADD COLUMN sid TEXT")
+        conn.commit()
+
+
 def init_db(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
     """스키마를 만든다(이미 있으면 무시). 사용한 커넥션을 반환한다.
 
@@ -147,4 +165,5 @@ def init_db(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
     c.commit()
     _migrate_chat_messages_trace_json(c)
     _migrate_chat_messages_meta_json(c)
+    _migrate_decisions_sid(c)
     return c

@@ -112,6 +112,12 @@ def load_snapshot(sources: list[str], groups: list[str]) -> str:
 
     if last_snapshot_id is None:
         raise ValueError("no sources processed")
+
+    # 지연 import: app.services.insights가 app.data.products를 다시 import하므로
+    # 모듈 상단에서 바로 import하면 순환 import가 된다(SEV5 2026-09-06 리뷰).
+    from app.services.insights import invalidate_banned_terms
+
+    invalidate_banned_terms()
     return last_snapshot_id
 
 
@@ -263,9 +269,14 @@ def import_seed(path: str) -> dict[str, int]:
             if cur.rowcount and cur.rowcount > 0:
                 n_products += cur.rowcount
         conn.commit()
-        return {"snapshots": n_snapshots, "products": n_products}
+        result = {"snapshots": n_snapshots, "products": n_products}
     finally:
         conn.close()
+
+    from app.services.insights import invalidate_banned_terms  # 지연 import(순환 import 회피)
+
+    invalidate_banned_terms()
+    return result
 
 
 def ensure_seed_loaded(path: str = DEFAULT_SEED_PATH) -> bool:

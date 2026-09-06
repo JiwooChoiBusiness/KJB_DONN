@@ -15,7 +15,10 @@ from app.llm import slotfill
 from app.llm.provider import LLMResult
 from tests.test_api import _FakeUnavailableProvider, _clear_session, client
 
-_STAGE_IDS = ("guard", "intent", "compute", "explain", "check")
+# SEV2 2026-09-06 리뷰: schedule/scenario 의도는 이제 "compute" 대신 "debt_data"(내 부채
+# 자료) 노드를 실제로 방출한다(app/api/routes.py의 _STAGE_LABELS 항목이 그동안 emit되지
+# 않던 죽은 라벨이었다).
+_STAGE_IDS = ("guard", "intent", "debt_data", "explain", "check")
 
 
 def _parse_sse_events(text: str) -> list[tuple[str, Any]]:
@@ -259,7 +262,10 @@ def test_chat_stream_emits_error_event_when_build_chat_reply_raises(monkeypatch)
     events = _parse_sse_events(r.text)
     assert events, "빈 스트림이면 안 됨"
     assert events[-1][0] == "error"
-    assert "강제 실패" in events[-1][1]["message"]
+    # SEV3 2026-09-06 리뷰: 원문 예외 메시지를 사용자에게 노출하지 않는다(원문은
+    # logger.exception으로만 남는다). 항상 고정된 일반 안내 문장이어야 한다.
+    assert "강제 실패" not in events[-1][1]["message"]
+    assert events[-1][1]["message"] == "응답을 만들지 못했어요. 잠시 후 다시 시도해 주세요."
 
 
 # ---------------------------------------------------------------------------

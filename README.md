@@ -24,20 +24,41 @@ run.bat load                # 위 두 적재 명령을 한 번에 실행(.venv �
 브라우저에서 `http://localhost:3666`으로 접속하면 됩니다(`GET /`이 `web/index.html`을
 그대로 서빙합니다). `/static`에는 `web/`의 정적 파일이 그대로 마운트됩니다.
 
+배포 환경(Render, 환경변수, 자동 재배포) 설정은 `docs/DEPLOY.md`를 참고하세요.
+
+## 주요 화면
+
+- 홈(`#home`): 인사이트 카드, 데이터 파생 칩, 입력창. 첫 화면 로드 LLM 호출 0회
+- 대화(`#chat`): 홈에서 메시지를 보내면 전환되는 채팅 화면. 응답 위 "생각 과정"
+  노드 카드(발화 점검 → 의도·조건 추출 → 계산 엔진/제도 안내/외부 검색 → 설명
+  작성 → 응답 점검), 인라인 액션 카드, 오른쪽 리소스 패널
+- 내 부채(`#debts`): 프로필과 대출 목록, 상환표·시나리오 3종
+- 공시 비교(`#compare`): 조건 확인 카드 → M0 결과 블록, "왜 이 순서인가요?" AI 설명
+- 소비 패턴(`#spending`): 업로드 또는 합성 거래내역 분석(원본 미저장)
+- 생애 흐름(`#lifecycle`): 재무비율, 생애 단계, 노후 시뮬레이션, 목표 관리
+- 계정 선택(`#personas`): 페르소나 8명 중 선택
+- 결정 기록(`#decisions`): 비교·행동 결정 목록과 재현 확인
+
 ## 테스트
 
 ```
 .venv\Scripts\python -m pytest -q
 ```
 
-현재 스위트 구성(총 136개 수집):
+현재 스위트 구성(총 375개 수집, 371개 통과, 4개 스킵):
 
 | 파일 | 개수 | 비고 |
 |---|---|---|
-| `tests/test_core_schedule.py`, `test_core_rules.py`, `test_core_ranking.py` | 71 | `app/core` 순수 함수(상환 스케줄, 대출 계산, 규칙 R0~R6, 랭킹, 해시) |
-| `tests/test_data.py` | 16(2 스킵) | `app/data`(DB, finlife/datago 정규화, 정책 파라미터, 합성 페르소나) |
-| `tests/test_llm.py` | 31(1 스킵) | Gemini 체인 폴백(`requests.post` 모킹), 가드레일(금칙어/PII 마스킹/규칙 기반 파싱) |
-| `tests/test_api.py` | 18 | FastAPI 엔드포인트 전체(임시 DB, 가짜 상품 픽스처, Gemini는 monkeypatch로 통제) |
+| `tests/test_core_schedule.py`, `test_core_rules.py`, `test_core_ranking.py`, `test_core_ratios.py`, `test_core_retirement.py` | 124 | `app/core` 순수 함수(상환 스케줄, 대출 계산, 규칙 R0~R10, 랭킹·해시, 재무비율, 노후 산식) |
+| `tests/test_data.py` | 17(2 스킵) | `app/data`(DB, finlife/datago 정규화, 정책 파라미터, 합성 페르소나) |
+| `tests/test_llm.py` | 37(2 스킵) | Gemini 체인 폴백(`requests.post` 모킹), 가드레일(금칙어/PII 마스킹/규칙 기반 파싱/위기 감지) |
+| `tests/test_api.py`, `test_answer_routes.py`, `test_chat_stream.py`, `test_chatlog.py`, `test_crisis_followup.py` | 64 | FastAPI 엔드포인트 전체(임시 DB, 가짜 상품 픽스처, Gemini는 monkeypatch로 통제), 답변 경로(direct/internal/external), 대화 스트리밍(SSE), 대화 로그, 위기 발화 후속 질의 |
+| `tests/test_explain.py` | 18 | 슬롯 필링 설명(f): 플레이스홀더 검증, 템플릿 폴백, 공시 비교·행동 카드 설명 |
+| `tests/test_kb.py` | 29 | 제도 안내 KB 문서 15편의 검색과 답변 형식 |
+| `tests/test_lifecycle.py` | 25 | 생애주기 층(재무비율, 생애 단계, 노후 시뮬레이션, 목표 시나리오) |
+| `tests/test_spending.py` | 53 | 소비 패턴 분석(가맹점 분류, 월별 집계, 구독·이상치 탐지, 카드 생성) |
+| `tests/test_seed.py` | 5 | 공시 시드 파일 적재(`seed/products_seed.json.gz`) |
+| `tests/test_persona_runner.py` | 3 | 페르소나 러너 인프로세스 회귀(전 페르소나 하드 실패 0건 확인) |
 
 네트워크가 필요한 테스트(금감원/공공데이터/Gemini 실 호출)는 기본적으로 스킵되며
 `DONN_NETWORK_TESTS=1`일 때만 실행됩니다.
@@ -50,12 +71,17 @@ app/
   core/         순수 계산 함수(I/O 없음): schedule, loan, capacity, scenarios, rules, ranking, hashing
   data/         DB(SQLite)와 외부 API: db, finlife, datago, products, policy, synthetic
   services/     core+data 조합: insights(홈), compare(공시 비교), actions(행동 카드),
-                decisions(결정 기록/재현), session(단일 데모 세션)
-  llm/          provider(공급자 계약), gemini(Gemini REST 체인 어댑터), guardrails(금칙어/PII/규칙 기반 파싱)
+                decisions(결정 기록/재현), session(단일 데모 세션), explain(슬롯 필링 설명 (f):
+                LLM은 숫자를 보지 않고 코드가 플레이스홀더를 채움), answer(답변 경로
+                direct/internal/external 판정, 리소스 패널, 외부 검색 그라운딩)
+  llm/          provider(공급자 계약), gemini(Gemini REST 체인 어댑터), guardrails(금칙어/PII/규칙
+                기반 파싱), slotfill(설명 문장 플레이스홀더 검증, 숫자 미노출 보장)
   api/          schemas, routes(엔드포인트)
   main.py       FastAPI 앱 진입점, 정적 파일 서빙, 시작 시 init_db()
 web/            프론트엔드(빌드 없는 순수 HTML/CSS/JS, 외부 CDN 의존 없음)
 config/         llm.yaml(Gemini 체인 설정), policy_params.yaml(규제/내부 기준 수치)
+kb/             제도 안내 지식베이스(법령·제도 설명 문서 15편, 출처·확인일 기재, 상품·회사 실명 없음)
+seed/           공시 상품 스냅샷 시드(products_seed.json.gz). 키 없이도 시작 시 자동 적재
 scripts/        load_products(상품 스냅샷 적재), gen_synthetic(합성 거래내역 생성) CLI
 tests/          pytest 스위트
 data/           donn.db(SQLite, 커밋 제외), cache/(외부 API 응답 원본 캐시)
@@ -98,8 +124,11 @@ DONN_DB_PATH              SQLite 파일 경로(기본값 data/donn.db)
   특정 모델이 일시적으로 503(수요 폭주)을 반환할 수 있어 모델x키 체인 폴백으로
   대응하고, 모두 실패하면 규칙 기반 파서(`app.llm.guardrails.parse_message`)
   응답으로 자동 전환됩니다.
-- 채팅은 의도/슬롯 추출(extract)까지만 Gemini를 사용하고, 실제 응답 문장은 항상
-  코드가 만든 한국어 템플릿입니다(자유 서술형 설명 생성은 이후 단계 범위).
+- 채팅은 의도·조건 추출(extract)뿐 아니라 설명 문장 생성(슬롯 필링)에도 Gemini를
+  씁니다. 다만 LLM은 금액·금리 같은 숫자를 직접 보거나 쓰지 않고 코드가 만든
+  플레이스홀더만 주고받으며, 문장이 검증을 통과하지 못하거나 LLM을 쓸 수 없으면
+  코드가 만든 한국어 템플릿으로 조용히 대체됩니다. 도구 호출 기반의 자유 질의
+  오케스트레이터는 아직 이후 단계(P4) 범위입니다.
 - 소비 패턴 분석은 브라우저에서 파일을 읽어 정규화한 거래만 서버로 보내며,
   서버는 집계·피처만 저장합니다(원본 거래 미저장). 실제 은행·카드사 내보내기
   형식은 대표적인 열 이름만 자동 인식하므로 매핑 화면에서 확인이 필요할 수 있습니다.
@@ -128,7 +157,7 @@ DONN_DB_PATH              SQLite 파일 경로(기본값 data/donn.db)
 (합성 데이터) → 공시 비교(조건 확인 → 확인 → 동일 조건으로 두 번 실행해
 `result_hash`와 익명 라벨이 완전히 같은지 확인, 상위 10건 이하, 금감원 공시
 성격의 익명 라벨만 노출) → 결정 재현(`replay` 일치) → `tests/golden/questions.yaml`의
-골든 질문(페르소나당 8~9개, 총 66개) → 소비 패턴/세션 정리.
+골든 질문(페르소나당 10~11개, direct·external 사례 포함, 총 82개) → 소비 패턴/세션 정리.
 
 골든 질문은 공시 비교 조건(숫자 근거 포함), 상환표·시나리오, 이번 달 행동,
 제도 질문(제도 안내 KB 문서로 연결), 소비 패턴, 노후·저축·비상금, 은행명을 

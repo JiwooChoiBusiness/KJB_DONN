@@ -112,15 +112,22 @@ def get_banned_terms() -> list[str]:
     """상품 회사명/상품명으로 금칙어 목록을 한 번만 만들어 캐시한다(DB 전체 카테고리).
 
     `app/api/routes.py`의 채팅 응답 검사에도 재사용한다.
+
+    결과가 비었거나(products 테이블이 아직 비어 있음) 조회 중 하나라도 예외가 났으면
+    캐시하지 않는다(SEV5 2026-09-06 리뷰: 서버가 상품을 적재하기 전에 먼저 호출되면 빈
+    결과가 영구 캐시되어, 나중에 `import_seed`/`load_snapshot`으로 상품을 채워도 금칙어
+    목록이 계속 비어 있는 채로 남았다). 다음 호출에서 다시 계산하도록 비워 둔다.
     """
     global _banned_cache
     if _banned_cache is not None:
         return _banned_cache
     names: set[str] = set()
+    had_error = False
     for category in ProductCategory:
         try:
             rows = products.query(category)
         except Exception:  # DB 미초기화 등 방어적 처리, 카드 생성 자체를 막지 않는다
+            had_error = True
             rows = []
         for p in rows:
             for n in _company_name_variants(p.company_name):
@@ -130,8 +137,22 @@ def get_banned_terms() -> list[str]:
             # 금지하면 정상 문장까지 템플릿으로 대체되는 오탐이 생긴다(2026-09-06 실측).
             if pn and len(pn) >= 6 and pn not in _GENERIC_TERMS and not _is_generic_phrase(pn):
                 names.add(pn)
-    _banned_cache = sorted(names)
+    result = sorted(names)
+    if had_error or not result:
+        return result
+    _banned_cache = result
     return _banned_cache
+
+
+def invalidate_banned_terms() -> None:
+    """금칙어 캐시를 비운다(다음 `get_banned_terms()` 호출이 다시 계산하게 한다).
+
+    `app/data/products.py`의 `import_seed`/`load_snapshot`이 성공적으로 끝난 뒤
+    호출한다(SEV5 2026-09-06 리뷰: 상품을 새로 적재해도 캐시가 비어 있는 채로 남는
+    문제의 근본 수정).
+    """
+    global _banned_cache
+    _banned_cache = None
 
 
 _COMPANY_SUFFIXES = ("주식회사", "(주)", "㈜", "저축은행", "은행", "카드", "캐피탈", "보험", "생명", "화재")

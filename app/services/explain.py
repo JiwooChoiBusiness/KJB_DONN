@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from datetime import date, datetime
@@ -19,6 +20,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 from app.core.capacity import compute_capacity
 from app.core.schedule import build_schedule
@@ -324,6 +327,11 @@ def _call_llm_explain(
     except LLMUnavailable:
         latency_ms = int((time.monotonic() - started) * 1000)
         return None, None, latency_ms, ["llm_unavailable"]
+    except Exception:  # noqa: BLE001 - SEV4 2026-09-06 리뷰: 예상 밖 예외도 템플릿
+        # 폴백으로 떨어지게 하고, 원문은 로그로만 남긴다(사용자 화면에는 노출하지 않는다).
+        latency_ms = int((time.monotonic() - started) * 1000)
+        logger.exception("explain LLM 호출 실패, 템플릿으로 대체")
+        return None, None, latency_ms, ["llm_error"]
     latency_ms = int((time.monotonic() - started) * 1000)
 
     data = result.data if isinstance(result.data, dict) else None
@@ -427,7 +435,13 @@ def _guard_template(summary: str, item_reasons: dict[str, str], banned: list[str
 # ---------------------------------------------------------------------------
 
 
-def get_stored(kind: str, ref_id: str) -> Optional[ExplainResult]:
+def _get_stored_row(kind: str, ref_id: str) -> Optional[dict[str, Any]]:
+    """저장된 payload_json을 원본 dict 그대로 돌려준다(비공개 키 포함, 예: `_profile_id`).
+
+    `get_stored`는 이 dict를 `ExplainResult.model_validate`로 감싸 모델에 없는 키를
+    조용히 버린다. `explain_compare`의 캐시 유효성 검사(SEV3 #6)는 그 버려지는 키가
+    필요해 이 내부 함수를 직접 쓴다.
+    """
     conn = db.get_conn()
     try:
         row = conn.execute(
@@ -435,14 +449,27 @@ def get_stored(kind: str, ref_id: str) -> Optional[ExplainResult]:
         ).fetchone()
         if row is None:
             return None
-        return ExplainResult.model_validate(json.loads(row["payload_json"]))
+        return json.loads(row["payload_json"])
     finally:
         conn.close()
 
 
-def _save_explanation(result: ExplainResult) -> None:
+def get_stored(kind: str, ref_id: str) -> Optional[ExplainResult]:
+    raw = _get_stored_row(kind, ref_id)
+    if raw is None:
+        return None
+    return ExplainResult.model_validate(raw)
+
+
+def _save_explanation(result: ExplainResult, *, extra: Optional[dict[str, Any]] = None) -> None:
+    """`extra`가 있으면 저장되는 JSON에 `ExplainResult` 필드 외의 비공개 키로 함께 넣는다
+    (SPEC/SEV3 #6: `CompareContext`의 `_current_total_interest`와 같은 방식. `ExplainResult`
+    모델 자체에는 필드를 추가하지 않는다 - 결정 기록·재현은 이 테이블과 무관하다)."""
     conn = db.get_conn()
     try:
+        payload = result.model_dump(mode="json")
+        if extra:
+            payload.update(extra)
         conn.execute(
             """
             INSERT OR REPLACE INTO explanations(kind, ref_id, payload_json, created_at)
@@ -451,7 +478,7 @@ def _save_explanation(result: ExplainResult) -> None:
             (
                 result.kind,
                 result.ref_id,
-                json.dumps(result.model_dump(mode="json"), ensure_ascii=False),
+                json.dumps(payload, ensure_ascii=False),
                 result.created_at.isoformat(),
             ),
         )
@@ -466,18 +493,27 @@ def _save_explanation(result: ExplainResult) -> None:
 
 
 def explain_compare(decision_id: str, provider: Any, *, refresh: bool = False) -> Optional[ExplainResult]:
-    """공시 비교 결과 설명. `decisions.get`이 없거나 compare 결정이 아니면 None."""
+    """공시 비교 결과 설명. `decisions.get`이 없거나 compare 결정이 아니면 None.
+
+    저장된 설명의 payload_json에는 생성 당시 세션 프로필 id를 비공개 키 `_profile_id`로
+    함께 저장한다(SEV3 2026-09-06 리뷰). `decisions` 테이블에는 profile_id 컬럼이 없어
+    같은 decision_id를 다른 페르소나로 전환한 뒤에도 조회할 수 있는데, 캐시를 그대로
+    재사용하면 이전 페르소나 기준으로 만든 문장(현재 대출 유무 등 facts)이 그대로
+    나온다. 현재 프로필과 다르면 캐시를 쓰지 않고 새로 만든다.
+    """
     record = decisions_service.get(decision_id)
     if record is None or record.kind != "compare":
         return None
 
+    profile = session_service.get_profile()
+    current_profile_id = profile.id if profile is not None else None
+
     if not refresh:
-        stored = get_stored("compare", decision_id)
-        if stored is not None:
-            return stored.model_copy(update={"cached": True})
+        stored_raw = _get_stored_row("compare", decision_id)
+        if stored_raw is not None and stored_raw.get("_profile_id") == current_profile_id:
+            return ExplainResult.model_validate(stored_raw).model_copy(update={"cached": True})
 
     result = CompareResult.model_validate(record.result)
-    profile = session_service.get_profile()
     banned = get_banned_terms()
     facts, placeholders, values = compare_slots(result, profile)
     top_items = result.items[:3]
@@ -537,7 +573,7 @@ def explain_compare(decision_id: str, provider: Any, *, refresh: bool = False) -
         cached=False,
         created_at=datetime.now(),
     )
-    _save_explanation(explain_result)
+    _save_explanation(explain_result, extra={"_profile_id": current_profile_id})
     return explain_result
 
 
@@ -556,15 +592,26 @@ def explain_action(
     if card is None:
         return None
 
-    ref_id = f"{profile.id}:{action_id}@{hashing.fingerprint(card.numbers)[:8]}"
+    schedules = [build_schedule(loan) for loan in profile.loans]
+    capacity = compute_capacity(profile, schedules)
+
+    # ref_id 지문에 numbers 외에 capacity.band/safe_mode/related_loan_ids도 포함한다(SEV3
+    # 2026-09-06 리뷰: 변동지출이 바뀌어 여력 구간(band)만 달라져도 카드 문구(facts의
+    # capacity_band)는 달라지는데, numbers만으로 지문을 만들면 numbers가 우연히 같을 때
+    # 오래된 설명이 새 여력 구간에서도 그대로 캐시될 수 있다).
+    cache_fingerprint_input = {
+        "numbers": card.numbers,
+        "capacity_band": capacity.band.value,
+        "safe_mode": card.safe_mode,
+        "related_loan_ids": list(card.related_loan_ids),
+    }
+    ref_id = f"{profile.id}:{action_id}@{hashing.fingerprint(cache_fingerprint_input)[:8]}"
 
     if not refresh:
         stored = get_stored("action", ref_id)
         if stored is not None:
             return stored.model_copy(update={"cached": True})
 
-    schedules = [build_schedule(loan) for loan in profile.loans]
-    capacity = compute_capacity(profile, schedules)
     banned = get_banned_terms()
     facts, placeholders, values = action_slots(card, profile, capacity)
     allowed = set(placeholders.keys())

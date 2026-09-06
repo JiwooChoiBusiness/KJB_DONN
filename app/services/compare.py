@@ -131,7 +131,18 @@ def prepare_context(profile: Optional[UserProfile], intent_params: dict[str, Any
             estimated.remove("target_loan_id")
 
     amount = params.get("amount")
-    if amount is None:
+    amount_ok = False
+    if amount is not None:
+        try:
+            amount_ok = int(amount) > 0
+        except (TypeError, ValueError):
+            amount_ok = False
+    if amount_ok:
+        amount = int(amount)
+    else:
+        # 0원·음수·숫자가 아닌 값은 채택하지 않고 추정값으로 되돌린다(SEV5 2026-09-06
+        # 리뷰: "0원 신용대출 비교해줘" 같은 평범한 발화가 CompareContext 검증
+        # (amount > 0)에서 그대로 422/500으로 이어지던 문제).
         amount = target_loan.balance if target_loan is not None else 10_000_000
         estimated.append("amount")
 
@@ -139,7 +150,14 @@ def prepare_context(profile: Optional[UserProfile], intent_params: dict[str, Any
     if term_months is None:
         term_months = target_loan.remaining_months if target_loan is not None else 36
         estimated.append("term_months")
-    term_months = max(int(term_months), 1)
+    try:
+        term_months = int(term_months)
+    except (TypeError, ValueError):
+        term_months = target_loan.remaining_months if target_loan is not None else 36
+    # 채팅에서 "9999개월"처럼 비정상적으로 큰 값이 그대로 들어오면 CompareContext 검증
+    # (models.py: term_months <= 600)에서 예외로 이어질 수 있다(SEV5 2026-09-06 리뷰).
+    # 항상 1~600 범위로 잘라 코드가 다루는 값이 항상 유효 범위 안에 있게 한다.
+    term_months = min(max(term_months, 1), 600)
 
     credit_band = params.get("credit_band")
     if (

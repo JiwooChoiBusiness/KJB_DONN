@@ -1,6 +1,14 @@
 """페르소나(프로필)별 대화 로그. PoC는 로그인이 없으므로 현재 세션 프로필 id에 종속된다.
 
 저장 원칙: 사용자 발화는 PII 마스킹본을 저장한다(D4). 응답은 guardrails를 통과한 문장만 저장된다.
+
+브라우저별 세션 분리: Render 공개 배포에서는 접속자가 여러 명일 수 있으므로,
+`chats.profile_id` 컬럼에는 실제로 `f"{sid}:{profile_id}"`(sid는
+`app.services.session.current_sid()`)를 저장한다. 조회 함수들은 현재 sid로만 찾고,
+반환하는 dict의 `profile_id`는 항상 접두사를 뗀 원래 값이라 `app/api/routes.py`의
+기존 소유권 검사(`chat["profile_id"] != _current_profile_id()`)가 그대로 동작한다.
+다른 sid의 대화는 "없는 것"으로 취급한다(get_chat은 None, get_messages는 빈 목록,
+delete_chat은 False).
 """
 from __future__ import annotations
 
@@ -10,6 +18,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from app.data import db
+from app.services import session
 
 GUEST_PROFILE_ID = "guest"
 
@@ -18,16 +27,44 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def _row_to_chat(row: Any) -> dict[str, Any]:
+def _scoped_profile_id(profile_id: str) -> str:
+    """DB에 저장할 때 쓰는 `sid:profile_id` 합성 키."""
+    return f"{session.current_sid()}:{profile_id}"
+
+
+def _row_to_chat(row: Any, *, profile_id: str) -> dict[str, Any]:
+    """`profile_id`는 이미 sid 접두사를 뗀 값을 호출부가 넘긴다."""
     keys = row.keys()
     return {
         "id": row["id"],
-        "profile_id": row["profile_id"],
+        "profile_id": profile_id,
         "title": row["title"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "message_count": row["message_count"] if "message_count" in keys else 0,
     }
+
+
+def _unscope_if_current_sid(stored_profile_id: str) -> Optional[str]:
+    """저장된 `sid:profile_id`가 현재 sid 소유면 접두사를 뗀 값을, 아니면(다른 sid
+    또는 이 컬럼이 sid 접두사 없이 저장됐던 옛 데이터) None을 돌려준다."""
+    prefix = f"{session.current_sid()}:"
+    if stored_profile_id.startswith(prefix):
+        return stored_profile_id[len(prefix):]
+    return None
+
+
+def _chat_owner_row(chat_id: str) -> Optional[Any]:
+    """현재 sid가 소유한 대화면 원본 row를, 아니면 None을 돌려준다(내부 헬퍼,
+    append_message/get_messages/delete_chat이 chat_id만으로도 sid를 검사하도록 한다)."""
+    conn = db.get_conn()
+    try:
+        row = conn.execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
+    finally:
+        conn.close()
+    if row is None or _unscope_if_current_sid(row["profile_id"]) is None:
+        return None
+    return row
 
 
 def list_chats(profile_id: str, limit: int = 30) -> list[dict[str, Any]]:
@@ -36,14 +73,15 @@ def list_chats(profile_id: str, limit: int = 30) -> list[dict[str, Any]]:
         rows = conn.execute(
             "SELECT c.*, (SELECT COUNT(*) FROM chat_messages m WHERE m.chat_id = c.id) AS message_count "
             "FROM chats c WHERE c.profile_id = ? ORDER BY c.updated_at DESC, c.id DESC LIMIT ?",
-            (profile_id, limit),
+            (_scoped_profile_id(profile_id), limit),
         ).fetchall()
-        return [_row_to_chat(r) for r in rows]
+        return [_row_to_chat(r, profile_id=profile_id) for r in rows]
     finally:
         conn.close()
 
 
 def get_chat(chat_id: str) -> Optional[dict[str, Any]]:
+    """다른 sid의 대화면(또는 존재하지 않으면) None을 돌려준다."""
     conn = db.get_conn()
     try:
         row = conn.execute(
@@ -51,9 +89,14 @@ def get_chat(chat_id: str) -> Optional[dict[str, Any]]:
             "FROM chats c WHERE c.id = ?",
             (chat_id,),
         ).fetchone()
-        return _row_to_chat(row) if row else None
     finally:
         conn.close()
+    if row is None:
+        return None
+    unscoped = _unscope_if_current_sid(row["profile_id"])
+    if unscoped is None:
+        return None
+    return _row_to_chat(row, profile_id=unscoped)
 
 
 def create_chat(profile_id: str, title: str = "") -> dict[str, Any]:
@@ -64,7 +107,7 @@ def create_chat(profile_id: str, title: str = "") -> dict[str, Any]:
     try:
         conn.execute(
             "INSERT INTO chats (id, profile_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (chat_id, profile_id, clean_title, now, now),
+            (chat_id, _scoped_profile_id(profile_id), clean_title, now, now),
         )
         conn.commit()
     finally:
@@ -81,7 +124,12 @@ def append_message(chat_id: str, role: str, text: str, *, llm_used: bool = False
     """trace(SPEC 2.9 생각 과정, 종료 상태 stage 목록)는 생략하면 저장하지 않는다
     (get_messages가 빈 리스트로 채워 돌려준다). meta(SPEC 2.11: {"route", "resources",
     "answer_format", "model"})도 생략하면 저장하지 않는다(get_messages가 기본값으로
-    채워 돌려준다). 사용자 메시지에는 meta를 넘기지 않는다(경로 개념이 없다)."""
+    채워 돌려준다). 사용자 메시지에는 meta를 넘기지 않는다(경로 개념이 없다).
+
+    chat_id가 현재 sid 소유가 아니면(다른 브라우저 세션 또는 존재하지 않음) 아무것도
+    쓰지 않고 -1을 돌려준다(유효한 rowid가 아닌 값으로 "없는 것" 취급을 알린다)."""
+    if _chat_owner_row(chat_id) is None:
+        return -1
     now = _now()
     conn = db.get_conn()
     try:
@@ -106,6 +154,9 @@ def append_message(chat_id: str, role: str, text: str, *, llm_used: bool = False
 
 
 def get_messages(chat_id: str) -> list[dict[str, Any]]:
+    """chat_id가 현재 sid 소유가 아니면 빈 목록을 돌려준다("없는 것" 취급)."""
+    if _chat_owner_row(chat_id) is None:
+        return []
     conn = db.get_conn()
     try:
         rows = conn.execute(
@@ -141,6 +192,9 @@ def get_messages(chat_id: str) -> list[dict[str, Any]]:
 
 
 def delete_chat(chat_id: str) -> bool:
+    """chat_id가 현재 sid 소유가 아니면 아무것도 지우지 않고 False를 돌려준다."""
+    if _chat_owner_row(chat_id) is None:
+        return False
     conn = db.get_conn()
     try:
         conn.execute("DELETE FROM chat_messages WHERE chat_id = ?", (chat_id,))

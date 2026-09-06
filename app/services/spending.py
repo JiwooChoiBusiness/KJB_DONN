@@ -6,6 +6,11 @@ db.spending_features 테이블에 프로필별 최신 분석 결과 1건을 저�
 서버에 쌓지 않는다는 PoC 결정 - docs/DONN_ADDENDUM_v0.1.md 2.2절 P-A/P-C 절충).
 동의(D8): 분석은 사용자가 파일을 업로드하거나 합성 데이터를 명시적으로 선택했을 때만
 실행되므로, 이 시점(analyze 호출 시점)을 `spending_consent_at`으로 기록한다.
+
+브라우저별 세션 분리: `save`/`load`/`clear`에 넘기는 `profile_id`는 호출부(routes.py)
+그대로이고, 이 모듈이 내부적으로 `f"{sid}:{profile_id}"`(sid는
+`app.services.session.current_sid()`)를 실제 저장 키로 써서 다른 브라우저 세션의
+분석 결과와 섞이지 않게 한다.
 """
 from __future__ import annotations
 
@@ -15,6 +20,7 @@ from typing import Optional
 from app.core import spending as spending_core
 from app.data import db, synthetic
 from app.models import SpendingFeatures, SpendingSummary, Transaction, UserProfile
+from app.services import session
 
 
 def analyze(
@@ -36,15 +42,20 @@ def analyze(
     return summary, features
 
 
+def _scoped_profile_id(profile_id: str) -> str:
+    return f"{session.current_sid()}:{profile_id}"
+
+
 def save(profile_id: str, summary: SpendingSummary, features: SpendingFeatures) -> None:
-    """프로필당 최신 분석 결과 1건만 유지한다(같은 profile_id면 덮어쓴다)."""
+    """프로필당(현재 브라우저 세션 기준) 최신 분석 결과 1건만 유지한다(같은 profile_id면
+    덮어쓴다)."""
     now = datetime.now().isoformat(timespec="seconds")
     conn = db.get_conn()
     try:
         conn.execute(
             "INSERT OR REPLACE INTO spending_features(profile_id, features_json, summary_json, updated_at) "
             "VALUES (?, ?, ?, ?)",
-            (profile_id, features.model_dump_json(), summary.model_dump_json(), now),
+            (_scoped_profile_id(profile_id), features.model_dump_json(), summary.model_dump_json(), now),
         )
         conn.commit()
     finally:
@@ -56,7 +67,7 @@ def load(profile_id: str) -> Optional[tuple[SpendingSummary, SpendingFeatures]]:
     try:
         row = conn.execute(
             "SELECT summary_json, features_json FROM spending_features WHERE profile_id = ?",
-            (profile_id,),
+            (_scoped_profile_id(profile_id),),
         ).fetchone()
     finally:
         conn.close()
@@ -70,7 +81,7 @@ def load(profile_id: str) -> Optional[tuple[SpendingSummary, SpendingFeatures]]:
 def clear(profile_id: str) -> bool:
     conn = db.get_conn()
     try:
-        cur = conn.execute("DELETE FROM spending_features WHERE profile_id = ?", (profile_id,))
+        cur = conn.execute("DELETE FROM spending_features WHERE profile_id = ?", (_scoped_profile_id(profile_id),))
         conn.commit()
         return cur.rowcount > 0
     finally:
