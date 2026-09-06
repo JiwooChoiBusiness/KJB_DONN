@@ -478,6 +478,17 @@ data: <json 한 줄>
 - `app/services/spending.py::link_savings_to_debt(profile, opportunities, today) -> list[SpendingLinkedAction]`: 최고금리 대출에 `extra_payment_effect(loan, monthly_saving)`를 적용해 단축 개월·절감 이자를 계산하고 템플릿 문장을 만든다("정기 결제 3건(월 45,000원)을 줄여 카드론에 더 갚으면 4개월 빨리 끝나고 이자 60,000원을 아껴요."). 대출이 없으면 "비상금으로 {n}개월 만에 목표에 닿아요" 문장.
 - 노출: `GET /api/spending`과 `POST /api/spending/analyze`(+synthetic) 응답에 `opportunities`, `linked_actions` 추가. `POST /api/chat/attach` 답변 마크다운에 `**이렇게 연결돼요**` 목록(최대 2개)과 칩 "시나리오로 확인하기". 소비 패턴 화면에 "지출 절감을 상환에 연결하면" 카드(항목별 절감액 → 단축 개월·절감 이자, 버튼 "시나리오로 확인하기" → 내 부채 화면 시나리오). 숫자는 코드, 문장은 템플릿.
 
+### 2.16 답변 길이와 구조 "자세히" 기본값 (PMO 요청 2026-09-06)
+
+원칙은 그대로다: AI는 숫자를 보지 않고 자리표로 쓰며, 길어지는 만큼 검증(2.8·2.11)도 그대로 적용한다. 길이는 "AI에게 더 많은 범주형 사실을 주고, 문장마다 다른 정보를 쓰게" 해서 늘린다.
+
+- 길이 기준(detail="full", 기본값): 공시 비교 요약 4~6문장(최대 700자), 항목별 이유 2문장(최대 220자), 행동 카드 설명 4~5문장(최대 600자) 뒤에 코드가 "이렇게 해보세요" 단계 목록을 붙임, 채팅 비교 안내 3~4문장(최대 400자) 뒤에 코드가 "준비한 조건" 목록을 붙임, 계산형 질의 결론 2~3문장 + 계산 근거 3~4개 + 가정 1줄, 제도 안내 요약 2문장 + 핵심 최대 5개 + "이렇게 활용하세요" 1줄, 직접 답변 2~3문장. detail="brief"면 기존 상한(2.8)을 쓴다.
+- 최소 길이: 요약이 3문장 미만, 항목 이유가 1문장 미만이면 `too_short`로 템플릿 폴백. 템플릿도 같은 구조로 보강한다(비교 요약 템플릿 4문장: 정렬 기준, 1순위 근거, 현재 대비, 확인할 점).
+- 사실(facts) 보강: 비교 요약에 항목별 `rate_kind`, `vs_current` 방향, "현재 대출 금리보다 낮음/높음", 취급 기관 종류, 추정 항목 라벨, 주의점 목록(심사 금리·한도, 중도상환수수료, 공시 기준 월이 있다는 사실), 다음 단계(조건 확인 화면에서 바꿀 수 있는 것). 행동 카드에 `gist`, 숫자를 뺀 단계·주의 문장(숫자가 있는 단계는 제외), 여력 구간. 계산형 질의에 도구 이름, 방향, 효과 크기 구간(큼·보통·작음), 가정 문장. 제도 안내에 섹션 최대 5개. 채팅 비교 안내에 추정 항목, 바뀐 항목, 바꿀 수 있는 항목, 실행 뒤 보게 될 것.
+- 프롬프트: "문장마다 서로 다른 정보(사실, 이유, 비교, 주의, 다음 행동)를 쓰고 같은 말을 반복하지 말 것, 빈말 금지, 숫자는 자리표만".
+- 온도: 설명 호출은 `config/llm.yaml`의 `explain_temperature`(0.4), 추출은 0 유지.
+- 화면: 설정 모달에 "답변 길이: 자세히(기본) / 간단히" 토글(localStorage). `POST /api/chat`·`/api/chat/stream` body와 `/explain` 요청에 `detail` 필드(기본 full).
+
 ## 3. 화면 규격 (web/)
 
 - 단일 페이지, 빌드 없음. `index.html`, `app.js`, `styles.css`. 글꼴은 Pretendard(jsdelivr CDN, 오프라인이면 system-ui·"Malgun Gothic" 폴백). 그 외 외부 CDN 의존 없음.
@@ -570,3 +581,4 @@ python run.py 3676       # Claude Code 테스트용
 - (생각 과정 문구·설명 품질) 2.9의 stage dict에 `tech: str`(선택, 모델명·소요 초·사유 코드 같은 기술 정보 한 줄)을 추가하고 `label`·`detail`은 사용자 말로 쓴다(예: "무엇이 필요한지 파악 · 공시 비교로 이해했어요", 기술 정보는 `tech`에 "Gemini gemini-3.8-flash · 3.0초"). 화면은 `tech`를 작은 회색 줄로만 보여준다. 2.8 행동 카드 설명: `safe_mode` 카드(R0)는 LLM을 쓰지 않고 항상 템플릿. LLM 문장 검증에 `unlabeled_placeholder`(플레이스홀더 앞 20자 안에 맥락어 없음), `not_informative`(이유 연결어와 행동 동사 부재), `vague_phrase`(빈말)를 추가해 실패하면 템플릿으로 간다(2026-09-06 화면 실측: "현재 -1,450,608원이나 95% 상태를 고려해..." 같은 문장 차단).
 - (대화창 파일 첨부) 2.12절 추가. `POST /api/chat/attach`, `ChatAttachRequest` 신설. 입력 카드 "+"는 새 대화가 아니라 파일 첨부. 모델명은 화면 어디에도 표시하지 않고(배지는 "AI 응답"/"규칙 기반 응답"만), 입력 카드의 "모드: M0 공시 비교" 배지는 제거.
 - (마지막 업데이트 1~3) 2.13~2.15절 추가. models.py: `CompareDelta`(+`CompareResult.delta`), `SavingOpportunity`, `SpendingLinkedAction`, `WhatIfResult`. `POST /api/compare/run`에 `previous_decision_id` 쿼리, 소비 응답에 `opportunities`·`linked_actions`, 의도 `whatif`.
+- (답변 길이) 2.16절 추가. `ChatRequest.detail`, `ExplainRequest.detail`(full|brief, 기본 full), `config/llm.yaml`의 `explain_temperature`.
