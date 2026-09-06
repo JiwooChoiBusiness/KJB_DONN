@@ -102,34 +102,87 @@ def validate(
 
 
 def fill(text: str, values: dict[str, str]) -> str:
-    """text의 플레이스홀더를 values로 치환한다. 값이 없는 플레이스홀더가 남으면 KeyError."""
+    """text의 플레이스홀더를 values로 치환한다. 값이 없는 플레이스홀더가 남으면 KeyError.
 
-    def _sub(match: re.Match) -> str:
+    치환 직후 조사 보정을 한다: LLM/템플릿이 쓴 문장은 실제 값을 모른 채 플레이스홀더
+    바로 뒤에 조사(은/는, 이/가, 을/를, 과/와, 으로/로, 이라/라, 이에요/예요)를 붙였을 수
+    있어, 값의 마지막 글자 받침에 맞지 않을 수 있다(예: "{rate_a}은" + "5.47%" -> 그대로
+    두면 "5.47%은"). `_fix_josa_after`가 플레이스홀더 바로 뒤 토큰이 그 조사 후보 중
+    하나면 값에 맞는 형태로 고쳐 쓴다.
+    """
+
+    out: list[str] = []
+    pos = 0
+    for match in PLACEHOLDER_RE.finditer(text):
         name = match.group(1)
         if name not in values:
             raise KeyError(name)
-        return values[name]
+        value = values[name]
+        out.append(text[pos:match.start()])
+        out.append(value)
+        pos = match.end()
+        fixed, consumed = _fix_josa_after(text[pos:], value)
+        if consumed:
+            out.append(fixed)
+            pos += consumed
+    out.append(text[pos:])
+    return "".join(out)
 
-    return PLACEHOLDER_RE.sub(_sub, text)
 
+# ---------------------------------------------------------------------------
+# 조사 보정 (플레이스홀더를 값으로 채운 뒤, 값의 마지막 글자 받침에 맞춰 고친다)
+# ---------------------------------------------------------------------------
 
+# (받침 있음 형태, 받침 없음 형태). "으로/로"는 받침이 있어도 그 받침이 ㄹ이면
+# "으로"가 아니라 "로"를 쓰는 특수 규칙이 있어 josa()가 pair 이름으로 따로 처리한다.
 _JOSA_PAIRS: dict[str, tuple[str, str]] = {
     "은/는": ("은", "는"),
     "이/가": ("이", "가"),
     "을/를": ("을", "를"),
+    "과/와": ("과", "와"),
+    "으로/로": ("으로", "로"),
+    "이라/라": ("이라", "라"),
+    "이에요/예요": ("이에요", "예요"),
 }
+
+_RIEUL_BATCHIM_INDEX = 8  # 종성 순서(0=받침 없음)에서 순수 "ㄹ" 받침의 인덱스
 
 
 def josa(word: str, pair: str) -> str:
-    """받침 유무로 조사 짝(pair)에서 하나를 고른다(템플릿용).
+    """받침 유무로 조사 짝(pair)에서 하나를 고른다(템플릿용, `fill()`의 조사 보정도 재사용).
 
-    pair: "은/는", "이/가", "을/를". 마지막 글자가 한글 음절이 아니면 받침 없는
-    쪽(뒤쪽: 는/가/를)을 쓴다.
+    pair: "은/는", "이/가", "을/를", "과/와", "으로/로", "이라/라", "이에요/예요". 마지막
+    글자가 한글 음절이 아니면(예: "%", 영문, 숫자로 끝나는 값) 받침 없는 쪽을 쓴다.
+    "으로/로"는 받침이 있어도 그 받침이 ㄹ이면 "으로"가 아니라 "로"를 쓴다(예: "말로",
+    "서울로").
     """
     with_batchim, without_batchim = _JOSA_PAIRS[pair]
     if not word:
         return without_batchim
     offset = ord(word[-1]) - 0xAC00
-    if 0 <= offset <= 11171:
-        return with_batchim if offset % 28 != 0 else without_batchim
-    return without_batchim
+    if not (0 <= offset <= 11171):
+        return without_batchim
+    batchim = offset % 28
+    if batchim == 0:
+        return without_batchim
+    if pair == "으로/로" and batchim == _RIEUL_BATCHIM_INDEX:
+        return without_batchim
+    return with_batchim
+
+
+# fill()이 플레이스홀더 바로 뒤 원문에서 조사 후보를 찾을 때 쓰는 토큰 목록. 각 그룹의
+# 받침 있음/없음 형태를 모두 등록해 템플릿이 어느 쪽을 먼저 썼든 찾아낸다. 긴 토큰(2~3자)을
+# 짧은 토큰(1자)보다 먼저 검사해야 "이에요"가 "이"로 잘못 잘리지 않는다.
+_JOSA_TOKENS: list[tuple[str, str]] = sorted(
+    ((form, pair) for pair, forms in _JOSA_PAIRS.items() for form in forms),
+    key=lambda item: -len(item[0]),
+)
+
+
+def _fix_josa_after(remainder: str, value: str) -> tuple[str, int]:
+    """remainder(플레이스홀더 바로 뒤 원문)가 조사 토큰으로 시작하면 (고친 토큰, 그
+    토큰의 길이)를 돌려준다. 아니면 ("", 0)."""
+    for token, pair in _JOSA_TOKENS:
+        if remainder.startswith(token):
+            return josa(value, pair), len(token)
+    return "", 0

@@ -1,11 +1,17 @@
 """DONN PoC API 라우트 (SPEC 2.5). main.py가 prefix="/api"로 include한다."""
 from __future__ import annotations
 
+import json
+import queue
 import re
+import threading
+import time
+from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi.responses import StreamingResponse
 
 from app.api.schemas import (ChatCreateRequest,
     ChatRequest,
@@ -592,22 +598,117 @@ def _merge_followup(base: dict[str, Any], new_params: dict[str, Any]) -> tuple[d
     return merged, changed
 
 
-def _build_chat_reply(message: str, base_params: Optional[dict[str, Any]] = None) -> tuple[str, list[Chip], Optional[dict[str, Any]], bool]:
-    masked = guardrails.mask_pii(message)
+# ---------------------------------------------------------------------------
+# 파이프라인 단계 이벤트("생각 과정", SPEC 2.9)
+# ---------------------------------------------------------------------------
 
+_STAGE_LABELS: dict[str, str] = {
+    "guard": "발화 점검",
+    "intent": "의도·조건 추출",
+    "compute": "계산 엔진",
+    "explain": "설명 작성",
+    "check": "응답 점검",
+}
+
+_INTENT_LABELS_KR: dict[str, str] = {
+    "compare": "공시 비교", "schedule": "상환표", "scenario": "시나리오", "action": "행동 제안",
+    "faq": "제도 안내", "spending": "소비 패턴", "retirement": "노후자금", "saving": "저축률",
+    "liquidity": "비상자금",
+}
+
+
+class _StageEmitter:
+    """파이프라인 단계 이벤트 방출/기록(SPEC 2.9). `emit`이 없으면 trace만 쌓는다.
+
+    같은 stage id로 `start` 뒤 종료 상태(done/fallback/skip)가 하나 온다. 저장되는
+    `trace`(=`ChatReply.trace`)에는 종료 상태만 남기고, `start`는 실시간 스트림에만
+    보낸다(스트리밍 화면의 "진행 중" 표시용).
+    """
+
+    def __init__(self, emit: Optional[Callable[[dict[str, Any]], None]]):
+        self._emit = emit
+        self.trace: list[dict[str, Any]] = []
+        self._started_at: dict[str, float] = {}
+
+    def start(self, stage_id: str) -> None:
+        self._started_at[stage_id] = time.monotonic()
+        self._send({"id": stage_id, "label": _STAGE_LABELS[stage_id], "status": "start", "detail": "", "ms": 0})
+
+    def finish(self, stage_id: str, status: str, detail: str) -> None:
+        started = self._started_at.get(stage_id)
+        ms = int((time.monotonic() - started) * 1000) if started is not None else 0
+        event = {"id": stage_id, "label": _STAGE_LABELS[stage_id], "status": status, "detail": detail, "ms": ms}
+        self.trace.append(event)
+        self._send(event)
+
+    def _send(self, event: dict[str, Any]) -> None:
+        if self._emit is not None:
+            self._emit(dict(event))
+
+
+def _explain_stage_detail(result: ExplainResult) -> tuple[str, str]:
+    """ExplainResult 하나로 explain 단계의 (status, detail)을 만든다(SPEC 2.9)."""
+    if result.source == "llm":
+        return "done", f"Gemini {result.model}, {result.latency_ms}ms"
+    first_problem = result.problems[0] if result.problems else "unknown"
+    return "fallback", f"템플릿 문장 사용({first_problem})"
+
+
+@dataclass
+class _ChatBuildResult:
+    reply_text: str
+    chips: list[Chip]
+    action: Optional[dict[str, Any]]
+    llm_used: bool
+    trace: list[dict[str, Any]] = field(default_factory=list)
+    model: Optional[str] = None
+
+
+def _build_chat_reply(
+    message: str,
+    base_params: Optional[dict[str, Any]] = None,
+    emit: Optional[Callable[[dict[str, Any]], None]] = None,
+) -> _ChatBuildResult:
+    """SPEC 2.9: 단계별로 `stages.start`/`stages.finish`를 호출해 "생각 과정"을 기록·방출한다.
+    수치·판단 자체는 기존과 동일한 코드 경로(규칙 파서/코드 계산)로 만든다. LLM은 의도
+    추출(intent 단계)과 문장 설명(explain 단계)에만 관여한다."""
+    stages = _StageEmitter(emit)
+
+    # ---- guard: PII 마스킹 + 위기 신호 확인 ----
+    stages.start("guard")
+    masked = guardrails.mask_pii(message)
     crisis = guardrails.detect_crisis(masked)
     if crisis != "none":
+        stages.finish("guard", "done", "위기 신호 감지: 공적 상담 안내로 전환")
+        stages.start("compute")
+        stages.finish("compute", "done", "공적 상담 안내 준비")
+        stages.start("explain")
+        stages.finish("explain", "skip", "규칙 문장")
         text, chips, action = _crisis_reply(crisis, session_service.get_profile())
-        return text, chips, action, False
+        stages.start("check")
+        banned = insights_service.get_banned_terms()
+        if guardrails.check_text(text, banned):
+            stages.finish("check", "fallback", "금칙어 감지로 기본 안내로 대체")
+            text = "안내 문구를 표시할 수 없어 기본 안내로 대체했습니다. 메뉴에서 원하는 화면을 선택해주세요."
+        else:
+            stages.finish("check", "done", "상품명·회사명·권유 표현 없음 확인")
+        return _ChatBuildResult(text, chips, action, False, stages.trace, None)
+    stages.finish("guard", "done", "개인정보 마스킹 완료")
 
+    # ---- intent: 의도·조건 추출 ----
+    stages.start("intent")
     slots: dict[str, Any] = {}
     llm_used = False
+    extract_model: Optional[str] = None
+    extract_latency_ms = 0
     if _llm_provider.available():
         try:
             result = _llm_provider.extract(masked, _CHAT_EXTRACT_SCHEMA, _CHAT_EXTRACT_SYSTEM)
+            extract_latency_ms = result.latency_ms
             if isinstance(result.data, dict) and result.data.get("intent"):
                 slots = result.data
                 llm_used = True
+                extract_model = result.model
         except LLMUnavailable:
             slots = {}
 
@@ -620,11 +721,21 @@ def _build_chat_reply(message: str, base_params: Optional[dict[str, Any]] = None
     if (base_params and slots.get("intent") in (None, "", "faq") and intent != "compare"
             and any(slots.get(k) not in (None, "", []) for k in ("max_rate", "term_months", "amount", "exclude_companies", "sort_key"))):
         intent = "compare"  # 직전 비교 조건이 있는 대화에서 다른 의도 없이 조건만 말하면 후속 질의로 본다
+
+    if llm_used:
+        intent_label = _INTENT_LABELS_KR.get(intent, intent)
+        stages.finish("intent", "done", f"Gemini {extract_model}, {extract_latency_ms}ms, 의도: {intent_label}")
+    else:
+        stages.finish("intent", "fallback", "규칙 파서로 대체(LLM 응답 없음)")
+
     profile = session_service.get_profile()
     chips: list[Chip] = []
     action: Optional[dict[str, Any]] = None
+    explain_model: Optional[str] = None
+    explain_llm_used = False
 
     if intent == "compare":
+        stages.start("compute")
         params = _clean_compare_params(slots)
         followup_changed: list[str] = []
         if base_params and params.get("category") in (None, base_params.get("category")):
@@ -635,38 +746,61 @@ def _build_chat_reply(message: str, base_params: Optional[dict[str, Any]] = None
                 ctx = compare_service.prepare_context(profile, params)
         else:
             ctx = compare_service.prepare_context(profile, params)
+        category_label = _CATEGORY_LABELS_KR.get(ctx.category.value, ctx.category.value)
+
         if ctx.category in (ProductCategory.DEPOSIT, ProductCategory.SAVING):
             # 결정 D5: 예·적금은 순위 비교 대상이 아니다. 비교 화면으로 보내는 대신
             # 공시 열람만 안내하고, prepare_compare 액션은 만들지 않는다(2026-09-06 리뷰).
+            stages.finish("compute", "done", f"비교 조건 준비: {category_label}, 예·적금은 순위 비교 대상 아님")
             reply_text = compare_service.NO_RANKING_CATEGORY_MESSAGE
+            stages.start("explain")
+            stages.finish("explain", "skip", "규칙 문장")
         else:
-            category_label = _CATEGORY_LABELS_KR.get(ctx.category.value, ctx.category.value)
-            if followup_changed:
-                labels = ", ".join(_FOLLOWUP_LABELS.get(k, k) for k in followup_changed)
-                reply_text = (
-                    f"이전 조건에서 {labels}만 바꿔 다시 준비했어요. {category_label}, 금액 {ctx.amount:,}원, "
-                    f"기간 {ctx.term_months}개월 기준입니다. 공시 비교 화면에서 확인하고 실행해보세요."
-                )
+            followup_labels = [_FOLLOWUP_LABELS.get(k, k) for k in followup_changed]
+            if followup_labels:
+                stages.finish("compute", "done", f"이전 조건에서 {', '.join(followup_labels)}만 변경")
             else:
-                reply_text = (
-                    f"{category_label} 비교 조건을 준비했어요. 금액 {ctx.amount:,}원, 기간 {ctx.term_months}개월 "
-                    "기준입니다. 공시 비교 화면에서 조건을 확인하고 실행해보세요."
+                stages.finish(
+                    "compute", "done",
+                    f"비교 조건 준비: {category_label}, 금액 {ctx.amount:,}원, "
+                    f"기간 {ctx.term_months}개월(추정 {len(ctx.estimated_fields)}개)",
                 )
+            stages.start("explain")
+            explain_result = explain_service.explain_chat_compare(ctx, followup_labels, _llm_provider)
+            status, detail = _explain_stage_detail(explain_result)
+            stages.finish("explain", status, detail)
+            if explain_result.source == "llm":
+                explain_llm_used = True
+                explain_model = explain_result.model
+            reply_text = explain_result.summary + " 아래 버튼으로 조건을 확인하고 실행해보세요."
             action = {"type": "prepare_compare", "payload": {"params": ctx.model_dump(mode="json")}}
 
     elif intent in ("schedule", "scenario"):
+        stages.start("compute")
+        stages.finish("compute", "done", "화면 안내")
         reply_text = "내 부채 화면에서 상환표와 시나리오를 확인할 수 있어요."
         action = {"type": "open_view", "payload": {"view": "debts"}}
         chips.append(Chip(id=f"chip-chat-{intent}", text="내 부채로 이동", tier=1, intent=intent, params={}))
+        stages.start("explain")
+        stages.finish("explain", "skip", "규칙 문장")
 
     elif intent == "spending":
+        stages.start("compute")
+        stages.finish("compute", "done", "화면 안내")
         reply_text = "소비 패턴 화면에서 합성 거래내역을 확인할 수 있어요."
         action = {"type": "open_view", "payload": {"view": "spending"}}
+        stages.start("explain")
+        stages.finish("explain", "skip", "규칙 문장")
 
     elif intent in ("retirement", "saving", "liquidity"):
+        stages.start("compute")
         reply_text, chips, action = _build_lifecycle_chat_reply(intent, profile)
+        stages.finish("compute", "done", "재무비율·노후자금 계산")
+        stages.start("explain")
+        stages.finish("explain", "skip", "규칙 문장")
 
     elif intent == "action":
+        stages.start("compute")
         if profile is None:
             reply_text = (
                 "아직 프로필이 없어요. 페르소나를 선택하거나 내 부채 화면에서 정보를 입력하면 "
@@ -674,18 +808,39 @@ def _build_chat_reply(message: str, base_params: Optional[dict[str, Any]] = None
             )
             chips.append(Chip(id="chip-chat-onboarding", text="페르소나 선택하러 가기", tier=1,
                                intent="onboarding", params={}))
+            stages.finish("compute", "done", "행동 규칙 평가: 프로필 없음")
+            stages.start("explain")
+            stages.finish("explain", "skip", "규칙 문장")
         else:
             params_policy = policy.load_policy_params()
             cards = actions_service.list_actions(profile, params_policy, today=date.today())
             if cards:
                 top = cards[0]
-                reply_text = top.summary
+                stages.finish("compute", "done", f"행동 규칙 평가: {len(cards)}건, 최우선 {top.title}")
                 if top.chip is not None:
                     chips.append(top.chip)
+                stages.start("explain")
+                explain_result = explain_service.explain_action(
+                    top.id, _llm_provider, profile, params_policy, today=date.today(),
+                )
+                if explain_result is not None:
+                    status, detail = _explain_stage_detail(explain_result)
+                    stages.finish("explain", status, detail)
+                    if explain_result.source == "llm":
+                        explain_llm_used = True
+                        explain_model = explain_result.model
+                    reply_text = explain_result.summary
+                else:
+                    stages.finish("explain", "skip", "규칙 문장")
+                    reply_text = top.summary
             else:
+                stages.finish("compute", "done", "행동 규칙 평가: 0건")
                 reply_text = "지금은 특별히 안내할 행동이 없어요. 계속 잘 관리하고 계세요."
+                stages.start("explain")
+                stages.finish("explain", "skip", "규칙 문장")
 
     else:  # faq 또는 인식하지 못한 의도: 제도 안내 KB(kb/*.md) 키워드 검색으로 답한다
+        stages.start("compute")
         hit = kb_search.answer(masked)
         if hit is not None:
             reply_text = f"{hit['title']} 안내입니다. {hit['snippet']}"
@@ -696,25 +851,36 @@ def _build_chat_reply(message: str, base_params: Optional[dict[str, Any]] = None
                               intent="faq", params={"slug": hit["slug"]}))
             action = {"type": "open_kb", "payload": {"slug": hit["slug"], "title": hit["title"],
                                                     "sources": hit.get("sources") or []}}
+            stages.finish("compute", "done", f"제도 안내 검색: {hit['title']}")
         else:
             reply_text = (
                 "부채 상환표, 공시 비교, 시나리오, 행동 제안, 제도 안내 중 무엇이든 물어보세요. "
                 "예: '신용대출 공시 비교해줘', '금리 4% 이하만', '금리인하요구권 요건이 뭐야'"
             )
+            stages.finish("compute", "done", "해당 문서 없음")
         chips.extend([
             Chip(id="chip-chat-faq-compare", text="공시 비교하기", tier=1, intent="compare", params={}),
             Chip(id="chip-chat-faq-debts", text="내 부채 보기", tier=1, intent="schedule", params={}),
             Chip(id="chip-chat-faq-spending", text="소비 패턴 보기", tier=1, intent="spending", params={}),
         ])
+        stages.start("explain")
+        stages.finish("explain", "skip", "규칙 문장")
 
+    # ---- check: 응답 점검 ----
+    stages.start("check")
     banned = insights_service.get_banned_terms()
     # KB 응답도 예외 없이 검사한다(2026-09-06 리뷰: kb_reply 우회는 kb/*.md에 실제
     # 금융회사명이 남아있어도 그대로 통과시키는 구멍이었다). kb/*.md는 이제 상호금융권 등
     # 개별 기관 실명을 쓰지 않으므로(SEV5 #3) 15개 문서 전부 이 검사를 통과해야 한다.
     if guardrails.check_text(reply_text, banned):
+        stages.finish("check", "fallback", "금칙어 감지로 기본 안내로 대체")
         reply_text = "안내 문구를 표시할 수 없어 기본 안내로 대체했습니다. 메뉴에서 원하는 화면을 선택해주세요."
+    else:
+        stages.finish("check", "done", "상품명·회사명·권유 표현 없음 확인")
 
-    return reply_text, chips, action, llm_used
+    final_llm_used = llm_used or explain_llm_used
+    final_model = explain_model or extract_model
+    return _ChatBuildResult(reply_text, chips, action, final_llm_used, stages.trace, final_model)
 
 
 def _current_profile_id() -> str:
@@ -722,9 +888,14 @@ def _current_profile_id() -> str:
     return profile.id if profile is not None else chatlog.GUEST_PROFILE_ID
 
 
-@router.post("/chat", response_model=ChatReply)
-def post_chat(body: ChatRequest) -> ChatReply:
-    """대화 로그는 현재 프로필(페르소나)에 종속된다. chat_id가 없거나 다른 프로필 것이면 새 대화를 만든다."""
+def run_chat(
+    body: ChatRequest, emit: Optional[Callable[[dict[str, Any]], None]] = None,
+) -> ChatReply:
+    """`/api/chat`과 `/api/chat/stream`이 공유하는 본체(SPEC 2.9). `emit`이 있으면 파이프라인
+    단계 이벤트를 실시간으로 방출한다(없으면 무시하고 마지막에 `ChatReply.trace`로만 실린다).
+
+    대화 로그는 현재 프로필(페르소나)에 종속된다. chat_id가 없거나 다른 프로필 것이면
+    새 대화를 만든다."""
     profile_id = _current_profile_id()
     chat_id = body.chat_id
     if chat_id:
@@ -742,10 +913,70 @@ def post_chat(body: ChatRequest) -> ChatReply:
         title = guardrails.mask_pii(body.message).strip()[:30]
         chat_id = chatlog.create_chat(profile_id, title=title)["id"]
     chatlog.append_message(chat_id, "user", guardrails.mask_pii(body.message))
-    reply_text, chips, action, llm_used = _build_chat_reply(body.message, base_params=base_params)
-    chatlog.append_message(chat_id, "reply", reply_text, llm_used=llm_used, action=action,
-                           chips=[c.model_dump(mode="json") for c in chips])
-    return ChatReply(reply_text=reply_text, chips=chips, action=action, llm_used=llm_used, chat_id=chat_id)
+
+    built = _build_chat_reply(body.message, base_params=base_params, emit=emit)
+
+    chatlog.append_message(
+        chat_id, "reply", built.reply_text, llm_used=built.llm_used, action=built.action,
+        chips=[c.model_dump(mode="json") for c in built.chips], trace=built.trace,
+    )
+    return ChatReply(
+        reply_text=built.reply_text, chips=built.chips, action=built.action, llm_used=built.llm_used,
+        chat_id=chat_id, trace=built.trace, model=built.model,
+    )
+
+
+@router.post("/chat", response_model=ChatReply)
+def post_chat(body: ChatRequest) -> ChatReply:
+    """대화 로그는 현재 프로필(페르소나)에 종속된다. chat_id가 없거나 다른 프로필 것이면 새 대화를 만든다."""
+    return run_chat(body)
+
+
+@router.post("/chat/stream")
+def post_chat_stream(body: ChatRequest) -> StreamingResponse:
+    """SPEC 2.9: 파이프라인 단계("생각 과정")를 실시간으로 내보내는 SSE 엔드포인트.
+
+    워커 스레드에서 `run_chat`을 실행하고(대화 로그 저장까지 `/api/chat`과 동일하게
+    그 스레드 안에서 끝낸다), emit된 stage 이벤트를 큐로 받아 `event: stage` 프레임으로
+    즉시 내보낸다. 끝나면 `event: reply`, 스레드에서 예외가 나면 `event: error`를 보내고
+    스트림을 닫는다(스레드 예외를 큐로 전달해 조용히 사라지지 않게 한다).
+    """
+
+    def worker(q: "queue.Queue[tuple[str, Any]]") -> None:
+        try:
+            reply = run_chat(body, emit=lambda stage: q.put(("stage", stage)))
+        except Exception as exc:  # noqa: BLE001 - 스레드 예외를 그대로 SSE error 프레임으로 전달
+            q.put(("error", str(exc)))
+        else:
+            q.put(("reply", reply))
+        finally:
+            q.put(("done", None))
+
+    def event_stream():
+        q: "queue.Queue[tuple[str, Any]]" = queue.Queue()
+        worker_thread = threading.Thread(target=worker, args=(q,), daemon=True)
+        worker_thread.start()
+        while True:
+            try:
+                kind, payload = q.get(timeout=0.1)
+            except queue.Empty:
+                # 스레드가 이미 끝났는데 큐도 비어 있으면(이론상 "done"이 먼저 와야 하지만
+                # 방어적으로) 더 기다리지 않고 종료한다.
+                if not worker_thread.is_alive() and q.empty():
+                    break
+                continue
+            if kind == "stage":
+                yield f"event: stage\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            elif kind == "reply":
+                data = payload.model_dump(mode="json")
+                yield f"event: reply\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+            elif kind == "error":
+                yield f"event: error\ndata: {json.dumps({'message': payload}, ensure_ascii=False)}\n\n"
+            elif kind == "done":
+                break
+
+    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
 
 
 @router.get("/chats")

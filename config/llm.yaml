@@ -16,6 +16,7 @@ temperature: 0
 timeout_seconds: 8                    # 요청 1건 상한
 total_deadline_seconds: 12            # 체인 전체 상한, 초과 시 규칙 파서 폴백
 explain_total_deadline_seconds: 15    # 설명 문장(슬롯 필링, SPEC 2.8) 전용 체인 상한, 초과 시 템플릿 폴백
+chat_explain_deadline_seconds: 8      # 대화 화면(SPEC 2.9) compare 안내 문장 전용 체인 상한, 초과 시 템플릿 폴백
 model_cooldown_seconds: 120           # 500/503이 2회 반복된 모델은 120초 동안 건너뜀 (순서는 유지)
 model_failure_threshold: 2
 endpoint: https://generativelanguage.googleapis.com/v1beta

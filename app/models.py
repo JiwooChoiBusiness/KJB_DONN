@@ -359,6 +359,17 @@ class PolicyParams(BaseModel):
         return default if p is None else p.value
 
 
+class ChatResource(BaseModel):
+    """답변에 실제로 쓰인 자료 1건(SPEC 2.11). 화면 오른쪽 "리소스" 패널과 노드 카드가 참조한다."""
+    kind: Literal["profile", "loan", "calc", "kb", "products", "policy", "external"]
+    title: str                          # 예: "금융소비자 권리", "내 대출 4건", "공시 상품 78건", "금융감독원 파인"
+    ref: str = ""                       # kb slug#section, decision_id, loan id, url 등 식별자
+    detail: str = ""                    # 예: "청약철회·위법계약해지·분쟁조정 문단", "2026년 8월 공시 기준"
+    url: Optional[str] = None
+    verified_at: Optional[str] = None   # KB 확인일(YYYY-MM-DD)
+    needs_verification: bool = False
+
+
 # ---------- 대화(P4 전까지 규칙 기반) ----------
 class ChatReply(BaseModel):
     reply_text: str
@@ -369,6 +380,9 @@ class ChatReply(BaseModel):
     chat_id: Optional[str] = None  # 프로필(페르소나)별 대화 로그 식별자
     trace: list[dict[str, Any]] = []  # 생각 과정(파이프라인 단계, SPEC 2.9). 종료 상태만
     model: Optional[str] = None      # 실제 응답한 LLM 모델명(추출 또는 설명). 규칙 기반이면 None
+    route: Literal["direct", "internal", "external", "safety"] = "internal"  # SPEC 2.11 답변 경로
+    resources: list[ChatResource] = []   # 답변에 쓰인 자료 목록(리소스 패널). trace 항목의 resource_refs가 ref로 가리킨다
+    answer_format: Literal["text", "markdown"] = "text"  # markdown이면 화면이 제목·굵게·목록을 렌더링한다
 
 
 # ---------- 설명 문장 (슬롯 필링, SPEC 2.8) ----------

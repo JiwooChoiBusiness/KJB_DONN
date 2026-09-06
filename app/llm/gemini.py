@@ -75,6 +75,10 @@ class GeminiProvider:
         # total_deadline_seconds와 분리해 화면이 "AI 설명 보기"를 기다리는 동안 더
         # 여유 있게 재시도할 수 있게 한다.
         self.explain_total_deadline_seconds = cfg.get("explain_total_deadline_seconds", 15)
+        # 대화 화면(SPEC 2.9)의 compare 안내 문장 전용 체인 상한. app.services.explain이
+        # config/llm.yaml에서 이 키를 직접 읽어 provider.explain(..., deadline_seconds=...)로
+        # 넘기지만, health()/진단용으로 인스턴스에도 보관해 둔다.
+        self.chat_explain_deadline_seconds = cfg.get("chat_explain_deadline_seconds", 8)
         self.model_cooldown_seconds = cfg.get("model_cooldown_seconds", 120)  # 500/503이 반복된 모델은 잠시 건너뜀
         self.model_failure_threshold = cfg.get("model_failure_threshold", 2)  # 체인 전체 상한. 넘기면 규칙 파서 폴백
         # 429를 받은 (key_index) -> 쿨다운 해제 시각(time.monotonic() 기준). 프로세스
@@ -246,20 +250,25 @@ class GeminiProvider:
             usage=raw.get("usageMetadata") or {},
         )
 
-    def explain(self, slots: dict, template_id: str, system: str, schema: Optional[dict] = None) -> LLMResult:
+    def explain(
+        self, slots: dict, template_id: str, system: str, schema: Optional[dict] = None,
+        deadline_seconds: Optional[float] = None,
+    ) -> LLMResult:
         """범주형 슬롯만으로 설명 문장을 만든다(수치는 포함하지 않는다, D4).
 
         D4: `slots`는 호출자(`app.services.explain`)가 이미 `app.llm.slotfill.assert_no_digits`로
         검증한 숫자 없는 facts/placeholders여야 한다. `schema`가 있으면 JSON 모드로 호출해
         `LLMResult.data`를 채우고(없거나 파싱 실패면 `data=None`, 호출자가 `result.text`로
-        재시도), 체인 전체 시간 상한은 `explain_total_deadline_seconds`를 쓴다(extract/chat과
-        분리, SPEC 2.8).
+        재시도), 체인 전체 시간 상한은 기본 `explain_total_deadline_seconds`를 쓴다(extract/chat과
+        분리, SPEC 2.8). `deadline_seconds`를 넘기면 이 호출 1건에 한해 그 값으로 덮어쓴다
+        (SPEC 2.9: 대화 화면의 설명 생성은 `chat_explain_deadline_seconds`로 더 짧게 줄인다).
         """
         user_text = json.dumps({"template_id": template_id, "slots": slots}, ensure_ascii=False)
         body = self._build_body(system, user_text, response_schema=schema)
-        raw, model, key_index, latency_ms = self._run_chain(
-            body, deadline_seconds=self.explain_total_deadline_seconds
+        effective_deadline = (
+            self.explain_total_deadline_seconds if deadline_seconds is None else deadline_seconds
         )
+        raw, model, key_index, latency_ms = self._run_chain(body, deadline_seconds=effective_deadline)
         text_out = _extract_text(raw)
         data = None
         if schema is not None and text_out:

@@ -15,7 +15,10 @@ import json
 import re
 import time
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any, Optional
+
+import yaml
 
 from app.core.capacity import compute_capacity
 from app.core.schedule import build_schedule
@@ -26,6 +29,7 @@ from app.llm.provider import LLMUnavailable
 from app.models import (
     ActionCard,
     Capacity,
+    CompareContext,
     CompareItem,
     CompareResult,
     ExplainResult,
@@ -40,6 +44,20 @@ from app.services import session as session_service
 from app.services.insights import get_banned_terms
 
 PROMPT_VERSION = "explain-v1"
+
+
+def _load_llm_yaml_value(key: str, default: Any, path: str = "config/llm.yaml") -> Any:
+    """config/llm.yaml에서 값 하나만 읽는다(app.llm.gemini의 로더와 별도로, explain.py는
+    provider 인스턴스 없이도 대화 화면(SPEC 2.9) 설명 체인 상한을 알아야 한다)."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return default
+    data = yaml.safe_load(text) or {}
+    return data.get(key, default)
+
+
+CHAT_EXPLAIN_DEADLINE_SECONDS: float = _load_llm_yaml_value("chat_explain_deadline_seconds", 8)
 
 EXPLAIN_SYSTEM = (
     "당신은 한국어 개인 부채 코치 앱 DONN의 설명 작성기입니다. 입력 JSON의 facts만으로 문장을 씁니다. "
@@ -241,8 +259,8 @@ def action_slots(card: ActionCard, profile: UserProfile, capacity: Capacity) -> 
     숫자가 있어 D4(`assert_no_digits`)를 항상 위반한다(모든 R0~R10 규칙 코드에 최소
     한 자리 숫자가 있다). `gist`(`RULE_GIST[rule_id]`)가 이미 규칙의 의미를 숫자 없는
     문장으로 전달하므로 rule_id는 내부 조회에만 쓰고 LLM 페이로드에는 넣지 않는다.
-    같은 이유로 `card.numbers`의 라벨 자체에 숫자가 섞인 키(예: monthly_income_x2의
-    "월소득의 2배")도 placeholders/values에서 제외한다.
+    같은 이유로 `card.numbers`의 라벨 자체에 숫자가 섞인 키가 있다면(현재
+    `app/services/actions.py`의 라벨 맵에는 없다) placeholders/values에서 제외한다.
     """
     facts: dict[str, Any] = {
         "title": card.title,
@@ -276,12 +294,16 @@ def action_slots(card: ActionCard, profile: UserProfile, capacity: Capacity) -> 
 
 def _call_llm_explain(
     provider: Any, facts: dict[str, Any], placeholders: dict[str, str], template_id: str, schema: dict,
+    *, deadline_seconds: Optional[float] = None,
 ) -> tuple[Optional[dict], Optional[str], int, list[str]]:
     """LLM 호출 1회를 시도한다. (data, model, latency_ms, problems)를 돌려준다.
 
     data가 None이면 반드시 템플릿으로 가야 한다(problems에 이유 코드가 있다).
     latency_ms는 실제로 provider.explain을 호출한 구간만 잰다(payload 검증 등
-    호출 전 단계는 포함하지 않는다).
+    호출 전 단계는 포함하지 않는다). `deadline_seconds`를 생략하면 provider.explain에
+    그 인자를 아예 넘기지 않는다(기존 테스트 더블처럼 그 키워드를 모르는 provider와도
+    호환되도록). 넘길 때는 SPEC 2.9의 대화 화면 설명(`explain_chat_compare`)처럼 provider
+    기본값보다 짧은 체인 상한을 강제하고 싶을 때만 지정한다.
     """
     if not hasattr(provider, "explain") or not provider.available():
         return None, None, 0, ["llm_unavailable"]
@@ -292,9 +314,13 @@ def _call_llm_explain(
     except ValueError:
         return None, None, 0, ["payload_has_digits"]
 
+    kwargs: dict[str, Any] = {"schema": schema}
+    if deadline_seconds is not None:
+        kwargs["deadline_seconds"] = deadline_seconds
+
     started = time.monotonic()
     try:
-        result = provider.explain(payload, template_id, EXPLAIN_SYSTEM, schema=schema)
+        result = provider.explain(payload, template_id, EXPLAIN_SYSTEM, **kwargs)
     except LLMUnavailable:
         latency_ms = int((time.monotonic() - started) * 1000)
         return None, None, latency_ms, ["llm_unavailable"]
@@ -581,3 +607,98 @@ def explain_action(
     )
     _save_explanation(explain_result)
     return explain_result
+
+
+# ---------------------------------------------------------------------------
+# 대화 화면 compare 안내 문장 (SPEC 2.9, 2.8 재사용)
+# ---------------------------------------------------------------------------
+
+CHAT_COMPARE_SCHEMA: dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {"summary": {"type": "STRING"}},
+    "required": ["summary"],
+}
+
+
+def _chat_compare_template(category_label: str, followup_changed: list[str], values: dict[str, str]) -> str:
+    """LLM 실패/검증 실패 시 쓰는 템플릿(chat_compare_prep_v1). 지금까지 routes.py에 그대로
+    있던 안내 문장과 같은 내용이다. "아래 버튼으로..." 유도 문장은 여기서 붙이지 않는다
+    (app/api/routes.py가 LLM 문장이든 템플릿 문장이든 동일하게 뒤에 덧붙인다)."""
+    if followup_changed:
+        labels = ", ".join(followup_changed)
+        return (
+            f"이전 조건에서 {labels}만 바꿔 다시 준비했어요. {category_label}, 금액 {values['amount']}, "
+            f"기간 {values['term_months']} 기준입니다."
+        )
+    return (
+        f"{category_label} 비교 조건을 준비했어요. 금액 {values['amount']}, 기간 {values['term_months']} "
+        "기준입니다."
+    )
+
+
+def explain_chat_compare(ctx: CompareContext, followup_changed: list[str], provider: Any) -> ExplainResult:
+    """대화 화면(SPEC 2.9)의 compare 의도 안내 문장. `followup_changed`는 이미 한국어로
+    번역된 라벨 목록이다(호출부 `app/api/routes.py`가 `_FOLLOWUP_LABELS`로 변환해 넘긴다).
+
+    저장하지 않는다(`explanations` 테이블 미사용, `cached`는 항상 False. 대화 로그가
+    이미 이 응답 문장을 기록한다). 체인 상한은 `config/llm.yaml`의
+    `chat_explain_deadline_seconds`(기본 8초)로 `explain_total_deadline_seconds`보다 짧게
+    강제한다(대화 화면은 "생각 과정"을 보여주며 기다리므로 더 빨리 포기하고 템플릿으로
+    가는 편이 낫다).
+    """
+    category_label = _CATEGORY_LABELS_KR.get(ctx.category.value, ctx.category.value)
+    facts: dict[str, Any] = {
+        "category": category_label,
+        "estimated_fields": [_ESTIMATED_FIELD_LABELS_KR.get(f, f) for f in ctx.estimated_fields],
+        "changed_fields": list(followup_changed),
+        "has_max_rate": "예" if ctx.max_rate is not None else "아니오",
+        "has_exclude_companies": "예" if ctx.exclude_companies else "아니오",
+    }
+    placeholders: dict[str, str] = {"amount": "비교 금액", "term_months": "비교 기간"}
+    values: dict[str, str] = {
+        "amount": f"{ctx.amount:,}원",
+        "term_months": f"{ctx.term_months}개월",
+    }
+    if ctx.max_rate is not None:
+        placeholders["max_rate"] = "금리 상한"
+        values["max_rate"] = f"{ctx.max_rate:.4g}%"
+
+    banned = get_banned_terms()
+    allowed = set(placeholders.keys())
+
+    data, model, latency_ms, problems = _call_llm_explain(
+        provider, facts, placeholders, "chat_compare_prep_v1", CHAT_COMPARE_SCHEMA,
+        deadline_seconds=CHAT_EXPLAIN_DEADLINE_SECONDS,
+    )
+
+    all_problems: list[str] = list(problems)
+    summary_text: Optional[str] = None
+
+    if data is not None:
+        summary_text, summary_problems = _process_text(
+            data.get("summary"), allowed, banned, values, max_chars=220, max_sentences=2, location="summary",
+        )
+        all_problems.extend(summary_problems)
+
+    if summary_text is not None and not all_problems:
+        source, llm_used, final_model = "llm", True, model
+    else:
+        source, llm_used, final_model = "template", False, None
+        summary_text = _chat_compare_template(category_label, followup_changed, values)
+        summary_text, _ = _guard_template(summary_text, {}, banned)
+
+    return ExplainResult(
+        kind="compare",
+        ref_id=f"chat:{ctx.category.value}:{ctx.amount}:{ctx.term_months}",
+        summary=summary_text,
+        item_reasons={},
+        source=source,
+        llm_used=llm_used,
+        model=final_model,
+        latency_ms=latency_ms,
+        template_id="chat_compare_prep_v1",
+        prompt_version=PROMPT_VERSION,
+        problems=all_problems,
+        cached=False,
+        created_at=datetime.now(),
+    )

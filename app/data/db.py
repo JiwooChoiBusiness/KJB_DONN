@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     llm_used    INTEGER NOT NULL DEFAULT 0,
     action_json TEXT,
     chips_json  TEXT,
+    trace_json  TEXT,
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id, id);
@@ -116,6 +117,16 @@ def get_conn(db_path: str | None = None) -> sqlite3.Connection:
     return conn
 
 
+def _migrate_chat_messages_trace_json(conn: sqlite3.Connection) -> None:
+    """기존 DB(이 컬럼이 생기기 전에 만들어진 파일)에 chat_messages.trace_json이 없으면
+    추가한다. `CREATE TABLE IF NOT EXISTS`는 이미 있는 테이블의 컬럼을 바꾸지 않으므로
+    별도 마이그레이션이 필요하다(SPEC 2.9)."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(chat_messages)").fetchall()}
+    if "trace_json" not in cols:
+        conn.execute("ALTER TABLE chat_messages ADD COLUMN trace_json TEXT")
+        conn.commit()
+
+
 def init_db(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
     """스키마를 만든다(이미 있으면 무시). 사용한 커넥션을 반환한다.
 
@@ -124,4 +135,5 @@ def init_db(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
     c = conn if conn is not None else get_conn()
     c.executescript(SCHEMA_SQL)
     c.commit()
+    _migrate_chat_messages_trace_json(c)
     return c

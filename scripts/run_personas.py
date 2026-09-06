@@ -117,12 +117,31 @@ class _RuleOnlyProvider:
         return {"available": False, "mode": "rule-only"}
 
 
+# 세션 스코프 상태(설명 캐시, 결정 기록, 대화 로그, 세션 프로필, 소비 패턴 분석). 이
+# 러너는 `data/donn.db`를 복사해 쓰므로(현실적인 상품 스냅샷을 재사용하기 위해),
+# snapshots/products는 그대로 두되 이 표들은 비워야 한다. 그렇지 않으면 과거 수동
+# 테스트에서 남은 캐시(예: app/services/explain.py의 explanations 테이블에 저장된
+# 행동 카드 설명)가 이번 실행에 섞여 들어와 "같은 입력이면 같은 결과"(SPEC 0.2) 원칙이
+# 깨진다(2026-09-06 발견: 채팅 action 의도가 explain_action 캐시를 타면서 드러남).
+_EPHEMERAL_TABLES = ("explanations", "decisions", "chats", "chat_messages", "session", "spending_features")
+
+
+def _clear_ephemeral_state(conn) -> None:
+    for table in _EPHEMERAL_TABLES:
+        conn.execute(f"DELETE FROM {table}")
+    conn.commit()
+
+
 def apply_isolation(temp_db_path: Path, llm_mode: str) -> None:
-    """임시 DB로 전환하고(환경변수 + 이미 임포트된 모듈 속성 둘 다), 금칙어 캐시를
-    비우고, --llm rule이면 채팅 LLM 공급자를 더미로 바꾼다."""
+    """임시 DB로 전환하고(환경변수 + 이미 임포트된 모듈 속성 둘 다), 세션 스코프 상태와
+    금칙어 캐시를 비우고, --llm rule이면 채팅 LLM 공급자를 더미로 바꾼다."""
     os.environ["DONN_DB_PATH"] = str(temp_db_path)
     db_module.DB_PATH = str(temp_db_path)
-    db_module.init_db(db_module.get_conn())
+    conn = db_module.init_db(db_module.get_conn())
+    try:
+        _clear_ephemeral_state(conn)
+    finally:
+        conn.close()
     insights_service._banned_cache = None
     if llm_mode == "rule":
         routes_module._llm_provider = _RuleOnlyProvider()
@@ -561,6 +580,12 @@ def run_persona(
             judge=judge_score,
         ))
         pr.add(f"chat-{q['id']}", ok, hard=hard, detail=detail)
+
+        # SPEC 2.9: /api/chat 응답에는 파이프라인 단계("생각 과정") trace가 실려야 한다.
+        # 문항 자체의 정답 여부와는 무관한 관측성 확인이라 soft로 둔다.
+        trace = body.get("trace") or []
+        pr.add(f"chat-{q['id']}-trace-present", bool(trace), hard=False,
+               detail="trace가 비어 있음" if not trace else "")
 
         # pii_phone: 저장된 사용자 메시지가 마스킹되어 있는지 GET /api/chats/{id}/messages로 확인
         if q["type"] == "pii_phone" and chat_id:

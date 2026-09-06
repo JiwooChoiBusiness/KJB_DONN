@@ -71,6 +71,27 @@ def test_slotfill_fill_substitutes_and_raises_on_missing_value():
         slotfill.fill("금리는 {rate_a}예요.", {})
 
 
+def test_slotfill_fill_corrects_josa_after_placeholder_to_match_value():
+    """SPEC 2.9 조사 보정: fill()이 플레이스홀더를 채운 뒤, 템플릿이 써둔 조사가 실제
+    값의 마지막 글자 받침과 맞지 않으면 고쳐 쓴다."""
+    assert slotfill.fill("{total_a}로 정리했어요.", {"total_a": "71,703원"}) == "71,703원으로 정리했어요."
+    assert slotfill.fill("{rate_a}은 낮아요.", {"rate_a": "5.47%"}) == "5.47%는 낮아요."
+    assert slotfill.fill("{term_months}이 남았어요.", {"term_months": "36개월"}) == "36개월이 남았어요."
+
+
+def test_slotfill_fill_josa_correction_covers_gwa_ira_ieyo_groups():
+    # 과/와: 받침 있는 값("원") 뒤에 "와"가 쓰였으면 "과"로, 받침 없는 값("%") 뒤에
+    # "과"가 쓰였으면 "와"로 고친다.
+    assert slotfill.fill("{a}와 비교했어요.", {"a": "1,000원"}) == "1,000원과 비교했어요."
+    assert slotfill.fill("{b}과 비교했어요.", {"b": "2%"}) == "2%와 비교했어요."
+    # 이라/라: "개"(받침 없음) -> "라", "원"(받침 있음) -> "이라"(이미 맞는 형태 유지)
+    assert slotfill.fill("{n}이라 좋아요.", {"n": "3개"}) == "3개라 좋아요."
+    assert slotfill.fill("{n}이라 좋아요.", {"n": "1,000원"}) == "1,000원이라 좋아요."
+    # 이에요/예요: 이미 맞는 형태면 그대로 유지되고, 안 맞으면 고친다.
+    assert slotfill.fill("총이자는 {total_a}이에요.", {"total_a": "500원"}) == "총이자는 500원이에요."
+    assert slotfill.fill("총이자는 {total_a}이에요.", {"total_a": "3%"}) == "총이자는 3%예요."
+
+
 def test_slotfill_josa_picks_by_batchim():
     assert slotfill.josa("사과", "은/는") == "는"   # 받침 없음
     assert slotfill.josa("가방", "은/는") == "은"   # 받침 있음

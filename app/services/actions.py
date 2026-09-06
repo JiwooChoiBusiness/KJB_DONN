@@ -28,7 +28,7 @@ _WON_LABELS: dict[str, str] = {
     "target_emergency_fund": "목표 비상금",
     "gap": "부족한 금액",
     "balance": "잔액",
-    "monthly_income_x2": "월소득의 2배",
+    "monthly_income_x2": "월소득의 두 배",
     "extra_monthly": "매월 추가상환액",
     "interest_saved": "절감 이자",
     "cost": "신청 비용",

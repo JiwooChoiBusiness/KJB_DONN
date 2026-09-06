@@ -412,7 +412,7 @@ data: <json 한 줄>
   - `stage`: `{"id": "guard"|"intent"|"compute"|"explain"|"check", "label": str, "status": "start"|"done"|"fallback"|"skip", "detail": str, "ms": int}`. 같은 id로 `start` 뒤에 `done`/`fallback`/`skip`이 한 번 온다.
     - `guard` "발화 점검": PII 마스킹과 위기 신호 확인. detail 예 "개인정보 마스킹 완료", "위기 신호 감지: 공적 상담 안내로 전환".
     - `intent` "의도·조건 추출": done detail "Gemini {model}, {ms}ms, 의도: {의도 라벨}"; fallback detail "규칙 파서로 대체(LLM 응답 없음)".
-    - `compute` "계산 엔진": 의도별 detail. compare "비교 조건 준비: {카테고리}, 금액 {amount}, 기간 {term}(추정 {n}개)" / 후속 질의 "이전 조건에서 {바뀐 항목}만 변경" / action "행동 규칙 R0~R10 평가: {n}건, 최우선 {rule_id}" / faq "제도 안내 검색: {title}" 또는 "해당 문서 없음" / retirement·saving·liquidity "재무비율·노후자금 계산" / schedule·scenario·spending "화면 안내". detail에는 코드가 계산한 숫자가 들어가도 된다(사용자 화면용이며 LLM으로 가지 않는다).
+    - `compute` "계산 엔진": 의도별 detail. compare "비교 조건 준비: {카테고리}, 금액 {amount}, 기간 {term}(추정 {n}개)" / 후속 질의 "이전 조건에서 {바뀐 항목}만 변경" / action "행동 규칙 평가: {n}건, 최우선 {카드 제목}" / faq "제도 안내 검색: {title}" 또는 "해당 문서 없음" / retirement·saving·liquidity "재무비율·노후자금 계산" / schedule·scenario·spending "화면 안내". detail에는 코드가 계산한 숫자가 들어가도 된다(사용자 화면용이며 LLM으로 가지 않는다).
     - `explain` "설명 작성": done detail "Gemini {model}, {ms}ms"; fallback detail "템플릿 문장 사용({problems 첫 코드})"; skip detail "규칙 문장"(설명 생성을 쓰지 않는 의도).
     - `check` "응답 점검": done detail "상품명·회사명·권유 표현 없음 확인"; fallback detail "금칙어 감지로 기본 안내로 대체".
   - `reply`: `ChatReply` JSON(`/api/chat`과 동일, `chat_id` 포함) + `trace`(종료 상태 stage 목록, 순서대로) + `model`(설명 또는 추출에 실제 응답한 모델명, 없으면 null).
@@ -439,6 +439,21 @@ data: <json 한 줄>
 - 배포: `.github/workflows/pages.yml`이 main push마다 `scripts/build_static_bundle.py`로 `app/`, `config/`, `kb/`, `seed/`를 `donn_bundle.zip`으로 묶어 `web/` 내용과 함께 Pages 아티팩트로 올린다(Pages 소스: GitHub Actions). 앱 소스는 번들에만 들어가고 키는 어디에도 없다.
 - 제약: 첫 로드 10~20초(이후 브라우저 캐시), 새로고침하면 세션·대화가 초기화된다(IndexedDB 영속화는 후속), Gemini 호출은 방문자 브라우저에서 직접 나간다(요청 본문은 서버 모드와 동일: 마스킹된 발화와 숫자 없는 facts).
 
+### 2.11 답변 경로(direct/internal/external), 노드 카드, 리소스 패널 (P4b-2)
+
+목적(PMO 2026-09-06, Ai365 Unified 워크스페이스 화면 참조): 채팅 답변이 KB 본문을 그대로 쏟아내지 않고, (1) 질문을 세 경로 중 하나로 보내고 (2) 어떤 노드가 무엇을 했는지 카드로 보여주며 (3) 답변에 쓰인 자료를 오른쪽 "리소스" 패널에 모아 보여주고 (4) 답변은 제목·굵게·목록이 있는 읽기 좋은 형식으로 낸다.
+
+- 경로(코드가 결정, `ChatReply.route`):
+  - `safety`: 위기 발화(기존 2.9 분기).
+  - `direct`: 자료가 필요 없는 질문(인사, 할 수 있는 일, 용어의 일반 정의 중 KB에 없는 것). LLM이 있으면 짧게 직접 답하고(개인 수치·상품명·회사명 금지, 금칙어·권유 표현 검사), 없으면 고정 안내. 의도 스키마에 `direct`를 추가한다.
+  - `internal`: 기존 의도(compare, schedule, scenario, action, spending, retirement, saving, liquidity, faq에 KB 문서가 있을 때). 내부 노드가 자료를 모아 답한다.
+  - `external`: faq인데 KB에 맞는 문서가 없거나(검색 점수 임계값 미만) "최신·요즘·지금 금리·뉴스"처럼 시점성 질문일 때. Gemini의 Google 검색 그라운딩(`tools: [{"google_search": {}}]`)으로 답하고 `groundingMetadata`의 웹 출처(title, uri)를 리소스로 붙인다. 요약문은 "외부 검색 요약(확인 필요)" 배지와 함께 보여주고, 금칙어(상품명·회사명)가 검출되면 요약을 버리고 출처 링크만 보여준다. Google 검색 제안(`searchEntryPoint.renderedContent`)이 오면 화면에 그대로 표시한다(이용약관 요건). 그라운딩이 불가능(키·모델·한도)하면 `kb/*.md` frontmatter의 공식 기관 링크 목록을 "외부 안내"로 대신 보여준다.
+- 노드 카드(`ChatReply.trace` 항목 확장, 2.9의 stage와 같은 dict): `id`는 guard, intent, direct, debt_data(내 부채 자료), calc(계산 엔진), kb(제도 안내), products(공시 자료), external(외부 검색), explain(설명 작성), check. 추가 키 `steps: list[str]`(사람이 읽는 단계 문장, 예 "대출 4건의 상환표를 계산했어요", "제도 문서 2편에서 3개 문단을 참조했어요")와 `resource_refs: list[str]`(`ChatResource.ref`). 화면은 이 항목들을 Ai365의 에이전트 카드처럼 "사용한 노드 N개" 묶음으로 그리고, 진행 중에는 실시간으로 채운다.
+- 리소스(`ChatReply.resources: list[ChatResource]`): kind는 profile(프로필), loan(대출 1건), calc(상환표·시나리오·비교 결과·행동 카드, ref=decision_id 등), kb(문서, ref=slug#section, verified_at, url=출처), products(공시 스냅샷, detail "2026년 8월 공시, 후보 78건"), policy(규제 기준값, needs_verification), external(웹 출처). 화면 오른쪽 패널에 kind별로 묶어 개수와 함께 표시하고, 클릭하면 해당 화면·패널(내 부채, 공시 비교 결과, 제도 안내 패널, 외부 링크 새 창)을 연다.
+- KB 답변 형식(faq internal): `answer_format="markdown"`. 구조는 "한 줄 요약" → "핵심 3개(문서 섹션당 1문장, 굵은 소제목)" → "출처(문서명, 섹션, 확인일)". LLM이 있으면 참조 문단만 입력으로 넣어 요약·핵심을 쓰게 하고(공개 제도 문서이므로 D4 대상 아님), 답변에 나온 모든 숫자가 참조 문단 안에 실제로 있는지 검사한다(없으면 규칙 렌더링으로 폴백). 규칙 모드에서는 섹션 제목과 첫 문장으로 같은 구조를 만든다. 본문 전체를 붙여 넣지 않는다.
+- 여러 노드가 필요한 질문(예 "내 상황에서 금리인하요구권 쓸 수 있어?")은 주 의도 노드(debt_data+calc)와 kb 노드를 함께 실행하고 리소스를 합친다.
+- 러너 골든 질문에 direct/external 사례를 추가하고, external은 네트워크 테스트(`DONN_NETWORK_TESTS=1`)로만 실호출한다. 단위 테스트는 그라운딩 응답을 모킹한다.
+
 ## 3. 화면 규격 (web/)
 
 - 단일 페이지, 빌드 없음. `index.html`, `app.js`, `styles.css`. 글꼴은 Pretendard(jsdelivr CDN, 오프라인이면 system-ui·"Malgun Gothic" 폴백). 그 외 외부 CDN 의존 없음.
@@ -460,6 +475,7 @@ data: <json 한 줄>
 - 대화 화면(2.9): 라우트 `#chat`. 사용자가 홈 입력창에서 메시지를 보내면 즉시 `#chat`으로 전환한다(홈 자체는 그대로, 첫 화면 LLM 0회 유지). 구성: 상단 헤더(뒤로 가기 → 홈, 대화 제목, "Gemini 체인" 모델 라벨), 가운데 대화 스레드(사용자 말풍선은 오른쪽, 응답은 왼쪽), 하단에 고정된 입력 카드(홈과 같은 카드, 375px에서도 하단 고정). 사이드바 "최근"에서 대화를 열면 `#chat`으로 간다.
 - 응답 렌더링 순서: (1) 사용자 말풍선 추가 → (2) "생각 과정" 블록이 `stage` 이벤트마다 갱신된다(진행 중 스피너, done 체크, fallback 주의 색, skip 흐리게. 각 줄은 label, detail, ms) → (3) `reply`가 오면 블록을 한 줄 요약("생각 과정 5단계 · 3.2초", 클릭해 펼침)으로 접고 응답 문장을 타자 효과로 표시한다(글자당 8~15ms, 전체 2.5초 이내가 되도록 속도 조절, 클릭하면 즉시 전체 표시) → (4) 인라인 액션 카드(prepare_compare: 조건 요약과 "조건 확인하고 비교하기" 버튼, open_view: 이동 버튼, open_kb: 기존 제도 안내 카드) → (5) 칩 행. 자동 화면 이동은 하지 않는다(버튼으로 이동하고 뒤로 가기로 대화에 복귀).
 - 배지: `llm_used`면 "AI 응답"과 모델명, 아니면 "규칙 기반 응답". AI 고지는 대화 화면에도 보인다. 저장된 대화를 다시 열면 각 응답의 trace가 접힌 상태로 표시된다. 스트림 실패(비 2xx, 네트워크)면 `POST /api/chat`으로 폴백해 생각 과정 없이 같은 렌더링을 한다.
+- 답변 경로·노드·리소스(2.11): 대화 화면 오른쪽에 접을 수 있는 "리소스" 패널(데스크톱은 고정 열, 1024px 미만은 답변 아래 접이식)이 `resources`를 kind별 그룹과 개수로 보여준다. 응답 말풍선 위에는 노드 카드 묶음("사용한 노드 N개": 각 카드에 이름, 단계 문장 목록, 참조 리소스 수)이 오고, 생성 중에는 stage 이벤트로 실시간 갱신된다. `answer_format="markdown"`이면 제목·굵게·목록·번호 목록만 안전하게 렌더링한다(링크는 resources의 url만 허용, 그 밖의 HTML은 이스케이프). external 답변에는 "외부 검색 요약(확인 필요)" 배지와 Google 검색 제안 영역을 표시한다.
 
 ## 4. 골든 벡터 (tests)
 
@@ -524,3 +540,4 @@ python run.py 3676       # Claude Code 테스트용
 - (설명 문장 보강) `app/models.py::ExplainResult` 신설, 2.8절 추가. `LLMProvider.explain`에 선택 인자 `schema`가 생겼다(없으면 기존처럼 텍스트). `config/llm.yaml`에 `explain_total_deadline_seconds`(15)를 추가했다. `db.explanations` 테이블 신설. API 표에 `/api/compare/{decision_id}/explain`(POST, GET)과 `/api/actions/{action_id}/explain`(POST)을 추가했다. 화면 규격 3절 마지막 항목 참고.
 - (대화 스트리밍) 2.9절 추가. `ChatReply`에 `trace: list[dict] = []`, `model: str | None = None`을 추가했다. `chat_messages.trace_json` 컬럼(마이그레이션). `POST /api/chat/stream` 신설. `config/llm.yaml`에 `chat_explain_deadline_seconds`(8). `LLMProvider.explain`에 `deadline_seconds` 선택 인자.
 - (배포 준비) 2.10절 추가. `seed/products_seed.json.gz`, `scripts/export_seed.py` 신설, `app/main.py`에 시드 적재·자동 적재·CORS 환경변수와 DB 폴더 생성, `run.py`에 `PORT` 지원. 브라우저 전용 모드(Pyodide)는 PMO 결정으로 보류(설계만 2.10절에 남김).
+- (답변 경로·리소스) 2.11절 추가. `app/models.py`에 `ChatResource` 신설, `ChatReply`에 `route`, `resources`, `answer_format` 추가(기본값이라 기존 호출 호환).

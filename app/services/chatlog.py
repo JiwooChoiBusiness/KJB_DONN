@@ -75,17 +75,21 @@ def create_chat(profile_id: str, title: str = "") -> dict[str, Any]:
 
 def append_message(chat_id: str, role: str, text: str, *, llm_used: bool = False,
                    action: Optional[dict[str, Any]] = None,
-                   chips: Optional[list[dict[str, Any]]] = None) -> int:
+                   chips: Optional[list[dict[str, Any]]] = None,
+                   trace: Optional[list[dict[str, Any]]] = None) -> int:
+    """trace(SPEC 2.9 생각 과정, 종료 상태 stage 목록)는 생략하면 저장하지 않는다
+    (get_messages가 빈 리스트로 채워 돌려준다)."""
     now = _now()
     conn = db.get_conn()
     try:
         cur = conn.execute(
-            "INSERT INTO chat_messages (chat_id, role, text, llm_used, action_json, chips_json, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO chat_messages (chat_id, role, text, llm_used, action_json, chips_json, trace_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 chat_id, role, text, 1 if llm_used else 0,
                 json.dumps(action, ensure_ascii=False) if action is not None else None,
                 json.dumps(chips, ensure_ascii=False) if chips is not None else None,
+                json.dumps(trace, ensure_ascii=False) if trace is not None else None,
                 now,
             ),
         )
@@ -100,7 +104,7 @@ def get_messages(chat_id: str) -> list[dict[str, Any]]:
     conn = db.get_conn()
     try:
         rows = conn.execute(
-            "SELECT id, role, text, llm_used, action_json, chips_json, created_at FROM chat_messages "
+            "SELECT id, role, text, llm_used, action_json, chips_json, trace_json, created_at FROM chat_messages "
             "WHERE chat_id = ? ORDER BY id",
             (chat_id,),
         ).fetchall()
@@ -115,6 +119,7 @@ def get_messages(chat_id: str) -> list[dict[str, Any]]:
             "llm_used": bool(r["llm_used"]),
             "action": json.loads(r["action_json"]) if r["action_json"] else None,
             "chips": json.loads(r["chips_json"]) if r["chips_json"] else [],
+            "trace": json.loads(r["trace_json"]) if r["trace_json"] else [],
             "created_at": r["created_at"],
         })
     return out
