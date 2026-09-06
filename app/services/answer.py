@@ -368,7 +368,9 @@ def _rule_based_kb_answer(
         return doc.title, []
     focus_section, focus_text = focus if focus else (None, "")
     focus_sentence = _first_clean_sentence(focus_text, max_len=220) if focus_text else ""
-    summary = focus_sentence or _first_clean_sentence(doc.sections.get(sections[0], ""))
+    # 직접 답변 줄("바로 답하면")이 따로 붙으므로 규칙 경로 요약은 문서 첫 섹션 문장으로 둔다(같은 문장 반복 방지)
+    overview_name = next((n for n in sections if n != focus_section), sections[0])
+    summary = _first_clean_sentence(doc.sections.get(overview_name, "")) or focus_sentence
     if not summary:
         summary = doc.title
     points = []

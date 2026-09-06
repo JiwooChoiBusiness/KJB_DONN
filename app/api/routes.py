@@ -1195,10 +1195,17 @@ def _build_chat_reply(
                 reply_text = answer_service.format_whatif_answer(result, conclusion)
                 answer_format = "markdown"
 
+                # 화면이 같은 가정(대상 대출, 매달 추가 상환액)으로 상환표를 다시 그릴 수 있게 칩에 싣는다.
+                whatif_params: dict[str, Any] = {}
+                loan_id_hint = (result.scenario_params or {}).get("loan_id")
+                if loan_id_hint:
+                    whatif_params["target_loan_id"] = loan_id_hint
+                if result.tool == "extra_payment" and (result.inputs or {}).get("extra_monthly"):
+                    whatif_params["extra"] = int(result.inputs["extra_monthly"])
                 chips.append(Chip(id="chip-chat-whatif-scenario", text="시나리오로 확인하기", tier=1,
-                                   intent="scenario", params={}))
+                                   intent="scenario", params=dict(whatif_params)))
                 chips.append(Chip(id="chip-chat-whatif-schedule", text="상환표 보기", tier=1,
-                                   intent="schedule", params={}))
+                                   intent="schedule", params=dict(whatif_params)))
                 if result.tool == "refinance":
                     sp = result.scenario_params
                     chips.append(Chip(

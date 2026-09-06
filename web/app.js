@@ -639,7 +639,7 @@ const state = {
      ('scenario' | 'schedule', SPEC 2.13 / 2.15의 "시나리오로 확인하기"). */
   debts: {
     selectedLoanId: null, editingLoanId: null, schedule: null,
-    pendingFocusLoanId: null, pendingFocus: null,
+    pendingFocusLoanId: null, pendingFocus: null, pendingExtra: null,
   },
   /* 결정 기록: focusId 가 있으면 그 행을 자동으로 펼치고 스크롤한다(SPEC 2.14 "이전 결과 보기"). */
   decisions: { focusId: null },
@@ -1432,13 +1432,15 @@ function buildLoansSection(profile, hasProfile) {
      대출을 지정했으면 그 대출을, 아니면 금리가 가장 높은 대출을 열어 시나리오까지 보여준다. */
   const pendingId = state.debts.pendingFocusLoanId;
   const pendingFocus = state.debts.pendingFocus;
+  const pendingExtra = state.debts.pendingExtra;
   state.debts.pendingFocusLoanId = null;
   state.debts.pendingFocus = null;
+  state.debts.pendingExtra = null;
   let focusLoanId = null;
   if (pendingId && loans.some((l) => l.id === pendingId)) focusLoanId = pendingId;
   else if (pendingFocus && loans.length) focusLoanId = highestRateLoanId(loans);
   if (focusLoanId) {
-    setTimeout(() => selectLoan(focusLoanId, profile, scheduleArea, pendingFocus), 0);
+    setTimeout(() => selectLoan(focusLoanId, profile, scheduleArea, pendingFocus, pendingExtra), 0);
   }
 
   return wrap;
@@ -1492,7 +1494,7 @@ function buildLoanRow(loan, profile) {
 }
 
 /* focusSection('scenario' | 'schedule')이 있으면 다 그린 뒤 그 구간으로 화면을 옮긴다. */
-async function selectLoan(loanId, profile, scheduleArea, focusSection) {
+async function selectLoan(loanId, profile, scheduleArea, focusSection, extraMonthly) {
   state.debts.selectedLoanId = loanId;
   document.querySelectorAll('#loansTbody tr').forEach((tr) => tr.classList.toggle('selected', tr.dataset.loanId === loanId));
   if (!scheduleArea) scheduleArea = document.getElementById('scheduleArea');
@@ -1501,8 +1503,19 @@ async function selectLoan(loanId, profile, scheduleArea, focusSection) {
   clearNode(scheduleArea);
   scheduleArea.appendChild(h('p', { class: 'loading-text' }, '상환표 불러오는 중...'));
 
-  const [schedRes, scenRes] = await Promise.all([Api.getLoanSchedule(loanId), Api.getScenarios(60)]);
+  const extra = Number(extraMonthly) > 0 ? Number(extraMonthly) : 0;
+  const [schedRes, scenRes] = await Promise.all([Api.getLoanSchedule(loanId, extra), Api.getScenarios(60)]);
   clearNode(scheduleArea);
+  if (extra > 0) {
+    /* 대화의 계산형 질의("매달 N원 더 갚으면?")에서 넘어온 가정을 그대로 적용한 상환표임을 알린다. */
+    const note = h('div', { class: 'notice-box whatif-note' },
+      h('span', {}, `매달 ${fmtWon(extra)}을 추가로 갚는다고 가정한 상환표예요. `),
+      h('button', {
+        type: 'button', class: 'btn btn-secondary', 'aria-label': '추가 상환 가정 지우기',
+        onClick: () => selectLoan(loanId, profile, scheduleArea, focusSection, 0),
+      }, '가정 지우기'));
+    scheduleArea.appendChild(note);
+  }
 
   if (!schedRes.ok) {
     scheduleArea.appendChild(noticeBox('상환표를 불러오지 못했습니다.', { error: true }));
@@ -5099,6 +5112,7 @@ async function handleChipClick(chip) {
          열고 상환표(schedule) 또는 시나리오(scenario) 구간으로 화면을 옮긴다. */
       state.debts.pendingFocusLoanId = (chip.params && (chip.params.target_loan_id || chip.params.loan_id)) || null;
       state.debts.pendingFocus = chip.intent;
+      state.debts.pendingExtra = (chip.params && Number(chip.params.extra) > 0) ? Number(chip.params.extra) : null;
       navigateTo('debts');
       break;
     case 'spending':
